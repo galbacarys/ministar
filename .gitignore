@@ -1,0 +1,35 @@
+# Windows/WSL artifacts
+*.exe
+*.dll
+*.pdb
+*.obj
+*.ilk
+
+# Build output
+build/
+dist/
+bin/
+obj/
+node_modules/
+__pycache__/
+*.pyc
+
+# Local data — never commit frames or stacks
+data/
+*.fits
+*.fit
+*.fts
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.tif
+*.tiff
+*.xisf
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
