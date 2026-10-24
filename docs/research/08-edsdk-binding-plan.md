@@ -72,8 +72,12 @@ actually loses time.
   `public string Category { get; } = "Canon";`, `HasShutter => true`.
   Contains **44** hits for `Bulb`, 11 `EdsSendCommand`, `EdsDownloadEvfImage`,
   `EdsGetPropertyDesc` (×4), `EdsSetCapacity` (×2).
-- Note: `EdsExtendShutDownTimer` → **0 hits**. N.I.N.A. does not bother with it, which weakens
-  the "camera will sleep mid-session" worry from brief 05.
+- Note: `EdsExtendShutDownTimer` → **0 hits in the binding**, but **N.I.N.A. absolutely does
+  extend the shutdown timer** — see §7. It is not a standalone export; it is
+  `EdsSendStatusCommand(cam, kEdsCameraStatusCommand_ExtendShutDownTimer, 0)`, which is why
+  grepping for the symbol missed it. An earlier revision of this brief concluded N.I.N.A.
+  "does not bother" — **that was wrong**, and the field logs prove the camera does try to sleep
+  mid-session.
 
 ### 3.1 The bulb strategy — the single most valuable thing to port
 
@@ -203,7 +207,87 @@ fix) is a ~150-line patch, not a driver extension.
 
 ---
 
-## 7. Still unverified
+## 7. Field telemetry: what actually failed on this exact rig
+
+N.I.N.A.'s own logs on this machine (`%LOCALAPPDATA%\NINA\Logs`, 28 sessions, 6.3 MB,
+2026-05-09 → 2026-07-31) were mined directly. This is not documentation — it is the EOS 60D
+being driven by EDSDK, on this laptop, for 3043 attempted exposures.
+
+### 7.1 The dominant failure mode is `EDS_ERR_DEVICE_BUSY`
+
+Every `EDS_ERR_*` code seen, across all 28 sessions:
+
+| Code | Count |
+|---|---|
+| `EDS_ERR_DEVICE_BUSY` | **2439** |
+| `EDS_ERR_COMM_DISCONNECTED` | 42 |
+| `EDS_ERR_INVALID_HANDLE` | 4 |
+| `EDS_ERR_PROPERTIES_UNAVAILABLE` | 3 |
+
+`DEVICE_BUSY` dominates by ~50:1. N.I.N.A. retries aggressively on this path (it logs up to
+three attempts per exposure — `BULB via PressShutterButton`, `MANUAL via PressShutterButton`,
+`MANUAL via TakePicture`), which is why the counts exceed the number of exposures.
+
+### 7.2 It is not spread evenly — and the trend is good
+
+| Session | Attempted exposures | `DEVICE_BUSY` |
+|---|---|---|
+| 2026-05-09 | 15s×153, 5s×109, 2s×45 | **683** |
+| 2026-05-14 | 5s×35, 3s×15 | **107** |
+| 2026-06-17 | 30s×367, 5s×188, 15s×122, 2s×58 | **863** |
+| 2026-07-14 | 30s×192, 2s×94, 5s×85 | **762** |
+| 2026-06-02 | 5s×44, 60s×33, 2s×25 | 0 |
+| 2026-07-20 | 2s×78, 5s×60, 4s×34, 3s×32 | 0 |
+| 2026-07-29 | 4s×528, 60s×132, 15s×20 | **0** |
+
+- **9 of 28 sessions** hit `DEVICE_BUSY`; 19 did not.
+- **The three most recent substantive sessions are clean** — 2026-06-02, 2026-07-20 and
+  2026-07-29 ran ~1100 exposures with zero `DEVICE_BUSY`. The user's "it works nearly
+  flawlessly" is an accurate description of the current state.
+- The bad sessions cluster around **30 s-dominated** runs (2026-06-17 and 2026-07-14 both have
+  30 s as the top exposure). ⚠️ The mechanism is **UNVERIFIED** — plausible candidates are the
+  30 s Tv/bulb boundary, a mode-dial state, or an illegal-property-value rejection being reported
+  as `DEVICE_BUSY` (the known ambiguity from 02). Worth reproducing deliberately, because 30 s
+  sits right at the edge of our own usable range.
+- Our exposure range (0.4–3 s, per 08 §6) sits squarely inside the historically clean
+  configuration — 2026-07-29 did **4 s × 528** with zero errors. That is the most encouraging
+  single data point in this research.
+
+### 7.3 `EDS_ERR_COMM_DISCONNECTED` is real and needs handling
+
+42 occurrences. USB disconnects happen. A long-lived daemon must detect
+`COMM_DISCONNECTED`/`INVALID_HANDLE`, tear down the session, and reopen — not crash and not
+silently stop capturing. N.I.N.A. also logs camera-removed/added handling.
+
+### 7.4 The camera *does* try to sleep mid-session
+
+```
+2026-07-29T20:34:53|INFO|EDCamera.cs|Camera_SDKStateEvent|CANON: Will soon shutdown -
+                                      sending request to extend shutdown timer
+2026-07-29T20:46:05|INFO|EDCamera.cs|Camera_SDKStateEvent|CANON: Will soon shutdown -
+                                      sending request to extend shutdown timer
+```
+
+Confirmed on real hardware: the `kEdsStateEvent_WillSoonShutDown` event fires, and N.I.N.A.
+responds with the extend request. **We need this.** Two occurrences in a 90-minute session means
+it is not a theoretical concern for a multi-hour untracked run. Implement as
+`EdsSendStatusCommand(cam, kEdsCameraStatusCommand_ExtendShutDownTimer, 0)` on the
+`WillSoonShutDown` state event.
+
+### 7.5 What this changes in the plan
+
+1. **Retry logic is mandatory, not polish.** `DEVICE_BUSY` at this frequency means every
+   capture call needs bounded retry with backoff. But see 02: `DEVICE_BUSY` also means "illegal
+   property value", so a blind retry loop can spin forever on a genuinely invalid setting.
+   Distinguish by consulting `EdsGetPropertyDesc` before setting Tv/Av/ISO (already in §2 item 3).
+2. **`EdsSendStatusCommand` + `WillSoonShutDown` is now a v1 requirement** (§7.4), not a maybe.
+3. **Reconnect handling is a v1 requirement** (§7.3).
+4. The bulb path is confirmed unnecessary for our range — every `BulbStart`/`BulbEnd`-style
+   attempt in the logs happened in runs that were failing anyway.
+
+---
+
+## 8. Still unverified
 
 - Whether EDSDK 13.x changed any command codes vs the 13.12 headers N.I.N.A.'s `EDSDK.cs` was
   written against. N.I.N.A. is current, so probably fine, but confirm the constants we add
