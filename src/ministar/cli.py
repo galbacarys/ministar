@@ -30,6 +30,19 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_hfd(args: argparse.Namespace) -> int:
+    from ministar.focus.metrics import measure_hfd
+    from ministar.io.fits import read_fits
+
+    image, header = read_fits(args.image)
+    hfd, stars = measure_hfd(image, max_stars=args.max_stars)
+    shape = "x".join(str(n) for n in image.shape)
+    print(args.image)
+    print(f"  {shape} {image.dtype}  FL={header.get('FOCALLEN')}  EXPTIME={header.get('EXPTIME')}")
+    print(f"  stars {stars}   median HFD {hfd:.2f} px")
+    return 0 if stars > 0 else 1
+
+
 def _cmd_solve(args: argparse.Namespace) -> int:
     settings = Settings.load(Path(args.home) if args.home else None)
     if settings.astap is None:
@@ -74,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", help="print version").set_defaults(func=_cmd_version)
     sub.add_parser("preflight", help="check the environment").set_defaults(func=_cmd_preflight)
+
+    p_hfd = sub.add_parser("hfd", help="measure star sharpness (HFD) in an image")
+    p_hfd.add_argument("image")
+    p_hfd.add_argument("--max-stars", type=int, default=40)
+    p_hfd.set_defaults(func=_cmd_hfd)
 
     p_solve = sub.add_parser("solve", help="plate solve one image")
     p_solve.add_argument("image")

@@ -128,6 +128,8 @@ src/ministar/
   cli.py           `ministar preflight | solve | version`
   solver/astap.py  ASTAP driver; the .ini contract is fully verified
   camera/          base.py = interface + Tv table; edsdk.py = not written yet
+  focus/           autofocus: HFD metric, V-curve fit, motion planner, calibration
+  io/fits.py       minimal FITS reader (no astropy)
   stack/           not written yet (design in 03, 06)
   reframe/         not written yet (spec in 07)
   ui/              not written yet (toolkit in 09)
@@ -144,6 +146,7 @@ Source of truth is this checkout. Windows only ever sees a disposable copy.
 ```bash
 uv venv && uv pip install -e '.[dev]'
 .venv/bin/python -m pytest -q
+.venv/bin/python -m ministar hfd <frame.fit>   # star sharpness on a real frame
 .venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
 
 ./tools/sync.sh                       # mirror to C:\ministar\build

@@ -388,9 +388,11 @@ Items 1, 2, 4 and 6 need no hardware; 3, 5, 7, 8 need the camera and a clear nig
 - **Does `DriveLensEvf` move the lens when the lens switch is set to MF?** Determines whether we
   must toggle AF mode around focusing. The plugin's warning implies AF is required for drive and
   hazardous for capture — so the workflow is probably *focus in AF, run in MF*.
-- **Does the 60D support `DriveLensEvf` at all?** It is a 2010 body. The plugin supports "Canon"
-  broadly but the 60D is not specifically confirmed. ⚠️ This is the single highest-risk unknown
-  and is a five-minute test with a connected camera.
+- ~~Does the 60D support `DriveLensEvf` at all?~~ **Resolved 2026-10-24: yes.** User-confirmed
+  from experience with this body. The highest-risk unknown in this brief is closed; the design
+  stands as written. Still worth an automated motion-verification pulse on first connect (§9),
+  because "the body supports it" and "this lens moves when I pulse it" are different claims and
+  the second one is the one the algorithm actually depends on.
 - Whether `Near3` is a single large pulse or a burst of small ones (affects the motion planner).
 - Whether the settle delay can be adaptive (e.g. proportional to pulse size).
 - Whether best focus drifts enough over a typical 2-3 hour session to matter. Physics says yes
