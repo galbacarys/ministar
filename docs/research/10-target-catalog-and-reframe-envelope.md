@@ -149,6 +149,60 @@ The curve is non-monotonic (60° is worst, 90° is better than 60°) because the
 than square. Do not assume "aligned is better" in some simple sense — use the measured table, or
 just evaluate `(W − |dx|)(H − |dy|)` directly for the actual `ψ`.
 
+#### The gain is exactly the aspect ratio, and it is a one-time action
+
+Run-time available at a *fixed* retained fraction, relative to the long-axis optimum:
+
+| drift angle | 0° | 15° | 30° | 45° | 60° | 75° | 90° |
+|---|---|---|---|---|---|---|---|
+| f = 0.90 | 1.00× | 0.75× | 0.63× | 0.58× | 0.57× | 0.59× | 0.67× |
+| f = 0.80 | 1.00× | 0.77× | 0.65× | 0.60× | 0.58× | 0.60× | 0.67× |
+| f = 0.50 | 1.00× | 0.83× | 0.72× | 0.66× | 0.63× | 0.63× | 0.67× |
+
+Two exact results fall out, and they are cleaner than the tables suggest:
+
+- **The long-axis gain is exactly `W/H`** — 1.502× for a 3:2 frame — and this holds at every
+  retention fraction. Aligning with the short axis gives exactly `1/(W/H)`. The whole business is
+  just the aspect ratio.
+- **The penalty is worst around 60°**, at 0.57-0.63×, not at 45°.
+
+> ⚠️ **Correction to an earlier draft of this brief.** It claimed a "7× usable field" benefit at
+> 400 mm / 10 min. That figure is real but misleading: it is a *cliff-proximity artifact* — at a
+> fixed 10-minute interval near the collapse point, a small change in effective drift produces a
+> huge relative change in megapixels. The honest, interval-independent headline is **1.5× more
+> time** (= the aspect ratio). Near the collapse point the MP difference can look much larger,
+> but do not plan around that number.
+
+**Why this is a one-time setup action, not a per-run chore.** `ψ = PA_y − q` is constant for a
+camera that is not moving, so the drift direction in image coordinates is fixed for a run — and
+rotating the camera changes `ψ`, hence the drift angle, **1:1**. So the whole feature is:
+
+```
+1. solve
+2. compute the drift direction in image coords from psi
+3. theta = angle between that direction and the frame's long axis
+4. if |theta| > ~10 deg: instruct "rotate the camera by -theta"
+5. let the user rotate, re-solve, confirm theta ~ 0 -> done for this target
+```
+
+Three caveats, all real:
+
+1. **`ψ` changes when you re-aim at a different target.** Pan/tilt changes the camera's
+   orientation relative to the local horizontal frame (this is the same alt-az field rotation that
+   makes per-axis alt/az readout degenerate near the zenith, 07 §3), so re-check the rotation
+   advisor per target rather than once per night. Between small reframes it is effectively
+   constant.
+2. **Rotating disturbs the pointing.** On a ball or 3-way head you loosen, rotate, retighten. Do
+   the rotation adjustment *before* fine aiming, never after — otherwise the user re-centres the
+   target and then wrecks it.
+3. **It competes with object framing.** OpenNGC carries `MajAx`, `MinAx` and `PosAng`, so for an
+   elongated target the user may want the frame's long axis *along the object's* long axis. Both
+   constraints are computable; show the conflict rather than silently picking one. Round targets
+   (most planetaries, clusters) have no conflict at all.
+
+Rotation does **not** change the drift *magnitude* — only its direction in the frame. There is no
+cleverer use of the roll axis than aligning with the long side; the optimiser is that simple.
+
 ### 2.1d Worked example: this rig at 400 mm
 
 Canon 60D + 400 mm: 2.212 ″/px, field **3.20° × 2.13°**, 18.02 MP, drift along the long axis.
