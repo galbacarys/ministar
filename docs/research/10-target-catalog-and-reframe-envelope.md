@@ -274,25 +274,81 @@ Everything else is just the clock:
 Because the budget is a fixed number of *pixels*, the interval is linear in focal length and
 inverse in `cos δ`. That is the whole dependency.
 
-#### The invariant worth putting in the UI
+#### ⚠️ Cadence, not trailing, is the binding constraint
 
-The sub length is itself set by the trailing limit (03): `t_sub = trail_px · scale / (Ω cos δ)`.
-Dividing, the number of frames in a run is
+An earlier draft of this section claimed an invariant — `frames_per_run = D_budget / trail_px`,
+**~1450 frames per adjustment for any lens at any declination** — and used it to warn that
+400 mm would burn ~14,500 shutter actuations a night.
+
+**Both were wrong**, because the invariant silently assumes the camera can be triggered at the
+trailing-limited rate. It cannot. Real cadence on this rig is **one frame every ~2-3 s** once
+exposure, USB download, live stacking and solving are accounted for. At 400 mm the trailing limit
+is 0.29-0.42 s, so the pipeline cannot come close to feeding the camera as fast as the geometry
+permits.
+
+The governing constraint is therefore **duty cycle**:
 
 ```
-frames_per_run = D_budget / trail_px
+t_sub  = min(trailing_limit, cadence)      # never expose longer than you can deliver
+duty   = t_sub / cadence                   # fraction of wall time actually integrating
 ```
 
-**declination and focal length cancel entirely.** At 8 MP with a 2 px trail allowance that is
-**~1450 frames per adjustment, for any lens, at any declination.** Reassuring for tooling, and a
-useful sanity check: if a proposed run implies a wildly different frame count, something upstream
-is wrong.
+At a 3 s cadence with a 2 px trail allowance:
 
-⚠️ **But at 400 mm the frame count is also the warning.** 1450 subs at 0.29 s is 1450 shutter
-actuations per run. A night of ten runs is ~14,500 actuations; the 60D's shutter is rated around
-100-150k. **Ten untracked nights at 400 mm would take a meaningful bite out of the shutter's
-life.** That is an argument the SNR curve does not make, and the app should surface it — a
-"frames this session / shutter actuations" counter next to the megapixel readout.
+| focal | dec 0° | dec +45° | dec +69° |
+|---|---|---|---|
+| 50 mm | 78% | **100%** | 100% |
+| 100 mm | 39% | 55% | 100% |
+| 200 mm | 20% | 28% | 55% |
+| 400 mm | **10%** | **14%** | 27% |
+
+At 400 mm you collect photons for **one seventh of the session**. That, not shutter wear, is the
+real cost — and it compounds with the read-noise penalty 03 already quantified for sub-second
+subs.
+
+**Sub-length rule (supersedes the framing in 03):** the optimum is not the trailing limit, it is
+`min(trailing_limit, cadence)`. Where trailing permits, expose for the *full* cadence — dead time
+between frames is pure loss. Shorten only when trailing forces it.
+
+#### Pipeline cadence sets the maximum usable focal length
+
+Equating the trailing limit to the cadence gives a hard ceiling:
+
+```
+fl_max = trail_px · 206.265 · pixel_um / (cadence · Ω · cos δ)
+```
+
+| cadence | dec 0° | dec +45° | dec +69° |
+|---|---|---|---|
+| 5.0 s | 24 mm | 33 mm | 66 mm |
+| 3.0 s | 39 mm | 55 mm | 109 mm |
+| 2.0 s | 59 mm | 83 mm | 164 mm |
+| 1.5 s | 78 mm | 111 mm | 219 mm |
+| 1.0 s | 118 mm | 166 mm | 328 mm |
+
+**Halving the pipeline latency roughly doubles the usable focal length.** That makes cadence a
+*product* parameter rather than an implementation detail — it decides which targets the tool can
+serve at all. Worth engineering against explicitly: resident daemon rather than per-frame
+subprocess (00 §8), dead-reckoning instead of solving every frame (§3), download overlapped with
+stacking.
+
+**On shutter life — retracted.** The earlier ~14,500/night figure was ~7× too high because it
+rested on the broken invariant. At a 3 s cadence a 10-minute run is ~200 frames, not 1450. A
+1250 s integration at 400 mm costs ~3000 actuations over 2.5 h, which is unremarkable for a 60D —
+a cheap, replaceable body. The correct objection to 400 mm untracked is the 14% duty cycle, not
+mechanical wear.
+
+**Cost of a 1250 s integration at a 3 s cadence, dec +45°:**
+
+| focal | t_sub | duty | frames | wall time | reframes |
+|---|---|---|---|---|---|
+| 50 mm | 3.00 s | 100% | 417 | 0.3 h | 0 |
+| 100 mm | 1.66 s | 55% | 751 | 0.6 h | 1 |
+| 200 mm | 0.83 s | 28% | 1502 | 1.3 h | 4 |
+| 400 mm | 0.42 s | 14% | 3005 | 2.5 h | 15 |
+
+So 400 mm is not *impossible* — it is two and a half hours and fifteen reframes for what 50 mm
+delivers in twenty minutes.
 
 ### 2.2 Rotation — real, but second-order for coverage
 
