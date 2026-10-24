@@ -83,6 +83,50 @@ These came out of the research and are load-bearing:
   exit 1 for "0 stars found" just as it does for "searched the wrong patch of sky". Frame
   quality gating is not optional. See 01.
 
+## Layout
+
+```
+src/ministar/
+  config.py        runtime paths + ASTAP/EDSDK discovery
+  preflight.py     environment checks, and the camera settings checklist
+  cli.py           `ministar preflight | solve | version`
+  solver/astap.py  ASTAP driver; the .ini contract is fully verified
+  camera/          base.py = interface + Tv table; edsdk.py = not written yet
+  stack/           not written yet (design in 03, 06)
+  reframe/         not written yet (spec in 07)
+  ui/              not written yet (toolkit in 09)
+tools/
+  sync.sh          rsync to C:\ministar\build, optionally run there
+  setup.bat        create the Windows venv (once)
+  ministar.bat     the only Windows entry point
+```
+
+## Development
+
+Source of truth is this checkout. Windows only ever sees a disposable copy.
+
+```bash
+uv venv && uv pip install -e '.[dev]'
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .
+
+./tools/sync.sh                       # mirror to C:\ministar\build
+./tools/sync.sh preflight             # mirror, then run `ministar preflight` on Windows
+```
+
+One-time on the Windows side: `C:\ministar\build\tools\setup.bat`, then
+`tools\ministar.bat preflight`.
+
+Verified working end to end: hinting a solve from a previous solution takes
+**~860 ms** including interpreter startup, versus 4-8 s for `-fov 0`.
+
+Two things worth knowing before editing:
+
+- **`tools/*.bat` must keep CRLF endings.** With LF, `cmd.exe` misparses the file
+  and silently loses the exit code (00 §4). `.gitattributes` enforces this.
+- **Anything printed must be ASCII.** The Windows console is code page 437/850
+  and em-dashes render as boxes (00 §7). `tests/test_cli_ascii.py` enforces it.
+
 ## Status
 
 Research phase. No code yet.

@@ -33,3 +33,11 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Python
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

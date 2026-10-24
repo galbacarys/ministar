@@ -253,6 +253,46 @@ three attempts per exposure — `BULB via PressShutterButton`, `MANUAL via Press
   configuration — 2026-07-29 did **4 s × 528** with zero errors. That is the most encouraging
   single data point in this research.
 
+### 7.2b Root cause identified: mirror lockup (user, 2026-10-24)
+
+The user's diagnosis, and the logs corroborate it: **the `DEVICE_BUSY` storms were caused by
+the camera's mirror-lockup setting being wrong**, not by USB, contention, or illegal property
+values.
+
+N.I.N.A. never checked this automatically. Its only mechanism was a **manual message box the
+user had to read and act on themselves**:
+
+```
+2026-07-17T13:09:24|INFO|SequenceItem.cs|Run|208|Starting Category: Utility, Item: MessageBox,
+    Text: Camera settings: Mirror lockup, noise reduction off.
+```
+
+That message box appears on **2026-07-17, 07-20 and 07-29** — i.e. *after* the failing sessions
+(05-09, 05-14, 06-17, 07-14) and *before* the clean ones. The 07-20 and 07-29 sessions ran with
+zero `DEVICE_BUSY`. The correlation is clean.
+
+Corroborating detail: N.I.N.A.'s own code contains a special case for
+`EDS_ERR_TAKE_PICTURE_MIRROR_UP_NG` inside `SendStartExposureCmd` — mirror lockup interacts
+directly with the shutter command path, which is where all the `DEVICE_BUSY` errors were raised.
+
+**Design consequence — and it is small.** Do not build a `DEVICE_BUSY` retry engine. Instead:
+
+1. **Pre-flight setting check.** Read `kEdsPropID_MirrorLockUpState` at session start and compare
+   it to the configured expectation; report the actual value in the UI so the user can see it
+   rather than being told to go turn a dial. (The same check should cover the other
+   menu-only settings — long-exposure noise reduction, which has no EDSDK property at all and so
+   can only be *asked about*, not read.)
+2. **Optional mirror-lockup delay.** A checkbox: when enabled, raise the mirror, wait ~0.5 s for
+   the vibration to settle, then expose. Physics: on an untracked tripod with 0.4–3 s subs,
+   mirror-slap smear is a real fraction of the exposure, so this is worth having — but it is one
+   conditional, not an architecture.
+3. If it does recur, the diagnostic message should point at mirror lockup first, because that is
+   what it actually was last time.
+
+This supersedes the retry-heavy framing in §7.5 item 1. `EdsGetPropertyDesc` is still worth
+having (it prevents genuine illegal-value errors, which share the `DEVICE_BUSY` code), but it is
+no longer load-bearing for reliability.
+
 ### 7.3 `EDS_ERR_COMM_DISCONNECTED` is real and needs handling
 
 42 occurrences. USB disconnects happen. A long-lived daemon must detect
@@ -276,10 +316,9 @@ it is not a theoretical concern for a multi-hour untracked run. Implement as
 
 ### 7.5 What this changes in the plan
 
-1. **Retry logic is mandatory, not polish.** `DEVICE_BUSY` at this frequency means every
-   capture call needs bounded retry with backoff. But see 02: `DEVICE_BUSY` also means "illegal
-   property value", so a blind retry loop can spin forever on a genuinely invalid setting.
-   Distinguish by consulting `EdsGetPropertyDesc` before setting Tv/Av/ISO (already in §2 item 3).
+1. **`DEVICE_BUSY` is a settings problem, not a transport problem** (§7.2b). Fix it with a
+   pre-flight mirror-lockup check, not a retry engine. A bounded retry (~3 attempts with short
+   backoff) is still cheap insurance and worth keeping, but it is not the fix.
 2. **`EdsSendStatusCommand` + `WillSoonShutDown` is now a v1 requirement** (§7.4), not a maybe.
 3. **Reconnect handling is a v1 requirement** (§7.3).
 4. The bulb path is confirmed unnecessary for our range — every `BulbStart`/`BulbEnd`-style
