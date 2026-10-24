@@ -86,7 +86,7 @@ in that run is `(W − |dx|)(H − |dy|)`. So the retained area fraction is
 f = (1 − |dx|/W) · (1 − |dy|/H)
 ```
 
-Measured time to reach `f = 0.80` with drift along the long axis:
+Time to reach `f = 0.80` with drift along the long axis:
 
 | focal | ″/px | dec 0° | dec 45° | dec 80° |
 |---|---|---|---|---|
@@ -101,6 +101,101 @@ Two things fall out:
 - **Drift dies near the pole.** At dec 80 a 50 mm lens can run for two hours without the target
   leaving a 20% margin. Conversely, near the celestial equator at 400 mm you reframe every
   ~2.5 minutes, which is barely worth automating.
+
+### 2.1b Usable megapixels — the metric to actually show
+
+Percent-of-field is abstract. The user loses **megapixels**, and that is what the UI should
+report. The frame is 5202×3464 = **18.02 MP**, and because the intersection of two rectangles
+offset by a drift vector is itself a rectangle, the retained area is exact — not an estimate.
+
+`usable_MP = (W − |dx|) · (H − |dy|) / 10⁶`, and it reaches **zero** once the drift exceeds the
+frame in either axis. Drift along the long axis, best orientation:
+
+| | 2 min | 5 min | 10 min | 15 min | 30 min | 60 min |
+|---|---|---|---|---|---|---|
+| 50 mm, dec 45° | 17.8 | 17.4 | 16.8 | 16.1 | 14.3 | 10.5 |
+| 135 mm, dec 45° | 17.3 | 16.3 | 14.6 | 13.0 | 7.9 | **0.0** |
+| 200 mm, dec 45° | 17.0 | 15.5 | 13.0 | 10.5 | 3.0 | **0.0** |
+| 200 mm, dec 0° | 16.6 | 14.5 | 11.0 | 7.4 | **0.0** | **0.0** |
+| 400 mm, dec 0° | 15.2 | 11.0 | 3.9 | **0.0** | **0.0** | **0.0** |
+
+This is the argument for showing megapixels rather than a percentage: the curve **collapses to
+zero**, and the collapse point moves by more than an order of magnitude across plausible
+sessions. A user who drags "reframe every 30 min" at 200 mm on a dec-0 target sees 18.02 → 0.0 MP
+and immediately understands something a "80% retained" readout would have phrased as a mild
+trade-off.
+
+**Consequence for the UI: the slider must be clamped at the zero point**, and the zero point
+depends on focal length, declination *and* camera roll.
+
+### 2.1c Camera roll is worth an instruction (measured)
+
+The drift direction is set by `ψ`, i.e. by how the camera happens to sit in its clamp. But the
+*retained area* depends on the drift direction relative to the frame's aspect ratio. Maximum
+drift achievable for 80% retention, by drift angle from the frame's long axis:
+
+| drift angle | 0° | 15° | 30° | 45° | 60° | 90° |
+|---|---|---|---|---|---|---|
+| max drift (px) | **1040** | 802 | 679 | 619 | 603 | 693 |
+
+**Aligning the drift with the long axis yields ~50-70% more run time at the same retained area**
+(1040 px versus 603-693 px). That is a physical action the user can take in five seconds by
+rotating the camera in its clamp, and it is worth telling them:
+
+> "Rotate the camera so the target's drift runs along the long side of the frame — you gain
+> about 50% more time between adjustments at the same field."
+
+The curve is non-monotonic (60° is worst, 90° is better than 60°) because the frame is 3:2 rather
+than square. Do not assume "aligned is better" in some simple sense — use the measured table, or
+just evaluate `(W − |dx|)(H − |dy|)` directly for the actual `ψ`.
+
+### 2.1d Worked example: this rig at 400 mm
+
+Canon 60D + 400 mm: 2.212 ″/px, field **3.20° × 2.13°**, 18.02 MP, drift along the long axis.
+
+| interval | dec 0 | dec +22 (Jellyfish) | dec +45 | dec +69 (M81) |
+|---|---|---|---|---|
+| 1 min | 16.6 | 16.7 | 17.0 | 17.5 |
+| 2 min | 15.2 | 15.4 | 16.0 | 17.0 |
+| 3 min | 13.8 | 14.1 | 15.0 | 16.5 |
+| 5 min | 11.0 | 11.5 | 13.0 | 15.5 |
+| 8 min | 6.7 | 7.6 | 10.0 | 14.0 |
+| 10 min | 3.9 | 5.0 | 8.0 | 13.0 |
+| 12 min | 1.1 | 2.4 | 6.0 | 12.0 |
+| 15 min | **0.0** | **0.0** | 3.0 | 10.5 |
+| 30 min | 0.0 | 0.0 | **0.0** | 3.0 |
+
+**The field is exhausted at 12.8 min (dec 0), 13.8 (dec +22), 18.0 (dec +45), 35.9 (dec +69).**
+At 400 mm there is no such thing as a relaxed cadence below dec +60.
+
+Orientation is worth much more here than at short focal lengths, because the drift is a larger
+fraction of the frame:
+
+| interval | dec+22, 0° | 45° | 60° |
+|---|---|---|---|
+| 5 min | 11.5 | 8.2 | 7.8 |
+| 8 min | 7.6 | 4.1 | 3.2 |
+| 10 min | 5.0 | 2.0 | 0.7 |
+
+At 10 minutes a bad camera roll costs **7× the usable field**. Telling the user to rotate the
+camera in its clamp stops being a nicety and becomes the difference between a usable sub-3°
+field and a postage stamp.
+
+**Reality check that matters more than the curve.** 400 mm on a fixed tripod allows, at 2 px of
+trail:
+
+| dec | 0 | +22 | +45 | +69 |
+|---|---|---|---|---|
+| max sub | 0.29 s | 0.32 s | 0.42 s | 0.83 s |
+
+Sub-second subs mean read-noise-dominated stacking and thousands of frames per target (03:
+250 × 5 s ≈ 1469 × 2 s for equal SNR, and the penalty keeps growing below 2 s). So 400 mm
+untracked is an **acquisition** instrument, not an integration one: it is fine for confirming a
+pointing and taking a look, and it is the wrong place to spend a night. The app should say so
+rather than silently letting someone queue 4000 frames at 0.3 s.
+
+This is the case for the catalog filters in §1.2, too: at 400 mm the honest target list is small
+bright planetaries and the cores of large galaxies, not the 13,970-object catalog.
 
 ### 2.2 Rotation — real, but second-order for coverage
 
@@ -119,6 +214,14 @@ it with its own rotation:
 
 So rotation costs **4-8%** over a session — comparable to a small increase in the translation
 margin, and nothing like the disaster it would be if we could not derotate.
+
+Checked further out, because a long session rotates a lot: at ±60° the frame still retains
+**74.9% (13.5 MP)**. Even a full hour of rotation at dec 45° (60°) therefore costs less than one
+bad slider position on the translation curve. Rotation is a footnote, not a second mechanism.
+
+⚠️ This assumes the stack reference is chosen near the middle of the session rather than at the
+start, so the rotation is bounded by ±(half-session) instead of the full session. That is free
+to arrange — 03 already re-anchors the reference every 2-5 min.
 
 ⚠️ This assumes the stack reference is periodically re-anchored (which 03 already requires, for
 projection reasons, every 2-5 min). Anchoring forever to the *first* frame would accumulate the
@@ -173,19 +276,27 @@ then costs nothing.
 
 ## 4. The user-facing knob
 
-One slider, two readouts:
+One slider, three readouts — leading with the thing the user is actually spending:
 
 ```
-  reframe every  [ 8 min ]        keeps  ~87% of the field
-                                  target travels 1.9° of 4.3°
+  reframe every  [ 8 min ]   ->  16.4 usable MP  of 18.0
+                                 target travels 1.6° of 4.3°
+                                 drift runs along the long axis  [good]
 ```
 
-- Left of the arrow, what the user asked for. Right, what it costs.
-- Default: derive from `f = 0.85` at the target's declination, clamped to `[3 min, 45 min]`.
-  Faster than 3 min is not worth a human's attention; slower than 45 min is not worth the
-  coverage on a fast-moving target.
-- Show the *distance* as well as the time, because "1.9° of 4.3°" is intuitive in a way a
+- **Usable MP vs total MP is the headline**, per §2.1b. It is concrete, it is the real currency,
+  and it makes the collapse-to-zero visible instead of abstract.
+- Show the *distance* as well as the time, because "1.6° of 4.3°" is intuitive in a way a
   percentage is not.
+- Show the orientation verdict, and offer the rotate-the-camera advice from §2.1c when the
+  measured `ψ` puts the drift in a bad sector (roughly 30-75° from the long axis).
+- **Render the whole curve, not just the current point.** A small `usable MP` vs `interval` plot
+  behind the slider says more than any single number: the user can see the knee before they
+  drag past it. Default position: the largest interval that still retains 85% of peak, clamped
+  to `[3 min, 45 min]` — faster than 3 min is not worth a human's attention, and past ~45 min
+  the translation curve has usually already collapsed.
+- If the interval the user wants is past the zero point, clamp and say why: "30 min is not
+  available at 200 mm on this target — the field is empty by 22 min."
 
 **Envelope sizing.** Two modes, and only two:
 
@@ -194,8 +305,24 @@ One slider, two readouts:
 2. **Manual** — the user drags box edges. Needed because some people want a specific crop, and
    because a target may be part of a mosaic.
 
-The box is always **clipped to the frame** and drawn as a rotated rectangle (see §6) so its
-edges are perpendicular to the drift where possible.
+**The box is a rotated rectangle, aligned to the drift vector.** Decided 2026-10-24.
+
+The long axis of the box lies along the drift direction, so the corridor points exactly where the
+target will go; its short axis is the transverse margin. This makes the entry and exit corners
+unambiguous, makes the drawn path run corner-to-corner through the box, and removes the awkward
+case where a diagonal drift clips the corners of an axis-aligned box in a way the user cannot
+read off the screen.
+
+Two implementation notes:
+
+- The **retained-area arithmetic in §2.1b does not depend on the box orientation** — it depends
+  only on the total drift vector relative to the *frame* axes, because the fully-covered region
+  is the intersection of the frame with itself offset. The rotation is a UX device, not an
+  optimisation. Worth stating plainly so nobody later "optimises" the box angle expecting more
+  megapixels.
+- The box must still be **clipped to the frame**, which for a rotated rectangle means clipping a
+  convex quad against a rectangle — four line intersections, not a bounding-box clamp. A convex
+  clip is ~20 lines and avoids a whole class of drawing bugs.
 
 ---
 
@@ -282,6 +409,12 @@ Testable with no hardware, like 07:
    map) must match `(1−dx/W)(1−dy/H)` for a synthetic drift.
 6. **Envelope arithmetic** — for a given interval, the box must contain the whole path from
    entry to exit, and the exit time must match the drawn "time left".
+7. **Megapixel curve** — `usable_MP(t)` must equal `(W − |dx|)(H − |dy|)/10⁶` for the drift
+   vector at `t`, must reach exactly zero at the documented crossing, and must be monotonic
+   decreasing in `t` for fixed `ψ`. The non-monotonicity in §2.1c is in the *orientation* axis,
+   not the time axis — if the time axis is ever non-monotonic, something is wrong.
+8. **Rotated box clip** — a box at 45° must produce a 4-vertex quad clipped correctly against the
+   frame, with no pixels of the box drawn outside the frame and no frame pixels wrongly masked.
 7. **Transit flip** — a synthetic target crossing the meridian must produce the corner
    instruction flipping, not the target being chased off-screen.
 
@@ -289,9 +422,14 @@ Testable with no hardware, like 07:
 
 ## 9. Open questions
 
-- Should the envelope be a **rotated rectangle aligned to the drift** rather than an
-  axis-aligned one? Aligning it to the drift path maximises run length for a given minimum
-  edge margin, and it is only marginally more code to draw. Probably yes.
+- Rotated box: **decided, aligned to the drift vector** (§4). Remaining question is only whether
+  the box should ever be *tilted relative to the drift* to dodge a bright star or a frame
+  artefact — probably not, and offering it invites the user to break the arithmetic.
+- Whether "usable megapixels" should be shown as **fully-covered area** (the §2.1b formula) or
+  **area weighted by frame count** from the coverage map. The former is exact and simple; the
+  latter is more honest for the partially-covered edges and closer to what the final stack will
+  actually deliver. Lean toward showing fully-covered MP on the slider and the weighted number
+  after the session.
 - Whether the catalog should also include a **curated "works on this rig" subset** (size and
   surface-brightness filtered, with recommended focal length), because the honest answer for
   most beginners is "you have a 100-400 mm lens on a tripod, here are the 30 objects that will
