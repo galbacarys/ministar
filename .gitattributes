@@ -1,8 +1,12 @@
+# Order matters: the LAST matching pattern wins a given attribute, so the
+# catch-all must come FIRST and the exceptions AFTER it.
+
+# Default: LF everywhere.
+* text=auto eol=lf
+
 # Batch files MUST be CRLF. With LF endings cmd.exe misparses the script and
-# SILENTLY LOSES THE EXIT CODE. See docs/research/00-windows-interop.md §4.
+# SILENTLY LOSES THE EXIT CODE, which turns every failure into a false success.
+# See docs/research/00-windows-interop.md section 4.
 *.bat   text eol=crlf
 *.cmd   text eol=crlf
 *.ps1   text eol=crlf
-
-# Everything else stays LF.
-* text=auto eol=lf
