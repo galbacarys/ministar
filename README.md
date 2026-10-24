@@ -75,6 +75,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 08 | [edsdk-binding-plan.md](docs/research/08-edsdk-binding-plan.md) | Fork pyedsdk; port N.I.N.A.'s Canon knowledge. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit choice; PySide6 vs Tk, threading, packaging. |
 | 10 | [target-catalog-and-reframe-envelope.md](docs/research/10-target-catalog-and-reframe-envelope.md) | OpenNGC catalog; the drift envelope and reframe cadence. |
+| 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus over EDSDK: home to the stop, step back, sweep and fit. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
@@ -110,6 +111,13 @@ These came out of the research and are load-bearing:
 - **A frame with no detectable stars is indistinguishable from a bug.** ASTAP returns
   exit 1 for "0 stars found" just as it does for "searched the wrong patch of sky". Frame
   quality gating is not optional. See 01.
+- **EDSDK has no absolute focus position** — only relative nudge pulses, three sizes each way,
+  ~100 ms apart. Autofocus has to be built on a coordinate system we maintain ourselves,
+  anchored at the far focus stop. See 11.
+- **There is already a working implementation, and it is calibrated for this lens.** N.I.N.A.'s
+  `Lens AF` plugin does exactly the "home to infinity, step back" algorithm, and its
+  `lenses.json` on this machine records your 100-400L as focus position 0 at 100 mm and 5030 at
+  400 mm. See 11 §2.
 
 ## Layout
 
