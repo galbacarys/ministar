@@ -9,6 +9,33 @@ That constraint is the product. Everything expensive in this hobby is usually
 solved by buying a tracker; this tool solves the annoying parts with software and
 a human's hands instead.
 
+## Design stance: it is allowed to be bad
+
+This is a low-cost, low-equipment entry point — not a competitor to a tracked,
+cooled, guided rig. A 60D on a second-hand tripod *is* the target hardware, and a
+good night should produce a slightly soft, slightly grainy image of a real
+deep-sky object. That is a good outcome, not a compromise.
+
+That has consequences, and they are design rules rather than vibes:
+
+- **Inform, never block.** Every efficiency number in `docs/research/` exists so the
+  UI can tell the truth about what a choice costs — not so the app can refuse the
+  choice. 400 mm on a fixed tripod is a 14% duty cycle (10 §2.1e); a user who knows
+  that should be allowed to do it anyway. The failure mode to avoid is a *silent*
+  bad result that looks like a bug, not a *chosen* bad result the user was warned
+  about.
+- **Fun first, quality second.** The first recognisable stack should appear
+  quickly, at low resolution, slightly ugly. Polish is what the end-of-session
+  restack is for. A tool that shows nothing for an hour and then a beautiful image
+  does not get used.
+- **Robustness beats efficiency.** Short exposures, hand aiming and a cheap tripod
+  mean things go wrong constantly. Not hanging, not crashing, and not silently
+  stopping matters far more than shaving 200 ms off a frame.
+- **No purchase may be required.** If a feature only works with a different lens, a
+  tracker, or a filter wheel, it is out of scope.
+
+The tradeoffs stay in the docs and on screen; they just stop being gates.
+
 ## What it must do
 
 1. **Plate-solve in a loop.** ASTAP over the CLI, continuously, so the tool always

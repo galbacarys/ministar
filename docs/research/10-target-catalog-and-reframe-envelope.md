@@ -47,8 +47,10 @@ than depending on a network API at a dark site with no signal.
 ### 1.2 What "visible" has to mean
 
 A raw dump of 13,970 objects is unusable as a picker — most of the NGC is magnitude 13-15
-galaxies that this rig cannot see. Filtering must be explicit and visible in the UI, not
-silently applied:
+galaxies that this rig cannot see. But per the README's design stance these are **advisory
+filters, never gates**: they rank and annotate, and the user can always show everything and pick
+something hopeless. What is not acceptable is *silently* excluding an object, or silently
+including one that has no chance:
 
 - **Altitude window** — above `h_min` (default ~25°) at some point during the planned session.
   This is a function of site latitude/longitude and time, i.e. the same machinery as 07.
@@ -62,6 +64,11 @@ silently applied:
 
 Same filters must drive both the picker and the envelope, because a target's size determines
 whether a reframe envelope even makes sense (§5).
+
+The picker should carry a plain-language verdict rather than a pass/fail badge — "good for this
+rig tonight", "will be small in frame", "too faint for this sky", "bigger than your frame, will
+not fit". A beginner learns nothing from a hidden object and a lot from one labelled *this will
+be a smudge*.
 
 ---
 
@@ -348,7 +355,8 @@ mechanical wear.
 | 400 mm | 0.42 s | 14% | 3005 | 2.5 h | 15 |
 
 So 400 mm is not *impossible* — it is two and a half hours and fifteen reframes for what 50 mm
-delivers in twenty minutes.
+delivers in twenty minutes. Per the README's design stance, that belongs on screen as a
+plainly-stated cost, not as a disabled button.
 
 ### 2.2 Rotation — real, but second-order for coverage
 
@@ -543,7 +551,7 @@ so it stays correct as the user nudges.
 | Pointing near the zenith | Per-axis alt/az readout is suppressed (07 §3). The envelope still works — it is pure pixel geometry, which is an argument for keeping it separate from the alt/az layer. |
 | Target's drift exits the frame before the interval expires | Contradiction between interval and box. Clamp: shrink the interval and tell the user. |
 | Target sets mid-session | Compute the altitude curve; warn at planning time and again when `h < h_min`. |
-| Long focal length, dec 0 | 2.6-minute runs mean the reframe overhead dominates. Warn that the session is fighting the geometry and suggest a shorter focal length. |
+| Long focal length, dec 0 | 2.6-minute runs mean the reframe overhead dominates. Say so plainly — "expect a rough image: ~1000 frames and ~15 reframes for what 100 mm delivers in 20 minutes" — and then get out of the way. Choosing a bad night is allowed (README design stance). |
 
 ---
 
@@ -583,10 +591,11 @@ Testable with no hardware, like 07:
   latter is more honest for the partially-covered edges and closer to what the final stack will
   actually deliver. Lean toward showing fully-covered MP on the slider and the weighted number
   after the session.
-- Whether the catalog should also include a **curated "works on this rig" subset** (size and
-  surface-brightness filtered, with recommended focal length), because the honest answer for
-  most beginners is "you have a 100-400 mm lens on a tripod, here are the 30 objects that will
-  actually look like something."
+- Whether the picker should default to **sorted-by-expected-quality** rather than
+  filtered. Same information as a curated subset, but nothing is hidden: the honest answer for a
+  beginner is "you have a 100-400 mm lens on a tripod; here is everything visible tonight, and
+  the top thirty are the ones that will actually look like something." Sorting respects the
+design stance; excluding does not.
 - Whether the coverage heatmap should drive an **automatic crop** for the final stack, or just
   inform the user. Auto-crop risks throwing away good data at the edges.
 - Attribution mechanics: the repo is REUSE-compliant, with a `.reuse/dep5` and per-file
