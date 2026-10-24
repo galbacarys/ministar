@@ -253,7 +253,8 @@ Choosing an implementation language is constrained by what actually exists here:
 | PowerShell | ✅ 5.1.26100.9444 (Windows PowerShell, not Core) |
 | Node / npm | ✅ `C:\Users\username\AppData\Local\hermes\node\` |
 | git | ✅ `C:\Users\username\AppData\Local\hermes\git\` |
-| **Python** | ❌ **Store placeholder only.** Running it prints "Python was not found; run without arguments to install from the Microsoft Store". There is no working interpreter. |
+| **Python** | ⚠️ **Corrected.** `where python` resolves to a 2-byte Microsoft Store reparse stub in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which prints "Python was not found". But **`uv` is installed on Windows** (`%LOCALAPPDATA%\hermes\bin\uv.exe`) and has **already provisioned a real CPython 3.11.16** at `%APPDATA%\uv\python\`. The interpreter exists; only PATH wiring is missing. See 05. |
+| `uv` | ✅ installed (Windows `...\hermes\bin\uv.exe`, and WSL `~/.local/bin/uv`) |
 | `py` launcher | ❌ not found |
 | .NET SDK | ❌ no install directory, no `dotnet` |
 | `msbuild` / `csc` | ❌ not on PATH |

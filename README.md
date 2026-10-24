@@ -42,6 +42,10 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 02 | [canon-usb-control.md](docs/research/02-canon-usb-control.md) | Canon bodies over USB: EDSDK vs. open-source paths. |
 | 03 | [live-stacking-lucky-imaging.md](docs/research/03-live-stacking-lucky-imaging.md) | Registration, stacking math, what "lucky imaging" is actually for. |
 | 04 | [reframing-and-untracked-geometry.md](docs/research/04-reframing-and-untracked-geometry.md) | Which way to turn the knob; drift rates; nudge UX. |
+| 05 | [python-on-windows.md](docs/research/05-python-on-windows.md) | Interpreter, packaging, and whether `pyedsdk` can carry the capture path. |
+| 06 | [stacking-backends.md](docs/research/06-stacking-backends.md) | Siril/ASTAP/DSS CLI vs. owning the numerics in numpy. |
+| 07 | *(planned)* | Alt/az reframing readout spec — per-axis error, tolerances, degeneracies. |
+| 08 | [edsdk-binding-plan.md](docs/research/08-edsdk-binding-plan.md) | Fork pyedsdk; port N.I.N.A.'s Canon knowledge. |
 
 ## Findings that change the design
 
@@ -59,12 +63,26 @@ These came out of the research and are load-bearing:
 - **libgphoto2 has no Windows support.** The open-source Canon path on Windows is
   effectively digiCamControl, or WSL2 + `usbipd-win` (which is a dev convenience, not a
   shippable product). EDSDK is the real answer. See 02.
-- **This machine has no usable Windows Python** — only the Microsoft Store placeholder
-  stub. Toolchain choice is therefore a real decision, not a default. See 00.
+- **N.I.N.A. has a full native Canon driver**, in `EDCamera.cs`. It is the reference
+  implementation to port domain knowledge from — bulb dialects, per-body quirks, the
+  live-view property dance. MPL-2.0. See 08.
+- **`pyedsdk` is MIT and 90% the way there** — it has the ctypes plumbing, the enum tables, the
+  Windows message pump, and a working live-view stream. It lacks bulb, hard-codes a 15 s
+  exposure timeout, and can't enumerate legal settings. Fork it; don't rewrite it. See 08.
+- **`EDSDK.dll` is on this machine already** (13.19.0.6400, x64, inside Lightroom), and
+  N.I.N.A. ships it inside its own installer. It may be redistributed *as part of an app* —
+  just never committed to git. See 08.
+- **A resident daemon is mandatory, not a preference.** Bare `python -c pass` is ~60 ms and
+  `import numpy` ~235 ms, against a ~43 ms process-spawn budget. See 05.
+- **Siril is the right tool for the end-of-session restack and the wrong one for the live
+  loop.** Its headless live-stack rejects over a 2-sample window (a no-op) and round-trips a
+  48 MB FITS per frame. See 06.
 - **A frame with no detectable stars is indistinguishable from a bug.** ASTAP returns
   exit 1 for "0 stars found" just as it does for "searched the wrong patch of sky". Frame
   quality gating is not optional. See 01.
 
 ## Status
 
-Research phase. No code yet.
+Research phase. No code yet. The unresolved pieces are the alt/az readout spec (07) and a
+confirmed good plate-solve frame — the only FITS files on this machine are starless N.I.N.A.
+failures, so the success-path `.ini` contract in 01 §4 is still unconfirmed.

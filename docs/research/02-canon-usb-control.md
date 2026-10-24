@@ -351,15 +351,23 @@ Sources: <https://github.com/gphoto/libgphoto2> · <https://github.com/gphoto/li
 · <https://github.com/gphoto/gphoto2/blob/master/doc/gphoto2.1> · <https://pypi.org/project/gphoto2/>
 · <https://github.com/gphoto/libgphoto2/issues/995> (WSL/usbipd discussion) · <https://github.com/gphoto/libgphoto2/issues/1200> (R6 III support, 2026-01)
 
-### 2.3 N.I.N.A. (`isbeorn/nina`) — MPL-2.0, very active, **no first-party Canon driver**
+### 2.3 N.I.N.A. (`isbeorn/nina`) — MPL-2.0, very active, **native Canon driver: YES**
+
+> **CORRECTION (2026-10-24).** This section originally claimed N.I.N.A. had "no first-party
+> Canon driver" and that Canon bodies only worked through ASCOM. **That was wrong.** The claim
+> came from searching for a file named `CanonCamera.cs`; the actual driver is `EDCamera.cs`
+> ("ED" = EDSDK), so a filename search missed it. Re-verified directly against `develop`.
+> Details in [08-edsdk-binding-plan.md](08-edsdk-binding-plan.md).
 
 * Status: 255★, last push **2026-10-24**, latest release **3.2 (2025-11-27)**; C#/.NET, Windows.
-* Canon support: the repo contains a *partial EDSDK P/Invoke* layer
-  (`NINA.Equipment/SDK/CameraSDKs/EDSDK/{EDSDK.cs,EDSDKLocal.cs}`) but **no Canon camera class**
-  under `NINA.Equipment/Equipment/MyCamera/` (that folder has Nikon native, ASI, QHY, ToupTek,
-  Atik, FLI, SBIG, Alpaca-direct, ASCOM — no Canon). Verified by enumerating the tree on
-  `develop`. So: **Canon bodies in NINA go through ASCOM** (ASCOM.DSLR, below). Treat the EDSDK
-  stub as WIP/abandoned (**UNVERIFIED** which).
+* Canon support: **first-party and substantial.** Two layers:
+  * `NINA.Equipment/SDK/CameraSDKs/EDSDK/EDSDK.cs` — 2608 lines / 125 KB of P/Invoke in namespace
+    `EDSDKLib` (Johannes Bildstein's EDSDK wrapper), plus `EDSDKLocal.cs`.
+  * `NINA.Equipment/Equipment/MyCamera/EDCamera.cs` — 45 KB, `class EDCamera : ICamera`,
+    `Category = "Canon"`. Full bulb (both dialects, with per-body quirks), live view, image
+    download, property enumeration.
+* Consequence: **N.I.N.A. is the reference implementation to port from**, not an ASCOM escape
+  hatch. See 08 for the specifics worth stealing.
 * NINA is a full sequencer (platesolving, meridian flip, dithering, autofocus) — most of its
   value is irrelevant to an untracked, no-mount rig, and its model of "one long exposure per
   target" fights a 2 s cadence. Not the right dependency for `ministar`, but the best reference
