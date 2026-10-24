@@ -251,6 +251,49 @@ rather than silently letting someone queue 4000 frames at 0.3 s.
 This is the case for the catalog filters in §1.2, too: at 400 mm the honest target list is small
 bright planetaries and the cores of large galaxies, not the 13,970-object catalog.
 
+### 2.1e Inverting it: "I want N usable megapixels"
+
+This is the form the UI should actually compute, because it is how people think. With drift
+along the long axis the retained area is `(W − D)·H`, so the drift budget follows in closed form:
+
+```
+D_budget = W − MP_target · 10⁶ / H          # pixels, independent of focal length and declination
+t_interval = D_budget · scale(") / (Ω · cos δ)      seconds
+```
+
+For 8 MP on the 60D: `D_budget = 5202 − 8e6/3464 = 2892.5 px` — **1.78° of sky at 400 mm**.
+Everything else is just the clock:
+
+| focal | ″/px | dec 0° | dec +22° (Jellyfish) | dec +45° | dec +69° (M81) |
+|---|---|---|---|---|---|
+| 50 mm | 17.70 | 56.7 min | 61.4 min | 80.2 min | 159.7 min |
+| 100 mm | 8.85 | 28.4 min | 30.7 min | 40.1 min | 79.9 min |
+| 200 mm | 4.42 | 14.2 min | 15.3 min | 20.1 min | 39.9 min |
+| 400 mm | 2.21 | **7.1 min** | **7.7 min** | **10.0 min** | **20.0 min** |
+
+Because the budget is a fixed number of *pixels*, the interval is linear in focal length and
+inverse in `cos δ`. That is the whole dependency.
+
+#### The invariant worth putting in the UI
+
+The sub length is itself set by the trailing limit (03): `t_sub = trail_px · scale / (Ω cos δ)`.
+Dividing, the number of frames in a run is
+
+```
+frames_per_run = D_budget / trail_px
+```
+
+**declination and focal length cancel entirely.** At 8 MP with a 2 px trail allowance that is
+**~1450 frames per adjustment, for any lens, at any declination.** Reassuring for tooling, and a
+useful sanity check: if a proposed run implies a wildly different frame count, something upstream
+is wrong.
+
+⚠️ **But at 400 mm the frame count is also the warning.** 1450 subs at 0.29 s is 1450 shutter
+actuations per run. A night of ten runs is ~14,500 actuations; the 60D's shutter is rated around
+100-150k. **Ten untracked nights at 400 mm would take a meaningful bite out of the shutter's
+life.** That is an argument the SNR curve does not make, and the app should surface it — a
+"frames this session / shutter actuations" counter next to the megapixel readout.
+
 ### 2.2 Rotation — real, but second-order for coverage
 
 The field rotates at `Ω · sin(δ)` about the frame centre (04 §3.1). Since registration is
