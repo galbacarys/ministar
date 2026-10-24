@@ -168,7 +168,42 @@ without Canon developer registration.
 
 ---
 
-## 6. Still unverified
+## 6. Scope decision: no bulb in v1 (descoped 2026-10-24)
+
+**Decision: v1 does not implement bulb.** Exposures are driven purely by `kEdsPropID_Tv`.
+
+Rationale — pyedsdk's `_ShutterSpeed` table is complete and covers the whole range we need:
+
+- **81 entries**, from `1/32000` up to `_30s` (30 s), plus `_Bulb = 0x0C` as a *Tv value*
+  whose `seconds` property deliberately returns `None`, plus `_Invalid`.
+- Time steps above 1 s: `1", 1.3", 1.6", 2", 2.5", 3.2", 4", 5", 6", 8", 10", 13", 15", 20", 25", 30"`.
+- Our sub lengths (0.4–3 s per brief 03's trailing limits) sit comfortably inside this.
+
+Bulb is only required for exposures **>30 s**. Descoping it deletes, from the fork:
+`BulbStart`/`BulbEnd`, the two-dialect detection, the 500D `44313` quirk, and the
+camera-state handler for `BulbExposureTime`. That removes the single largest rationale for
+forking at all — the remaining work (`EdsGetPropertyDesc`, memory download, the 15 s timeout
+fix) is a ~150-line patch, not a driver extension.
+
+### Consequences to design around
+
+1. **Sub length must snap to the Tv table.** Brief 03 derives optimum sub lengths like
+   "2.2 s at 50 mm", which is not requestable — the nearest legal values are 2" and 2.5".
+   Snap *before* computing frame counts and expected SNR, or the arithmetic quietly drifts
+   from what the camera will actually do.
+2. **Bulb stays on the backlog for polar targets.** Drift scales with `cos(dec)`; the frames
+   inspected on this machine were at DEC +89.85, where drift is ~1.3"/s, so multi-minute
+   untracked subs near the pole are physically fine. "Never >30 s" holds for wide-field and
+   fails for a polar mode.
+3. **LENR is the real multiplier.** Long-exposure noise reduction has no EDSDK property (02)
+   and is menu-only, so it cannot be switched off in code. Left on, every 2 s sub costs 4 s and
+   throughput halves. This belongs in a startup pre-flight check.
+4. **`_waitForEvent(timeout=15)` still needs fixing.** Even at ≤30 s Tv, anything approaching
+   15 s trips it. Derive the timeout from the requested shutter speed.
+
+---
+
+## 7. Still unverified
 
 - Whether EDSDK 13.x changed any command codes vs the 13.12 headers N.I.N.A.'s `EDSDK.cs` was
   written against. N.I.N.A. is current, so probably fine, but confirm the constants we add
