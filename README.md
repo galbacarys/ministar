@@ -44,8 +44,10 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 04 | [reframing-and-untracked-geometry.md](docs/research/04-reframing-and-untracked-geometry.md) | Which way to turn the knob; drift rates; nudge UX. |
 | 05 | [python-on-windows.md](docs/research/05-python-on-windows.md) | Interpreter, packaging, and whether `pyedsdk` can carry the capture path. |
 | 06 | [stacking-backends.md](docs/research/06-stacking-backends.md) | Siril/ASTAP/DSS CLI vs. owning the numerics in numpy. |
-| 07 | *(planned)* | Alt/az reframing readout spec — per-axis error, tolerances, degeneracies. |
+| 07 | [altaz-reframing-spec.md](docs/research/07-altaz-reframing-spec.md) | Alt/az reframing: per-axis error, `cos(alt)`, tolerances, degeneracies. |
 | 08 | [edsdk-binding-plan.md](docs/research/08-edsdk-binding-plan.md) | Fork pyedsdk; port N.I.N.A.'s Canon knowledge. |
+| 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit choice; PySide6 vs Tk, threading, packaging. |
+| 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
 
@@ -83,6 +85,17 @@ These came out of the research and are load-bearing:
 
 ## Status
 
-Research phase. No code yet. The unresolved pieces are the alt/az readout spec (07) and a
-confirmed good plate-solve frame — the only FITS files on this machine are starless N.I.N.A.
-failures, so the success-path `.ini` contract in 01 §4 is still unconfirmed.
+Research phase. No code yet.
+
+Validated against real frames from the user's own archive: the success-path `.ini` contract is
+confirmed (13 keys, no `DIMENSIONS`, `WARNING` can co-occur with `PLTSOLVD=T`), and a hinted
+solve lands in **0.74 s** versus 4–8 s for auto-FOV.
+
+Outstanding:
+
+- The **star-database ceiling is a live problem**, not theoretical. A real 100 mm frame has an
+  8.53° field, which exceeds D80's 5.14° limit; ASTAP silently cropped it and reported a solution
+  for the *cropped* centre. G05/W08 need installing and the database must be chosen from the
+  computed field *before* solving.
+- Camera control is unproven end-to-end — nothing has been driven over USB yet.
+- No decision recorded on the exposure planner that snaps to Canon's discrete Tv table.

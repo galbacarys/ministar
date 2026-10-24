@@ -131,32 +131,67 @@ Four things to notice, all ✅ verified:
 4. **`DIMENSIONS` is not always present.** It is absent here because the solver aborted
    before image analysis. Do not depend on any key other than `PLTSOLVD` existing.
 
-Expected keys on **success** (⚠️ not yet observed here — our only test frames were
-starless; needs confirmation with a real frame):
+### Success path — now ✅ verified on real frames
 
-| Key | Meaning |
-|---|---|
-| `PLTSOLVD=T` | **the success flag** |
-| `CRPIX1`, `CRPIX2` | reference pixel = image centre, 1-based FITS convention |
-| `CRVAL1`, `CRVAL2` | RA/Dec (J2000) of that pixel, **degrees** |
-| `CDELT1`, `CDELT2` | deg/px; `CDELT1` is typically negative |
-| `CROTA1`, `CROTA2` | image twist per axis, degrees |
-| `CD1_1`, `CD1_2`, `CD2_1`, `CD2_2` | full CD matrix, deg/px |
+Two real frames solved successfully on this machine (2026-10-24). The success `.ini` contains
+**exactly 13 keys, in this order** — and **no `DIMENSIONS`**, even on success:
+
+```
+PLTSOLVD=T
+CRPIX1 / CRPIX2      reference pixel = image centre, 1-based FITS convention
+CRVAL1 / CRVAL2      RA/Dec (J2000) of that pixel, degrees
+CDELT1 / CDELT2      deg/px  (CDELT1 negative, CDELT2 positive on both frames)
+CROTA1 / CROTA2      image twist per axis, degrees
+CD1_1 / CD1_2 / CD2_1 / CD2_2   full CD matrix, deg/px
+CMDLINE              verbatim command line
+[WARNING=...]        only when non-empty  <-- CAN APPEAR ON SUCCESS
+```
+
+Three things this settles:
+
+- **`DIMENSIONS` is never emitted**, on success or failure. Drop it from any design that
+  expected it.
+- **`WARNING` appears alongside `PLTSOLVD=T`.** Real example:
+  `WARNING=Warning scale was inaccurate! Set FOV=8.62d, scale=9.0", FL=99mm`. So the parse
+  rule is: `exit==0 and PLTSOLVD==T` ⇒ solved, **and separately** surface `WARNING` — it means
+  the header's optics disagree with the solution (a genuinely useful diagnostic, and a hint that
+  the frame was cropped).
+- `CRPIX` was `(1469, 979.5)` and `(2601.5, 1732.5)`, i.e. exact frame centres.
 
 The `.ini` does **not** contain `FOV`, `ROTATION`, `RADESYS`, or a parity flag. Derive:
 
 ```
-pixel_scale = sqrt(CD1_1^2 + CD2_1^2)          # deg/px
-position_angle = atan2(CD2_1, CD2_2)           # image "up" vs north
-parity = sign(CD1_1*CD2_2 - CD1_2*CD2_1)       # detect mirrored solutions
+pixel_scale    = sqrt(CD1_1^2 + CD2_1^2)       # deg/px
+position_angle = atan2(CD1_2, CD2_2)           # PA of the image +y axis, East of North
+parity         = sign(CD1_1*CD2_2 - CD1_2*CD2_1)
 ```
 
-Parity matters for the reframing arrows (see 04) — a mirrored solution flips every
-left/right instruction.
+> ⚠️ **`position_angle` uses `CD1_2`, not `CD2_1`.** An earlier revision of this brief said
+> `atan2(CD2_1, CD2_2)`. That is wrong in general; it happened to look right on the test frame
+> only because `CD1_2 ≈ CD2_1` for a near-pure rotation. For a true rotation matrix the two
+> forms are **negatives** of each other, so the error is a sign flip. Use `CD1_2`. Full
+> derivation and a numeric cross-check in [07 §2.1](07-altaz-reframing-spec.md).
 
-A `.wcs` file (Astrometry.net-style header) is written **only on success**, and only with
-`-wcs`. The `.log` requires `-log`. ✅ Confirmed on the failure path: `.ini` and `.log`
-present, no `.wcs`.
+Cross-check that catches sign errors: `PA_y ≈ −CROTA2`. Measured: `PA_y = 178.05°` vs
+`−CROTA2 = +178.036°`.
+
+`parity = −1` (negative determinant) on both real frames — that is the **normal** FITS
+convention (RA increases leftward). `parity = +1` means a mirrored solution, which flips every
+left/right instruction in the reframing UI.
+
+A `.wcs` file is written **only on success**, and only with `-wcs`. The `.log` requires `-log`.
+✅ Confirmed on the failure path: `.ini` and `.log` present, no `.wcs`.
+
+⚠️ **The `.wcs` is not a minimal header — it is the input FITS header with WCS keys appended,
+and it includes SIP coefficients by default** (`A_ORDER=3`, `A_*/B_*/AP_*/BP_*`) **even without
+passing `-sip`.** An earlier revision claimed SIP was off by default. Observed otherwise. The
+`.ini`, by contrast, carries no SIP terms at all — so if you need distortion terms you must read
+`.wcs`, not `.ini`.
+
+⚠️ A `.wcs` derived from a raw frame carries the *original* header with it (one real example had
+`PROGRAM = 'Siril 1.4.3'`, `FILENAME = '...0063.cr2'`, `STACKCNT = 153`), so don't mistake those
+inherited keys for ASTAP's own output. ASTAP adds `PLTSOLVD`, the WCS block, and a
+`COMMENT ... Solved in 0.6 sec. Offset was 0.7". Mount offset RA=1.4", DEC=0.8"` line.
 
 ---
 
@@ -196,6 +231,28 @@ otherwise the D-series. Each tile class has a hard maximum field — **5.14° fo
 tiles (D50/D80)**, 9.53° for `.290`, 180° for `w08`. Exceeding it does not fail; ASTAP
 *crops to the centre* and emits a `WARNING=` line.
 
+✅ **Verified the hard way on real data (2026-10-24).** A genuine 100 mm / APS-C light frame
+(`light_00001.fit`, 5202×3464, 180 s) has an **8.53°** tall field. With only D80 installed,
+hinted solving against it was **unreliable — 2 of 5 `-fov` values solved, 3 failed**, while the
+same frame solved fine with auto-FOV in 3.98 s. ASTAP's own warning confirms the cause:
+
+```
+WARNING=Warning scale was inaccurate! Set FOV=8.62d, scale=9.0", FL=99mm
+Image height: 6.33 degrees     <-- cropped from 8.62 to fit D80
+```
+
+And because it cropped, **`CRVAL` then describes the cropped sub-image, not the user's frame** —
+which silently corrupts anything that consumes the solution (reframing arrows, WCS bookkeeping).
+A ~2° field frame at 385 mm solved cleanly with no warning. So:
+
+- the database ceiling is **not theoretical**, it silently degrades results at wide focal lengths;
+- it must be detected (compare solved pixel scale × width against expected field) rather than
+  assumed;
+- it argues for **choosing the database from the computed field** before solving, not after.
+
+A 5202×3464 frame at 100 mm is an ordinary wide-field DSLR shot, so this is the *common* case for
+our user, not the edge case.
+
 **This is a real constraint for our users.** With a 100–400 mm lens on APS-C the field
 runs from 2.1° to 8.6° tall. At the long end D80 is correct; at 8.6° D80 will silently
 crop. Shipping guidance should tell users to install **D80 + G05** (and W08 if we ever
@@ -229,6 +286,23 @@ Useful diagnostic: `-analyse 20` returns `HFD_MEDIAN=` and `STARS=` directly. �
 bad frames it reported `HFD_MEDIAN=99.0`, `STARS=0` — a perfectly good quality gate for
 free, in one process spawn.
 
+⚠️ **But `-analyse` is unreliable on raw, uncorrected light frames.** On a real 180 s light
+(RGB, uncalibrated, heavy skyglow) it reported `HFD_MEDIAN=99.0, STARS=0` — the same output it
+gives for a blank frame — yet the *solver* found 18 stars immediately and 4750 after adaptive
+thresholding. On the Siril-processed stack of the same target it correctly reported
+`HFD_MEDIAN=6.1, STARS=545`.
+
+So: `-analyse` is a good gate for **already-calibrated/stacked** frames, and a misleading one
+for raw subs. For the live loop, star count and focus ought to come from our own detector on
+data we already have in memory, rather than a second process spawn whose thresholds we cannot
+control.
+
+⚠️ `-analyse` also packs its result into the exit code as `HFD*1e6 + nstars`, which cannot
+survive a Unix `$?`. Measured: a run reporting `HFD=6.1, STARS=545` (true code ≈ 6 100 545)
+surfaced as **33** — i.e. pure truncation modulo 256, indistinguishable from ASTAP's real
+exit code 33 ("error reading star database"). Never read `-analyse` results from the exit code
+across the WSL boundary; parse the stdout or the CSV.
+
 ---
 
 ## 8. Speed
@@ -236,6 +310,21 @@ free, in one process spawn.
 ✅ Measured here: a failing solve that aborted after star detection took **288 ms wall**,
 including process spawn. The harness floor is **~43 ms** per `cmd.exe` round trip (see
 00), so spawn cost is a meaningful share of any very fast solve.
+
+### Measured here (2026-10-24, 60D frames, `astap_cli` CLI-2025.10.11)
+
+| Case | Frame | Wall clock |
+|---|---|---|
+| Auto-FOV (`-fov 0`), `-r 60` | 2937×1958, 1.25° field | **4.0 s** |
+| Auto-FOV (`-fov 0`), `-r 60` | 5202×3464, 8.5° field | **8.2 s** |
+| **Hinted** (`-fov` + `-ra`/`-spd`, `-r 3`) | 2937×1958 | **0.74 s** (3 runs: 745/732/737 ms) |
+
+So the hinted/full-blind ratio is roughly **10×**, and the 43 ms `cmd.exe` spawn overhead (see 00)
+is a small share of even the fast path. A ~0.7 s cadence is comfortably inside a real-time loop;
+`-fov 0` is not.
+
+⚠️ Also observed: `-z 0` (auto) picked **1×1** binning on the 1958-px-tall frame and **2×2** on
+the 3464-px-tall frame, consistent with the >2500 px threshold.
 
 ⚠️ From published benchmarks and source reading, not measured here:
 
