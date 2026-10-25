@@ -78,6 +78,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus: drive primitive, HFD, V-curve fit; MF required. |
 | 12 | [session-flow.md](docs/research/12-session-flow.md) | The setup wizard: preflight, target, parameters, focus, point, run. |
 | 13 | [head-calibration.md](docs/research/13-head-calibration.md) | Converts degrees into knob turns: the 2x2 head calibration. |
+| 14 | [portability-browser-ui-and-linux-sbc.md](docs/research/14-portability-browser-ui-and-linux-sbc.md) | Browser UI (NiceGUI), libgphoto2 port, SBC deployment. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
@@ -193,7 +194,8 @@ than only synthetic data. Nothing has yet touched the camera.
 | Live stacking | 03, 06 | in-process numpy; Siril only for the end-of-session restack |
 | Reframe geometry (envelope, corner, turns) | 07, 10, 13 | the maths is verified; the code is not written |
 | `CALIBRATE` phase + head profile store | 12, 13 | enum member, guard, JSON store |
-| UI | 09 | PySide6, onedir |
+| UI | 09, 14 | NiceGUI (supersedes PySide6); browser + native wrapper |
+| libgphoto2 camera backend | 14 | for the Linux/SBC target |
 
 **Outstanding research / validation**
 

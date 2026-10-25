@@ -1,5 +1,13 @@
 # 09 — Python GUI on Windows: what to build ministar's operator console with
 
+> ⚠️ **Superseded in part, 2026-10-25.** The *toolkit choice* below (PySide6) is superseded by
+> [14-portability-browser-ui-and-linux-sbc.md](14-portability-browser-ui-and-linux-sbc.md) §2:
+> the product now also targets a headless Linux box with a phone browser as the console, so one
+> NiceGUI codebase serves both deployments instead of one PySide6 frontend. The **measurements**
+> here remain valid and still inform the image path — in particular "never scale a 24 MP frame on
+> the GUI thread", the 1 fps budget, and the 24 MP downscale costs. Read §2 of brief 14 first;
+> read this brief for the numbers.
+
 **Scope.** Pick one desktop GUI toolkit for a Windows-only Python astrophotography app, and justify it
 with numbers. Every toolkit below was installed into a **vendored python-build-standalone 3.13.15**
 tree on this machine (the exact shipping contract from brief 05), then made to show a realistic
