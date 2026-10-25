@@ -76,6 +76,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit choice; PySide6 vs Tk, threading, packaging. |
 | 10 | [target-catalog-and-reframe-envelope.md](docs/research/10-target-catalog-and-reframe-envelope.md) | OpenNGC catalog; the drift envelope and reframe cadence. |
 | 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus over EDSDK: home to the stop, step back, sweep and fit. |
+| 12 | [session-flow.md](docs/research/12-session-flow.md) | The setup wizard: preflight, target, parameters, focus, point, run. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
@@ -129,6 +130,7 @@ src/ministar/
   solver/astap.py  ASTAP driver; the .ini contract is fully verified
   camera/          base.py = interface + Tv table; edsdk.py = not written yet
   focus/           autofocus: HFD metric, V-curve fit, motion planner, calibration
+  session/state.py the setup wizard as a dependency-checked state machine
   io/fits.py       minimal FITS reader (no astropy)
   stack/           not written yet (design in 03, 06)
   reframe/         not written yet (spec in 07)

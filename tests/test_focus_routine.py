@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ministar.focus.calibration import CalibrationStore
 from ministar.focus.driver import Direction, FocusSample, PulseResult
-from ministar.focus.routine import RoutineConfig, autofocus
+from ministar.focus.routine import RoutineConfig, Start, autofocus
 
 #: Near1-equivalents moved by one pulse of each tier.
 STEP_UNITS = {1: 1, 2: 4, 3: 12}
@@ -29,6 +29,7 @@ class FakeFocuser:
         stars: int = 20,
         flat: bool = False,
         stop_floor: int = -60,
+        detect_limit: float = 25.0,
     ) -> None:
         self._pos = 0
         self.best = best
@@ -36,6 +37,10 @@ class FakeFocuser:
         self.stars = stars
         self.flat = flat
         self.stop_floor = stop_floor
+        #: A real star becomes undetectable well before focus: a 200 px donut is
+        #: not a star to any detector. Without this the fake reports stars
+        #: everywhere and acquire stops on its first frame.
+        self.detect_limit = detect_limit
         self.frames = 0
         self.pulse_count = 0
 
@@ -61,7 +66,9 @@ class FakeFocuser:
 
     def measure(self) -> FocusSample:
         self.frames += 1
-        return FocusSample(self._pos, self._hfd(self._pos), self.stars, True)
+        hfd = self._hfd(self._pos)
+        visible = hfd <= self.detect_limit
+        return FocusSample(self._pos, hfd, self.stars if visible else 0, True)
 
 
 def test_homing_detects_the_stop() -> None:
@@ -141,3 +148,27 @@ def test_calibration_defaults_to_near1_only(tmp_path: Path) -> None:
     store = CalibrationStore(tmp_path / "l.json")
     ratios = store.get("any").ratios()
     assert ratios == {Direction.NEAR_1: 1.0}
+
+
+def test_cold_start_reaches_a_far_offset() -> None:
+    """The real 400 mm case: focus sits ~5030 units from the stop.
+
+    This is why the routine's acquire budget had to grow and widen -- a 700-unit
+    budget could never reach it, and the failure would present as "no stars found"
+    on a perfectly good sky.
+    """
+    driver = FakeFocuser(best=5030, stop_floor=-100)
+    result = autofocus(driver, RoutineConfig(), ratios=REAL_RATIOS)
+    assert result.ok
+    assert abs(driver.position - 5030) <= 60
+    assert result.pulses < 1000
+
+
+def test_at_current_skips_homing_and_search() -> None:
+    """The per-reframe check must be cheap: no home, no long walk."""
+    driver = FakeFocuser(best=500)
+    driver.reset_position(470)
+    result = autofocus(driver, RoutineConfig(), start=Start.AT_CURRENT, ratios=REAL_RATIOS)
+    assert result.ok
+    assert result.pulses < 40
+    assert abs(driver.position - 500) <= 40

@@ -17,10 +17,28 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from enum import Enum
 
 from ministar.focus.curve import VCurveFit, depth_of_minimum, fit_v_curve
 from ministar.focus.driver import Direction, FocusDriver, FocusSample
 from ministar.focus.motion import DEFAULT_RATIOS, StepRatios, plan_move
+
+
+class Start(Enum):
+    """Where the routine begins from.
+
+    ``COLD`` is for the first focus of a session: hammer the far stop to establish
+    the coordinate origin, then search for stars. That search is unavoidably slow
+    (at 400 mm the focus sits ~5030 units from the stop), which is why the session
+    wizard has the user aim it by hand first (12 §3).
+
+    ``AT_CURRENT`` is every subsequent focus: the position counter is already
+    anchored, stars are already in view, and we only need a local sweep. This is
+    the mode used by the per-reframe check.
+    """
+
+    COLD = "cold"
+    AT_CURRENT = "at_current"
 
 
 @dataclass(frozen=True)
@@ -30,8 +48,17 @@ class RoutineConfig:
     #: Upper bound on homing pulses. Reaching the stop is detected, not assumed.
     home_pulses: int = 80
     #: Acquire: step back from the stop until stars appear.
+    #:
+    #: The default budget must cover the worst realistic case. At 400 mm the focus
+    #: sits ~5030 units from the stop (11 §2.2), so a 700-unit budget could never
+    #: reach it -- a latent bug that the manual-bootstrap step in 12 §3 makes
+    #: mostly moot, but which should not be left in the code.
     acquire_step_units: int = 16
-    acquire_max_units: int = 700
+    acquire_max_units: int = 8000
+    #: The stride doubles every this many fruitless steps, so a long search is
+    #: covered quickly while a short one stays fine-grained. Capped at 4x so we can
+    #: never step over the in-focus window, which is ~100-350 units wide.
+    acquire_widen_every: int = 8
     #: Sweep: coarse stride once we have stars.
     sweep_step_units: int = 24
     max_sweep_samples: int = 24
@@ -138,15 +165,20 @@ def _acquire(
                 return sample, ""
 
     travelled = 0
+    steps = 0
+    stride = cfg.acquire_step_units
     while travelled < cfg.acquire_max_units:
         if budget.exhausted:
             return None, "pulse budget exhausted while acquiring stars"
-        ok, moved = _move_to(driver, driver.position + cfg.acquire_step_units, ratios, budget)
+        ok, moved = _move_to(driver, driver.position + stride, ratios, budget)
         if not ok:
             return None, "could not drive the focus motor"
         if not moved:
             return None, "reached the end of focus travel without finding stars"
-        travelled += cfg.acquire_step_units
+        travelled += stride
+        steps += 1
+        if cfg.acquire_widen_every and steps % cfg.acquire_widen_every == 0:
+            stride = min(stride * 2, cfg.acquire_step_units * 4)
         sample = _measure_ok(driver, cfg)
         if sample.accepted:
             return sample, ""
@@ -196,6 +228,7 @@ def autofocus(
     driver: FocusDriver,
     config: RoutineConfig | None = None,
     *,
+    start: Start = Start.COLD,
     known_offset: int | None = None,
     ratios: StepRatios | None = None,
 ) -> FocusResult:
@@ -205,17 +238,36 @@ def autofocus(
     budget = _Budget(cfg.max_total_pulses)
     phases: list[str] = []
 
-    homed, home_note = _home(driver, cfg, budget)
-    phases.append(f"home:{budget.used}")
-    if not homed:
-        return FocusResult(False, driver.position, math.nan, home_note, budget.used, phases=phases)
+    sample: FocusSample | None = None
 
-    sample, acquire_note = _acquire(driver, cfg, budget, known_offset, ratios)
-    if sample is None:
-        return FocusResult(
-            False, driver.position, math.nan, acquire_note, budget.used, phases=phases
-        )
-    phases.append(f"acquire:{budget.used}")
+    if start is Start.COLD:
+        homed, home_note = _home(driver, cfg, budget)
+        phases.append(f"home:{budget.used}")
+        if not homed:
+            return FocusResult(
+                False, driver.position, math.nan, home_note, budget.used, phases=phases
+            )
+
+        sample, acquire_note = _acquire(driver, cfg, budget, known_offset, ratios)
+        if sample is None:
+            return FocusResult(
+                False, driver.position, math.nan, acquire_note, budget.used, phases=phases
+            )
+        phases.append(f"acquire:{budget.used}")
+    else:
+        # Already anchored and already looking at sky: only verify we have stars.
+        current = _measure_ok(driver, cfg)
+        if current.accepted:
+            sample = current
+        else:
+            # Stars vanished (cloud, cap, someone bumped the ring). Fall back to a
+            # bounded search rather than blindly sweeping around nothing.
+            sample, acquire_note = _acquire(driver, cfg, budget, known_offset, ratios)
+            if sample is None:
+                return FocusResult(
+                    False, driver.position, math.nan, acquire_note, budget.used, phases=phases
+                )
+            phases.append(f"acquire:{budget.used}")
 
     samples = _sweep(driver, cfg, budget, sample, ratios)
     phases.append(f"sweep:{budget.used}")
