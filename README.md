@@ -171,17 +171,38 @@ Two things worth knowing before editing:
 
 ## Status
 
-Research phase. No code yet.
+Scaffolded. The algorithms that can be proven without hardware **are** proven: 77 tests, and the
+commit history records five real defects found by running against the user's own frames rather
+than only synthetic data. Nothing has yet touched the camera.
 
-Validated against real frames from the user's own archive: the success-path `.ini` contract is
-confirmed (13 keys, no `DIMENSIONS`, `WARNING` can co-occur with `PLTSOLVD=T`), and a hinted
-solve lands in **0.74 s** versus 4–8 s for auto-FOV.
+**Working**
 
-Outstanding:
+| Area | State |
+|---|---|
+| ASTAP driver | complete; hinted solve measured at **0.74 s** |
+| Focus: HFD metric, V-curve fit, motion planner, routine | complete, validated on real frames |
+| Session state machine | complete (linear wizard, guards, persistence) |
+| Preflight / config / Windows entry points | complete, verified on Windows |
+| FITS reader, `ministar hfd` | complete |
+
+**Pending implementation** (designs exist, code does not)
+
+| Item | Brief | Note |
+|---|---|---|
+| EDSDK camera backend | 08 | the last untested assumption in the whole project |
+| Live stacking | 03, 06 | in-process numpy; Siril only for the end-of-session restack |
+| Reframe geometry (envelope, corner, turns) | 07, 10, 13 | the maths is verified; the code is not written |
+| `CALIBRATE` phase + head profile store | 12, 13 | enum member, guard, JSON store |
+| UI | 09 | PySide6, onedir |
+
+**Outstanding research / validation**
 
 - The **star-database ceiling is a live problem**, not theoretical. A real 100 mm frame has an
   8.53° field, which exceeds D80's 5.14° limit; ASTAP silently cropped it and reported a solution
-  for the *cropped* centre. G05/W08 need installing and the database must be chosen from the
+  for the *cropped* centre. G05/W08 need installing, and the database must be chosen from the
   computed field *before* solving.
-- Camera control is unproven end-to-end — nothing has been driven over USB yet.
+- **A real head's degrees-per-turn is unmeasured.** 13 uses 7.2°/turn, cited rather than observed;
+  the entire instruction vocabulary depends on it.
+- Backlash magnitude on a real 3-way head is unmeasured, and it sets whether knob instructions can
+  hit the aiming tolerance at all.
 - No decision recorded on the exposure planner that snaps to Canon's discrete Tv table.

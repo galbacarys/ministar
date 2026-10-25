@@ -198,21 +198,85 @@ away from truth.
 
 ---
 
-## 8. Storage
+## 8. Multiple head profiles — a first-class requirement, not a footnote
 
-One profile per head, in the same JSON style as the lens calibration:
+This is not a single-calibration tool. **People own more than one head.** The motivating case is
+concrete: a good geared head at home, a small travel head that goes in a rucksack. Those have
+completely different knob rates, different backlash, and possibly different tripod levelling. One
+profile would make the travel head actively worse than no calibration at all — the instructions
+would be wrong by the ratio of the two rates, which could be 5×.
+
+So: **named profiles, many of them, selected per session.**
+
+### 8.1 Schema
+
+Same shape and same guarantees as the lens store already implemented in
+`focus/calibration.py`: single JSON file, atomic write via `os.replace`, and a corrupt or
+unknown-version file must never block a session.
 
 ```json
-{ "head": "Manfrotto 410 geared",
-  "j": [[-0.353, -7.189], [-7.099, -0.344]],
-  "backlash_turns": 0.08,
-  "calibrated": "2026-10-24T21:14:00",
-  "tripod_level_deg": 3.0 }
+{ "version": 1,
+  "last_used": "manfrotto-410",
+  "heads": [
+    { "id": "manfrotto-410",
+      "name": "Manfrotto 410 geared (home)",
+      "kind": "geared",
+      "j": [[-0.353, -7.189], [-7.099, -0.344]],
+      "backlash_turns": 0.08,
+      "calibrated": "2026-10-24T21:14:00",
+      "tripod_level_deg": 3.0,
+      "notes": "" },
+    { "id": "smallrig-travel",
+      "name": "SmallRig travel ball head",
+      "kind": "ball",
+      "j": null,
+      "backlash_turns": null,
+      "calibrated": null,
+      "notes": "one lock, no separate axes -- arrow only" }
+  ] }
 ```
 
-`tripod_level_deg` is not needed for the arithmetic — it is inferred from the cross-terms — but it
-is worth surfacing: **"your tripod is 3° off level"** is actionable, it explains the cross-terms,
-and levelling would remove them.
+`kind: "ball"` with `j: null` is a **legitimate profile**, not an absence of one. A ball head has
+no independent altitude knob — you loosen one lock and the whole assembly moves — so a 2×2 is not
+merely hard to measure, it does not exist. Recording that deliberately is better than letting the
+user attempt a calibration that produces a matrix and then misbehaves. For such a head the app
+falls back to the arrow-and-iterate loop (§6.1), which is honest and still works.
+
+### 8.2 Selection
+
+- Head selection belongs in **PREFLIGHT**, with the camera and lens — it is an equipment
+  property, not a per-target setting.
+- Default to `last_used`. Changing heads once a month should cost one dropdown interaction.
+- Profiles are **independent of lenses and targets**. The matrix maps knob turns to pointing, which
+  has nothing to do with focal length or camera roll, so there is no combinatorial explosion: two
+  heads and three lenses is two profiles, not six. (Worth stating because it is a reasonable thing
+  to worry about.)
+
+### 8.3 Verify cheaply instead of re-calibrating
+
+The full protocol is ~60 s. That is fine once, and annoying every session. Since §7 already
+compares predicted against actual, a **single-move verification** is nearly free:
+
+```
+solve A -> ask for a known small move (e.g. +1 azimuth turn) -> solve B
+if  J·(1 turn)  matches (B-A)  within tolerance  ->  profile confirmed, skip the wizard
+else                                             ->  offer to re-calibrate or pick another profile
+```
+
+~15 s instead of ~60 s, and it catches the case that actually happens: **the wrong profile is
+selected** because the user picked up the travel head and the dropdown still said Manfrotto. That
+is a much more likely error than the head having drifted, and without a cheap check it would
+surface as confusing instructions rather than a clear message.
+
+If two profiles exist and the residual matches the *other* one better, say so:
+"This looks like the SmallRig profile — switch?"
+
+### 8.4 `tripod_level_deg`
+
+Not needed for the arithmetic — it is inferred from the cross-terms — but worth surfacing:
+**"your tripod is 3° off level"** is actionable, it explains the cross-terms, and levelling would
+remove them. It is per-profile because each setup will differ, and it is the number most likely to
+change between home and travel.
 
 ---
 
@@ -221,11 +285,15 @@ and levelling would remove them.
 | Case | Behaviour |
 |---|---|
 | Head has a stop within 5 turns | Detect: the second solve's displacement is far off the expected magnitude → abort and suggest fewer turns |
-| Ball head with no separate axes | The 2×2 still works (two independent knobs), but the axes are not pan/tilt; if the user has only one lock, calibration is meaningless → skip and fall back to the arrow |
-| User swaps heads | Keyed by profile name; `tripod_level_deg` and `J` both change |
-| Zoom/focus changed since calibration | Irrelevant — `J` is about the head, not the optics. Only the *pixel* scale depends on focal length, and that comes from the solve |
-| Target changes declination drastically | `J` unaffected (it is a head property). The `cos h` effect on needed turns is handled inside the solve at use time |
+| Ball head, or any head with one lock | A `kind: "ball"` profile with `j: null`. Arrow-and-iterate only. Do **not** fabricate a 2×2 |
+| **Wrong profile selected** | Caught by the cheap verification (§8.3) or by the run-time residual check (§7). Offer the profile whose matrix fits better |
+| User swaps heads mid-session | Selecting a new profile invalidates any in-flight turn instruction; re-solve before the next one |
+| Zoom/focus changed since calibration | Irrelevant — `J` is a head property. Only the *pixel* scale depends on focal length, and that comes from the solve |
+| Camera moved in the clamp (roll changed) | Irrelevant — `J` maps turns to *pointing*, not to the image. Roll changes `ψ`, not the head rate |
+| Tripod re-levelled or moved | Cross-terms change. The verification in §8.3 catches it; a full re-run fixes it |
+| Target changes declination drastically | `J` unaffected. The `cos h` effect on needed turns is handled inside the solve at use time |
 | Very fine correction, < 0.05 turn | Below what a hand can do. Say "within tolerance" if it is, else iterate |
+| Profile file from a future version | Ignore unknown fields, keep the user's data, never crash |
 
 ---
 

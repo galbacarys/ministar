@@ -48,6 +48,14 @@ Already implemented as `ministar preflight`. Its job is to fail *before* the use
 drives somewhere dark, not after. Reports: ASTAP + its star database, `EDSDK.dll`,
 camera on the bus, lens model and focal length, site latitude/longitude, disk space.
 
+**Also selects the head profile** (13 §8) — a dropdown of named heads, defaulting to the
+last one used. It belongs here because it is an equipment property like the camera and
+lens, not a per-target setting. Users commonly own more than one head (a good geared one
+at home, a small travel head in a rucksack), and those need separate profiles: using the
+wrong one makes the instructions wrong by the ratio of the two knob rates, which could be
+5×. Some heads — anything with a single lock — are recorded as `kind: "ball"` and
+honestly get arrow-only guidance rather than a fabricated calibration.
+
 The camera checklist from `preflight.CAMERA_CHECKS` belongs here as a real check
 where possible: mirror lockup, LENR, mode dial. Per 08 §7.2b these are *the* cause of
 past failures, and N.I.N.A. only ever surfaced them as a message box.
@@ -291,7 +299,13 @@ the user actually operates: **turns of a knob**, not degrees on the sky. The mea
 couples the axes, and at 3° of tilt the coupling is ~6′, the size of the whole aiming tolerance.
 
 See [13-head-calibration.md](13-head-calibration.md). The wizard is: solve, turn azimuth 5 turns,
-solve, turn back, solve, tilt 3 turns, solve. Under a minute, once per head.
+solve, turn back, solve, tilt 3 turns, solve. Under a minute, once per head — and normally
+**skipped entirely**, because a selected profile is confirmed by a single-move check (~15 s)
+rather than re-measured. That cheap check earns its place by catching the error that actually
+happens: the wrong profile is selected, because the user picked up the travel head and the
+dropdown still said Manfrotto. Without it that surfaces as confusing instructions instead of a
+clear message, and the residual check in 13 §7 would eventually catch it but only after the user
+has been misled once.
 
 ⚠️ **Pending:** `session/state.py` has no `CALIBRATE` phase yet. Adding it is a small change
 (enum member, ordering, one guard) plus tests; it is deliberately not done here so the doc can be
