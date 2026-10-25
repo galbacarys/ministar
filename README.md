@@ -77,6 +77,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 10 | [target-catalog-and-reframe-envelope.md](docs/research/10-target-catalog-and-reframe-envelope.md) | OpenNGC catalog; the drift envelope and reframe cadence. |
 | 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus: drive primitive, HFD, V-curve fit; MF required. |
 | 12 | [session-flow.md](docs/research/12-session-flow.md) | The setup wizard: preflight, target, parameters, focus, point, run. |
+| 13 | [head-calibration.md](docs/research/13-head-calibration.md) | Converts degrees into knob turns: the 2x2 head calibration. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design

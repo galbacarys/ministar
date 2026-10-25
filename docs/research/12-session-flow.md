@@ -14,15 +14,15 @@ Target flow, per the user:
 ## 0. The flow
 
 ```
-  ┌───────────┐   ┌────────┐   ┌────────────┐   ┌───────┐   ┌───────┐   ┌─────┐
-  │ PREFLIGHT │ → │ TARGET │ → │ PARAMETERS │ → │ FOCUS │ → │ POINT │ → │ RUN │
-  └───────────┘   └────────┘   └────────────┘   └───────┘   └───────┘   └─────┘
-   tools, camera   catalog,     interval ↔        aim by       entry       capture,
-   lens, site       tonight     usable MP,        hand, then   corner,     stack,
-                                camera roll       autofocus    solve       monitor
-                                                                 ↓
-                                                          reframe (cheap
-                                                          re-entry to POINT)
+  ┌───────────┐   ┌────────┐   ┌────────────┐   ┌───────┐   ┌───────────┐   ┌───────┐   ┌─────┐
+  │ PREFLIGHT │ → │ TARGET │ → │ PARAMETERS │ → │ FOCUS │ → │ CALIBRATE │ → │ POINT │ → │ RUN │
+  └───────────┘   └────────┘   └────────────┘   └───────┘   └───────────┘   └───────┘   └─────┘
+   tools, camera   catalog,     interval ↔        aim by       head: degrees    entry       capture,
+   lens, site       tonight     usable MP,        hand, then   per turn, once   corner,     stack,
+                                camera roll       autofocus    per head         solve       monitor
+                                                                                   ↓
+                                                                            reframe (cheap
+                                                                            re-entry to POINT)
 ```
 
 **The ordering is a dependency chain, not a preference:**
@@ -32,6 +32,13 @@ Target flow, per the user:
 | FOCUS | POINT | ASTAP needs ~30 stars; a defocused frame will not solve. Asking the user to solve first is asking them to fail. |
 | POINT | RUN | The envelope's entry corner depends on where the camera actually points and how it is rolled (10 §5). |
 | PARAMETERS | FOCUS | The interval sets the usable field, and the user should see what they are committing the evening to before spending it. |
+| FOCUS | CALIBRATE | The calibration solves frames, and a defocused frame will not solve (same reason as above). |
+
+**CALIBRATE is the one step with no dependents.** It converts "move 2.1° left" into "turn the
+azimuth knob about a third of a turn" (13), which is the difference between an instruction a
+beginner can act on and one they cannot. But POINT works without it — it just falls back to
+stating degrees. So it is offered, not required, and it is skipped automatically on later sessions
+once a head profile exists. Per the README design stance: inform, never block.
 
 ---
 
@@ -257,8 +264,9 @@ The wizard must reach imaging in a couple of minutes, or nobody uses it.
 | PARAMETERS | 10-30 s | includes a camera-roll adjustment if advised |
 | FOCUS, first time on a lens | 60-90 s | manual hunt + stills sweep |
 | FOCUS, subsequent | 5-10 s | home, jump to calibrated offset, verify |
+| CALIBRATE | 45-70 s | 4 solves + 2 knob moves, **once per head**; skipped afterwards |
 | POINT | 30-60 s | solve + a human nudge + confirm |
-| **Total to first frame** | **~2 min subsequent, ~3 min first time** | |
+| **Total to first frame** | **~2 min subsequent, ~4 min first time (incl. head calibration)** | |
 
 ---
 
@@ -272,6 +280,22 @@ The wizard must reach imaging in a couple of minutes, or nobody uses it.
 - **No blocking.** Every step can be walked past with a warning, and the app will do
   its best. The one thing it will not do is start the loop with no focus and no
   solve, because that produces nothing but wasted frames.
+
+---
+
+## 4a. Head calibration (brief 13)
+
+Sits between FOCUS and POINT. It exists so the reframe instruction can be expressed in the units
+the user actually operates: **turns of a knob**, not degrees on the sky. The measured object is a
+2×2 matrix mapping knob turns to (Δalt, Δaz) — not two scalar rates — because an unlevel tripod
+couples the axes, and at 3° of tilt the coupling is ~6′, the size of the whole aiming tolerance.
+
+See [13-head-calibration.md](13-head-calibration.md). The wizard is: solve, turn azimuth 5 turns,
+solve, turn back, solve, tilt 3 turns, solve. Under a minute, once per head.
+
+⚠️ **Pending:** `session/state.py` has no `CALIBRATE` phase yet. Adding it is a small change
+(enum member, ordering, one guard) plus tests; it is deliberately not done here so the doc can be
+reviewed first.
 
 ---
 
