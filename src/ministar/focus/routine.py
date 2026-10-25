@@ -228,11 +228,17 @@ def autofocus(
     driver: FocusDriver,
     config: RoutineConfig | None = None,
     *,
-    start: Start = Start.COLD,
+    start: Start = Start.AT_CURRENT,
     known_offset: int | None = None,
     ratios: StepRatios | None = None,
 ) -> FocusResult:
-    """Run the full routine. Ordinary failures are reported, never raised."""
+    """Run the full routine. Ordinary failures are reported, never raised.
+
+    Defaults to ``Start.AT_CURRENT`` because that is the real workflow: the user
+    rough-focuses by hand on the live view, then this refines locally (12 §4.2).
+    ``Start.COLD`` exists for the no-human case and is not on the critical path
+    (12 §4.4).
+    """
     cfg = config or RoutineConfig()
     ratios = ratios or DEFAULT_RATIOS
     budget = _Budget(cfg.max_total_pulses)
@@ -309,7 +315,10 @@ def autofocus(
         local: list[tuple[float, float]] = []
         probe_positions = [landing + offset * window for offset in (-2, -1, 0, 1, 2)]
         for position in probe_positions:
-            _move_to(driver, max(0, position), ratios, budget)
+            # No clamping at zero: the position origin is only the far stop when we
+            # homed there. After the user turns the focus ring by hand the counter's
+            # zero is arbitrary, and clamping would drag every probe toward it.
+            _move_to(driver, position, ratios, budget)
             probe = _measure_ok(driver, cfg)
             samples.append(probe)
             if probe.accepted and math.isfinite(probe.hfd):

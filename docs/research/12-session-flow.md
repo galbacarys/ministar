@@ -83,40 +83,42 @@ Also surfaced here:
 
 ## 4. FOCUS — the interesting step
 
-### 4.1 The problem with doing it automatically
+### 4.1 Why we do not drive it there ourselves
 
-Driving the lens from fully out-of-focus to focus means traversing the **stop
-offset**. At 400 mm that is ~5030 Near1-units (11 §2.2), and each pulse needs a
-~100 ms settle:
+If the software did the coarse search it would have to traverse the whole focus range,
+one ~100 ms pulse at a time:
 
-| strategy | pulses | time |
+| strategy | pulses to cross ~5030 units | time |
 |---|---|---|
 | `Near1` only (what the reference plugin does) | 5030 | **8.4 min** |
 | `Near2` at 4:1 | 1258 | 2.1 min |
-| `Near3` at 12:1 | 419 | **42 s** |
+| `Near3` at 12:1 | 419 | 42 s |
 
-Plus a measurement frame at every stop along the way, and the measurement is the
-unreliable part: a defocused star overflows the HFD window, so the routine is
-partially blind exactly where it must search.
+Plus a measurement frame at every stop, and the measurement is the unreliable part: a
+defocused star overflows the HFD window, so the routine is partly blind exactly where it
+must search.
 
-### 4.2 The user's proposal: let the human do the coarse search
+### 4.2 The human turns the focus ring
 
-Stream live view. The user watches stars go from donuts to points and hits a button
-when they look sharp. Then autofocus refines from there.
+Stream live view with a sharpness readout. The user turns the **physical focus ring**
+until the stars look sharp, then presses "good enough". Autofocus refines from there.
 
-This is the right call, for reasons beyond speed:
+This is not a workaround, it is the better instrument:
 
-- **A human is a better star detector than a threshold** when the PSF is a 200 px
-  donut. No tuned `k_min` to get wrong.
-- **It cannot fail silently.** A blind walk that mis-thresholds reports "no stars"
-  on a perfectly good sky.
-- **It keeps the user in the loop** on the one step where their judgement is
-  genuinely better than the software's.
-- **It is bounded.** 42 s of holding a `Near3` button crosses the entire focus range.
+- **A hand crosses the entire range in a second or two.** No pulses, no settle delay,
+  no traversal budget. It beats every row of the table above by two orders of magnitude.
+- **A human is a better star detector than a threshold** when the PSF is a 200 px donut.
+  There is no `k_min` to get wrong.
+- **It cannot fail silently.** A blind walk that mis-thresholds reports "no stars" on a
+  perfectly good sky; the user just looks and turns the ring.
+- **It needs no motor, no absolute position and no calibration**, so it works even if
+  `DriveLensEvf` turns out to be unusable in MF (§4.5).
 
-The cost is that the wizard has a step requiring attention. That is acceptable at
-setup and unacceptable mid-session — which is why the manual step happens **once per
-lens per focal length**, not once per session (§4.4).
+The cost is one step requiring attention, once, at setup. That is acceptable where a
+mid-session prompt would not be.
+
+⚠️ Use the **live-view stream** for this, not stills. Live view at 10-30 fps is what makes
+the feedback feel immediate; a 1-2 s still per sample would make hunting miserable.
 
 ### 4.3 Two metrics, because no single one works across the range
 
@@ -134,39 +136,55 @@ and real captures for the sweep. This also means the fine phase pays the
 stop-LV/capture/download/restart-LV cost (02) per sample — ~1-2 s each, so keep the
 sweep to ~10 samples.
 
-### 4.4 The bonus: the manual step *is* the calibration
+### 4.4 What this removes from the design
 
-When the user stops and hits "good enough", `driver.position` **is** the stop offset
-for this lens at this focal length. Write it to the calibration store.
+Because the human moves the lens by hand, **the motor's position counter stops reflecting
+where focus actually is.** That invalidates several things an earlier draft of this brief
+proposed, and dropping them is the point:
 
-So there is no separate calibration wizard, and no user-facing "calibrate your lens"
-task. The table populates itself through normal use (11 §6):
+| Dropped | Why it is no longer needed |
+|---|---|
+| Homing to the far stop | Nothing needs an absolute origin |
+| Per-lens / per-focal-length calibration table | A stored offset is fiction once the ring is turned by hand |
+| `Start.COLD` on the critical path | There is no search to bound |
+| Step-ratio calibration (`Near2`/`Near3` ratios) | Only matters for large moves; we now only make small ones |
 
-```
-first use of a lens at a focal length ..... manual hunt (~1 min) -> offset recorded
-every session after that ................. home, jump to offset, verify (seconds)
-```
+The sweep and refine phases work on **relative** moves, with sample positions in whatever
+arbitrary units the counter happens to use. Nothing in them needs to know where the stop is.
 
-This is what makes the manual step affordable: it is a one-time cost per
-lens/focal-length combination, and the 100-400 L is four combinations at most
-(100/200/300/400 mm).
+⚠️ **This retires the "manual focus is the calibration" idea from an earlier draft.** It
+rested on the position counter staying valid through the manual step, which it does not. And
+the companion claim — that 100 mm needs no calibration because its offset is 0 — was a
+misreading: `0` in the plugin's `lenses.json` is an auto-created placeholder meaning *never
+calibrated*, not a measurement (see the correction in 11 §2.2).
 
-At short focal lengths it is trivial anyway — at 100 mm the calibrated offset is
-**0**, so the far stop is already in focus and the step completes immediately.
+The homing / calibration / step-ratio code in `focus/` is kept but **demoted**: not used by
+the default flow, present only for a possible future "recover focus without a human" mode.
+If that never materialises, it should be deleted.
 
-### 4.5 The MF/AF question
+### 4.5 The question that now decides the architecture
 
-`DriveLensEvf` drives the focus motor; whether the lens must be switched to AF is
-unresolved (11 §11). The manual hunt has two possible implementations:
+**Can `DriveLensEvf` move the lens while the AF/MF switch is on MF?**
 
-- **(a) The app's own coarse buttons**, pulsing `Near3`/`Far3` while held. Keeps
-  everything motor-driven, no switch fiddling, and the position counter stays valid.
-- **(b) The user turns the physical ring.** Faster to start, but requires MF, and
-  switching back to AF afterwards may be needed — and in MF the position counter
-  stops tracking, losing the calibration measurement that is the whole bonus.
+Everything now hinges on it:
 
-**Recommend (a).** It costs 42 s of holding a button to cross the range, and it
-preserves the position counter. (b) throws away §4.4.
+- The run wants **MF**, because a lens left in AF may refocus when a picture is taken —
+  the reference plugin warns about exactly this.
+- The fine motor sweep wants **AF**, if that is what the command requires.
+
+If the motor works in MF, focus becomes hands-free after the initial hand adjustment. If it
+does not, focus stays manual all session and the app's job is to *tell* the user when to turn
+the ring.
+
+Design for both, and ship in that order:
+
+| Tier | Capability | Depends on |
+|---|---|---|
+| **1** | Hand focus guided by the live sharpness/HFD readout; the app says when focus has drifted | nothing — works today |
+| **2** | Hands-free local sweep to refine, and to correct drift automatically | `DriveLensEvf` working in MF |
+
+**Tier 1 is a complete, useful feature on its own** and must be built first. Tier 2 is an
+upgrade layered onto the same `autofocus(..., start=Start.AT_CURRENT)` routine.
 
 ---
 

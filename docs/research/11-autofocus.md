@@ -99,9 +99,27 @@ we know roughly where focus is, go there.*
                    {"FocalLength": 400.0, "FocusPosition": 5030}]}
 ```
 
-**At 100 mm the far stop is already in focus (offset 0); at 400 mm focus is 5030 pulses back
-from it.** That asymmetry is not a quirk — it is §3's physics: a short lens has an enormous
-depth of focus, so the stop is close enough to infinity, while a long lens does not.
+⚠️ **CORRECTION (2026-10-24).** This section originally read those numbers as *"at 100 mm the far
+stop is already in focus, so zero steps back; at 400 mm it is 5030"*, and invented a depth-of-focus
+explanation. **That was wrong** — the user spotted it. `LensAF.cs` settles it:
+
+```csharp
+instance.KnownLenses.Add(new LensConfig(name,
+    [new FocalLengthConfig(ProfileService.ActiveProfile.TelescopeSettings.FocalLength, 0)]));
+```
+
+When a lens is first seen the plugin **auto-creates an entry with `FocusPosition = 0`**, and a new
+focal length gets the same placeholder. So **`0` means "never calibrated", not "at the stop"** —
+and `CalibrateCamera` only moves `if (focusPosition > 0)`, i.e. an uncalibrated lens is left
+sitting at the far stop, out of focus, for N.I.N.A.'s autofocus to rescue.
+
+**Exactly one number in that file is real: 5030 at 400 mm.** Everything else is a placeholder. The
+proof is the EF100mm f/2.8 Macro entry, which carries a *400 mm* row — nonsense for a prime.
+
+The physics never supported the claim either: the far stop is **past infinity by design**, so it is
+out of focus for stars at *every* focal length. Image-space depth of focus is `2λN²`, independent
+of focal length, so the same past-infinity offset produces the same blur at 100 mm and 400 mm.
+What varies with focal length is only how many motor steps the mechanism needs to get there.
 
 This also proves the primitive is fine enough: an implementation demonstrably autofocuses a
 400 mm lens using nothing but 1-unit pulses. We are not fighting the hardware.
@@ -133,10 +151,12 @@ Three useful conclusions:
   "at 14-85 mm the PSF is 0.1-0.5 px" — that was the *seeing* term only, and diffraction sets a
   1.75 px floor. It makes 03's conclusion (nothing for lucky imaging to sharpen) *stronger*, not
   weaker, and it means the PSF is measurable at all focal lengths.
-- **Short focal lengths do not need autofocus.** At 100 mm the far stop is already in focus per
-  the calibration above. The curve is shallow and the tolerance is enormous in object space.
-- **Long focal lengths do**, which is the happy case: where precision is required, HFD is also
-  most sensitive.
+- **Focus is not optional at any focal length.** The far stop is past infinity, so it is out of
+  focus for stars everywhere. Image-space depth of focus is `±λN²`, independent of focal length
+  (±34.5 µm at f/5.6), so the required *precision* is the same at every focal length; only the
+  step count needed to reach focus varies, and that is a property of the lens mechanism.
+- **Where precision is required, HFD is also most sensitive** — the easy case and the demanding
+  case coincide, which is why a single metric is enough.
 
 Derived estimate of step granularity at 400 mm: if the stop sits ~0.5-2 mm past infinity, then
 5030 pulses map to 0.1-0.4 µm per pulse, making the in-focus window **~100-350 pulses wide**.

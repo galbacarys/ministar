@@ -74,7 +74,7 @@ class FakeFocuser:
 def test_homing_detects_the_stop() -> None:
     driver = FakeFocuser()
     config = RoutineConfig(home_pulses=40)
-    autofocus(driver, config, ratios=REAL_RATIOS)
+    autofocus(driver, config, start=Start.COLD, ratios=REAL_RATIOS)
     # Homing must have hit the floor and then re-anchored at zero.
     assert driver.position >= 0
 
@@ -114,8 +114,8 @@ def test_pulse_budget_is_respected() -> None:
 def test_known_offset_is_used_to_skip_the_search() -> None:
     fast = FakeFocuser(best=500)
     slow = FakeFocuser(best=500)
-    autofocus(fast, RoutineConfig(), known_offset=500, ratios=REAL_RATIOS)
-    autofocus(slow, RoutineConfig(), ratios=REAL_RATIOS)
+    autofocus(fast, RoutineConfig(), start=Start.COLD, known_offset=500, ratios=REAL_RATIOS)
+    autofocus(slow, RoutineConfig(), start=Start.COLD, ratios=REAL_RATIOS)
     assert fast.frames <= slow.frames
 
 
@@ -158,7 +158,7 @@ def test_cold_start_reaches_a_far_offset() -> None:
     on a perfectly good sky.
     """
     driver = FakeFocuser(best=5030, stop_floor=-100)
-    result = autofocus(driver, RoutineConfig(), ratios=REAL_RATIOS)
+    result = autofocus(driver, RoutineConfig(), start=Start.COLD, ratios=REAL_RATIOS)
     assert result.ok
     assert abs(driver.position - 5030) <= 60
     assert result.pulses < 1000
