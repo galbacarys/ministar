@@ -402,32 +402,134 @@ corners) at 15-30 s, which is another argument for the short-sub approach 03 alr
 
 ### 2.4 Synthesis
 
-**The user's box model is correct.** Translation governs; rotation adds a small, quantifiable
-crop. Implement the box, and fold rotation in as an extra margin rather than as a second
-mechanism.
+**The user's box model is correct** in the regime where it is used. Translation governs; rotation
+adds a small, quantifiable crop. Implement the box, and fold rotation in as an extra margin
+rather than as a second mechanism — **but the fold is mandatory, not optional**, because there is
+a declination band where it is the only term that matters (§2.5).
+
+---
+
+### 2.5 Where the model breaks — measured
+
+Built the geometry from first principles (fixed sky→pixel map in the local horizontal frame,
+§3.2) and measured the whole thing rather than reasoning about it. Three results.
+
+#### (a) The meridian is not special
+
+The drift direction on screen rotates at **`ω·sin δ`**, uniformly, and **independent of hour
+angle**:
+
+| δ | 0° | 30° | 45° | 60° | 75° | 85° | 89° |
+|---|---|---|---|---|---|---|---|
+| measured | 0.00 | 7.46 | 10.58 | 12.99 | 14.52 | 14.98 | 15.04 °/hr |
+| `ω·sin δ` | 0.00 | 7.52 | 10.64 | 13.03 | 14.53 | 14.98 | 15.04 |
+
+Measured at the meridian and at 6 h hour angle: **identical to three decimals**. So there is no
+direction flip and no cusp at transit.
+
+⚠️ **Correction.** This brief previously warned that the drift direction "reverses after transit
+(the parallactic angle flips through 0)" and told the UI to re-derive the corner instruction
+specially. **That was wrong** — it is the behaviour of a *tracked* mount, where `q` genuinely
+changes. A bolted-down camera has no such feature. The §7 row has been corrected.
+
+#### (b) The pole is where it actually breaks, and quietly
+
+Near the pole translation collapses while rotation stays at its maximum — they are exactly
+complementary (`cos δ` versus `sin δ`):
+
+| δ = 89.9° | 5 min | 10 min | 20 min | 40 min | 60 min | 120 min |
+|---|---|---|---|---|---|---|
+| drift | 4 px | 7 px | 14 px | 28 px | 43 px | 84 px |
+| predicted MP (translation only) | 18.01 | 17.99 | 17.97 | 17.91 | 17.84 | 17.62 |
+| actual MP | 17.80 | 17.59 | 17.21 | 16.54 | 15.96 | 14.61 |
+| **error** | −1.2% | −2.2% | −4.2% | −7.7% | **−10.6%** | **−17.1%** |
+
+The failure is specific and bad: the target barely moves, so the envelope computes a huge
+interval and the UI says *"reframe in hours, 18 MP retained"* — while the field is eroding at
+about 10% per hour and nothing alerts the user. That is exactly the "silently worse than
+promised" failure the README's design stance forbids.
+
+**Fix:** `usable_MP = translation_factor × rotation_factor`, and the interval is
+`min(translation_limited, rotation_limited)`. Rotation-limited interval =
+`θ_max / (ω·sin δ)`, which for a 90%-retention `θ_max ≈ 9.5°` is **~54 min at δ=45°** and
+**~40 min at δ=70°** — flat and short, because `sin δ` saturates.
+
+#### (c) The binding constraint switches with declination
+
+Table for 8 MP retained and `θ_max = 9.5°`:
+
+| focal | crossover δ | at δ=70°: translation vs rotation |
+|---|---|---|
+| 50 mm | 33.7° | 166 min vs 40 min |
+| 100 mm | 53.2° | 83 min vs 40 min |
+| 200 mm | 69.5° | 41 min vs 40 min |
+| 400 mm | 79.4° | 21 min vs 40 min |
+
+**Above those declinations rotation binds and translation is irrelevant.** At 200 mm that is
+δ > 69.5° — which includes M81, M82, NGC 2403 and a good part of the popular northern sky. So
+this is not an edge case; it is a routine band of targets, and it needs the rotation term to be
+implemented rather than noted.
+
+Mid-latitude, where translation binds, the translation-only model is accurate to **better than
+1.5% for runs up to 20 minutes** (measured at 200 mm, δ=45°). So no correction is needed there.
+
+#### (d) Practical consequence for the box
+
+The direction rotates at up to 15°/hr, so a box drawn at `t₀` is misaligned by `ω·sin δ·t`.
+At δ=60° that is 4.3° over a 20-minute run — small against a box several degrees wide, but it is
+another reason to recompute the box from a fresh solve rather than caching it.
 
 ---
 
 ## 3. The path is exactly computable — do not simulate it
 
-The target's track across the frame does not need an integrator, and it is **not a straight
-line** over long runs (it curves, and the field rotates under it). The clean formulation:
+The target's track across the frame needs no integrator. But **the obvious formulation is
+wrong**, and it fails silently, so this section is written to be hard to get wrong.
 
-For a camera bolted to a level tripod, the image axes are fixed relative to the *local
-horizontal* frame. Therefore `ψ = PA_y − q` is **constant** for the session (07 §2.5). Hence at
-any time `t`:
+### 3.1 The wrong way (and why it looks right)
+
+An earlier draft said: `ψ = PA_y − q` is constant for a fixed camera, therefore
+`PA_y(t) = ψ + q_c(t)`, therefore build a WCS at `t` from the camera's current RA/Dec and that
+`PA_y`. Rebuilt numerically, **that recipe produces a camera with zero field rotation** — a
+sky-tracking camera, not a bolted-down one — while still showing the correct translation. It is
+wrong in a way that looks plausible, because the translation terms are right and only the
+rotation is missing.
+
+The trap: `q` evaluated at a *fixed local direction* is constant (the pole, the zenith and the
+camera axis are all fixed in the local frame, so the angle between the hour circle and the
+vertical there does not change). It is easy to conclude "constant `PA_y`, no rotation". The
+rotation is real anyway — it is a **differential** property of the projection as the sky moves
+through the tangent point, not a change in the centre's orientation.
+
+### 3.2 The right way: build the map in the local frame
+
+The camera is bolted to the ground, so the sky→pixel map is **fixed in the local horizontal
+frame**. That is the whole model:
 
 ```
-1. camera pointing alt/az (A_c, h_c) is CONSTANT
-2. LST(t) is known → camera RA/Dec at t:  (α_c(t), δ_c(t)) = altaz→radec(A_c, h_c, LST(t))
-3. q_c(t) = parallactic angle at (α_c(t), δ_c(t), LST(t))
-4. PA_y(t) = ψ + q_c(t)
-5. build a WCS at t: centre (α_c(t), δ_c(t)), PA_y(t), scale = CDELT from the solve
-6. target pixel at t = world→pixel(target RA/Dec) with that WCS
+1. camera axis alt/az (A_c, h_c) — constant.  Roll φ between the image axes and the
+   local (right, up) tangent basis — also constant.
+2. build ONCE:  u_c = unit(A_c, h_c)
+                up = normalize(zenith − (zenith·u_c)·u_c)
+                right = cross(up, u_c)
+                e_x, e_y = rotate (right, up) by φ          # image axes
+3. for any sky point at time t:
+       (A, h) = radec→altaz(α, δ, LST(t))
+       u = unit(A, h);  den = u·u_c
+       w = u − den·u_c
+       pixel = (W/2 + (w·e_x)/den · 180/π / scale,
+                H/2 + (w·e_y)/den · 180/π / scale)
 ```
 
-That is 5 cheap trig calls per sample, no integration, no drift-rate approximation, and it
-reproduces the curvature and the rotation automatically. Sample every ~30 s for the drawn path.
+No `ψ`, no parallactic angle, no per-epoch WCS. Verified against the physics: it reproduces
+field rotation at **ω·sin δ** to within 0.5% (10.58°/hr measured at δ=45° against 10.64°, and
+15.04°/hr at the pole), and translation at **ω·cos δ ±** as expected.
+
+⚠️ **Units.** `(w·e)/den` is in **radians**. Dividing it by a plate scale in degrees/pixel was
+worth a 57.3× error in the first version of this experiment — the frames were fine and every
+distance was wrong. Convert explicitly and write a test that checks a known separation.
+
+Sample every ~30 s for the drawn path.
 
 **Optimisation worth having:** dead-reckon between solves. Solve once a minute (0.8 s each) and
 use this model to compute the target's pixel position on every frame. The stop-capture trigger
@@ -546,8 +648,8 @@ so it stays correct as the user nudges.
 | Case | Behaviour |
 |---|---|
 | Target near the meridian, dec < latitude | Drift is fastest and nearly horizontal on screen. Shortest runs; expect reframes every few minutes. |
-| Target transits | Drift *direction on screen* reverses relative to the box after transit (the parallactic angle flips through 0). **Recompute the box and the corner instruction at transit** — this is the one case where the "upstream corner" is genuinely surprising. |
-| Target near the pole (δ ≳ 80°) | Two-hour runs possible (§2.1) but the field spins ~15°/hr; expect the rotation term to matter and re-anchor the stack more often. |
+| Target transits | **Nothing special — corrected 2026-10-24.** The drift direction rotates at a uniform `ω·sin δ`, verified identical at the meridian and 6 h away. There is no flip and no cusp for a bolted-down camera; that folklore belongs to a *tracked* mount, where the parallactic angle changes. See §2.6. |
+| Target near the pole (δ ≳ 80°) | **This is the real breakage.** Translation collapses (43 px/hr at δ=89.9°) while rotation stays at its maximum 15°/hr, so the envelope says "reframe in hours" while the retained field quietly erodes at ~10%/hr. See §2.6. |
 | Pointing near the zenith | Per-axis alt/az readout is suppressed (07 §3). The envelope still works — it is pure pixel geometry, which is an argument for keeping it separate from the alt/az layer. |
 | Target's drift exits the frame before the interval expires | Contradiction between interval and box. Clamp: shrink the interval and tell the user. |
 | Target sets mid-session | Compute the altitude curve; warn at planning time and again when `h < h_min`. |
