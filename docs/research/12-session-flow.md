@@ -162,29 +162,32 @@ The homing / calibration / step-ratio code in `focus/` is kept but **demoted**: 
 the default flow, present only for a possible future "recover focus without a human" mode.
 If that never materialises, it should be deleted.
 
-### 4.5 The question that now decides the architecture
+### 4.5 Resolved: the drive works in MF, which is the mode we want
 
-**Can `DriveLensEvf` move the lens while the AF/MF switch is on MF?**
+Closed — confirmed by the user from experience with N.I.N.A.'s lens focusing, and consistent
+with the only documentation that exists, the naming: the C# method is `DriveManualFocus` and
+Nikon's equivalent is `eNkMAIDMFDrive`. These are **manual-focus** drive commands.
 
-Everything now hinges on it:
+This is the good outcome, and it collapses a whole class of complexity:
 
-- The run wants **MF**, because a lens left in AF may refocus when a picture is taken —
-  the reference plugin warns about exactly this.
-- The fine motor sweep wants **AF**, if that is what the command requires.
+- **The hand and the motor work in the same mode.** The user turns the ring for the coarse
+  pass, the app pulses for the fine pass — no switch to flip between them.
+- **No mode dance around capture either.** MF removes the "lens may refocus when a picture is
+  taken" hazard instead of working around it.
+- **Tier 2 is real**, so hands-free refine and drift correction are available.
 
-If the motor works in MF, focus becomes hands-free after the initial hand adjustment. If it
-does not, focus stays manual all session and the app's job is to *tell* the user when to turn
-the ring.
+The one thing to add: **verify it, do not assume it.** `EdsSendCommand` returns `EDS_ERR_OK`
+when nothing moves, so a lens left on AF is indistinguishable from a lens at the end of its
+travel. Pulse and observe before trusting any sweep (11 §9.1), and phrase the failure as a
+user action: "set the lens switch to MF."
 
-Design for both, and ship in that order:
+Build order is unchanged in spirit — hand focus first because it depends on nothing, motor
+sweep second because it depends on this:
 
 | Tier | Capability | Depends on |
 |---|---|---|
-| **1** | Hand focus guided by the live sharpness/HFD readout; the app says when focus has drifted | nothing — works today |
-| **2** | Hands-free local sweep to refine, and to correct drift automatically | `DriveLensEvf` working in MF |
-
-**Tier 1 is a complete, useful feature on its own** and must be built first. Tier 2 is an
-upgrade layered onto the same `autofocus(..., start=Start.AT_CURRENT)` routine.
+| **1** | Hand focus guided by the live readout; app says when focus has drifted | nothing |
+| **2** | Hands-free local sweep to refine and correct drift | `DriveLensEvf` + MF switch verified |
 
 ---
 

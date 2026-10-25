@@ -75,7 +75,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 08 | [edsdk-binding-plan.md](docs/research/08-edsdk-binding-plan.md) | Fork pyedsdk; port N.I.N.A.'s Canon knowledge. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit choice; PySide6 vs Tk, threading, packaging. |
 | 10 | [target-catalog-and-reframe-envelope.md](docs/research/10-target-catalog-and-reframe-envelope.md) | OpenNGC catalog; the drift envelope and reframe cadence. |
-| 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus over EDSDK: home to the stop, step back, sweep and fit. |
+| 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus: drive primitive, HFD, V-curve fit; MF required. |
 | 12 | [session-flow.md](docs/research/12-session-flow.md) | The setup wizard: preflight, target, parameters, focus, point, run. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 

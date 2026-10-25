@@ -29,10 +29,17 @@ Status = Literal["ok", "warn", "fail", "info"]
 #: before a session. Long-exposure noise reduction is menu-only: there is no
 #: EDSDK property to read or set it (02, 05), and left on it doubles every
 #: exposure -- halving throughput on a 2 s cadence.
+#:
+#: MF is here because the lens drive is a *manual* focus command
+#: (``DriveManualFocus`` in the reference plugin, ``eNkMAIDMFDrive`` on Nikon) and
+#: needs the switch on MF -- which is the mode a run wants anyway (11 sec. 1). It
+#: cannot be read reliably from EDSDK, so it is a human check plus a motion
+#: verification (11 sec. 9.1).
 CAMERA_CHECKS = (
     "Mirror lockup matches the configured expectation",
     "Long-exposure noise reduction is OFF (menu-only; cannot be read or set)",
     "Mode dial is in M",
+    "Lens AF/MF switch is on MF (required for lens drive; also stops it hunting)",
     "Auto power off is disabled or the shutdown timer is extended",
 )
 

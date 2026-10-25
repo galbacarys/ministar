@@ -53,7 +53,8 @@ await Task.Delay(100);          // motor settle, then return
 |---|---|
 | `DriveLensEvf` is **live-view** AF drive | Live view must be on to focus. It must be stopped for capture (and re-armed after — 02). |
 | Requires an **AF-capable lens** | Manual lenses are out of scope. |
-| The plugin warns: *"Some lenses may try to refocus, when taking images if the lens is set to AF"* | **AF mode fights capture.** Focus in AF, then get out of the way for the run. Verify on the 60D. |
+| **Works with the lens switched to MF, and that is the mode we want** ✅ | Confirmed by the user from experience with N.I.N.A.'s focusing. Consistent with the naming, which is the only documentation there is: the C# method is `DriveManualFocus`, and Nikon's underlying call is `eNkMAIDMFDrive` — *MF Drive*. These are **manual-focus** commands, not AF commands. |
+| The plugin warns: *"Some lenses may try to refocus, when taking images if the lens is set to AF"* | Another reason MF is the right mode: it removes the risk entirely rather than working around it. |
 | ~100 ms settle per pulse | Motion planning is the real performance problem (§8). |
 
 **Why homing to the far stop is the right anchor.** Canon's far stop is deliberately **past
@@ -371,15 +372,33 @@ it can be shortened for small pulses. It is the single dominant cost.
 |---|---|---|
 | Cloudy / no stars | `k_min` never reached in P2 | Time out, report "no stars — check sky/dust cap", do **not** leave the lens dithered at a random position |
 | Frosted / dewed lens | Star count falling, HFD rising across all positions | Report dew, stop early — autofocus cannot fix this and will happily land in nonsense |
-| Lens not in AF / MF switch on | Every `DriveLensEvf` returns OK but nothing moves | **Detect by measuring**: pulse N times, confirm HFD changed; if not, error out clearly |
+| Lens left in **AF** instead of MF | Every `DriveLensEvf` returns OK but nothing moves | **Detect by measuring**: pulse N times, confirm HFD changed; if not, report "is the lens switch on MF?" rather than a generic failure. The motion check doubles as the mode check — see §9.1 |
 | Reached end of travel | Position stops changing while pulsing | Terminate, clamp position |
 | Zoom changed mid-session | Focal-length property changed | Force full re-focus, invalidate baseline |
-| AF re-focus on shutter | Star pattern changes unexpectedly at capture | Keep lens out of AF during the run (§1) |
+| AF re-focus on shutter | Star pattern changes unexpectedly at capture | Moot — the drive requires MF anyway, so the lens is never in AF during a run (§9.1) |
 | Live view blocks capture | Frame downloads stall | Re-arm `Evf_OutputDevice` after each focus operation (02) |
 | Saturated stars at high ISO | HFD artificially low | Exclude saturated stars from the median; cap focus exposure |
 
 The "lens not moving" case is the most insidious: EDSDK returns OK, nothing happens, and the
 algorithm confidently converges on noise. **Always verify motion** before trusting a sweep.
+
+### 9.1 The motion check is also the mode check
+
+Because the drive requires MF, "the lens did not move" has three candidate causes, and they
+are **indistinguishable from the return code** — `EdsSendCommand` reports `EDS_ERR_OK` in all
+of them when nothing happens:
+
+1. the lens switch is on **AF**,
+2. the lens has no motor, or the body does not support `DriveLensEvf`,
+3. we are already at the end of travel.
+
+The only reliable discriminator is **observation**: pulse N times and confirm the image
+actually changed. Do this once per session, before the first sweep, and turn a failure into a
+user-actionable message ("set the lens switch to MF") rather than a software error.
+
+The dividend is that **hand and motor both work in MF**, so the coarse (by hand) and fine (by
+motor) passes happen in the same mode. Nothing to flip between them, and nothing to remember
+before capture — an arrangement that only works because this constraint turned out this way.
 
 ---
 
@@ -407,7 +426,9 @@ Items 1, 2, 4 and 6 need no hardware; 3, 5, 7, 8 need the camera and a clear nig
 
 - **Does `DriveLensEvf` move the lens when the lens switch is set to MF?** Determines whether we
   must toggle AF mode around focusing. The plugin's warning implies AF is required for drive and
-  hazardous for capture — so the workflow is probably *focus in AF, run in MF*.
+  ~~hazardous for capture — so the workflow is probably focus in AF, run in MF.~~
+  **Resolved 2026-10-24: the drive works in MF**, which is the mode the run needs anyway.
+  No mode switching around focus, and no mode switching around capture. See §9.1.
 - ~~Does the 60D support `DriveLensEvf` at all?~~ **Resolved 2026-10-24: yes.** User-confirmed
   from experience with this body. The highest-risk unknown in this brief is closed; the design
   stands as written. Still worth an automated motion-verification pulse on first connect (§9),
