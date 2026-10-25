@@ -479,6 +479,78 @@ The direction rotates at up to 15°/hr, so a box drawn at `t₀` is misaligned b
 At δ=60° that is 4.3° over a 20-minute run — small against a box several degrees wide, but it is
 another reason to recompute the box from a fresh solve rather than caching it.
 
+#### (e) The equator: the mirror image, and where the real wall is
+
+At δ = 0 the two terms swap completely: rotation is **zero** (`sin 0`) and drift is **maximal**
+(`cos 0` = 15.04″/s). So δ=0 is the one declination where §2.1b's translation-only formula is
+**exact** — and the one where every timescale is at its minimum.
+
+| fl | ″/px | sub @2px trail | run to 80% retained | reframe overhead @45 s | duty @3 s cadence |
+|---|---|---|---|---|---|
+| 50 mm | 17.70 | 2.35 s | 20.4 min | 4% | 78% |
+| 85 mm | 10.41 | 1.38 s | 12.0 min | 6% | 46% |
+| 135 mm | 6.55 | 0.87 s | 7.6 min | 9% | 29% |
+| 200 mm | 4.42 | 0.59 s | 5.1 min | 13% | 20% |
+| 400 mm | 2.21 | 0.29 s | 2.6 min | 23% | 10% |
+
+**Nothing is optically impossible. The wall is reframe latency.** A run is only useful if it is
+long enough that re-aiming afterwards is a small fraction of the time, i.e.
+`t_run ≫ t_overhead·(1−ε)/ε`. That puts a hard ceiling on focal length:
+
+| retention | ε = 10% overhead | ε = 20% | ε = 33% |
+|---|---|---|---|
+| 95% | 38 mm | **85 mm** | 167 mm |
+| 90% | 76 mm | 170 mm | 335 mm |
+| 80% | 151 mm | 340 mm | 670 mm |
+| 70% | 227 mm | 510 mm | 1005 mm |
+
+So at the equator, holding 95% of the field at 400 mm means re-aiming every 78 s with a 45 s
+reframe — **37% of the night spent touching the tripod**. That is not a physics limit, it is a
+human-latency limit.
+
+**This makes reframe speed a first-class parameter that sets the usable focal length.** Cutting a
+reframe from 45 s to 20 s moves the 95%-retention ceiling from 85 mm to 190 mm. Every second saved
+off the re-aim loop buys focal length at low declinations — the same structural point as pipeline
+cadence in §2.1e, arriving from a different direction.
+
+**Report the count, not the percentage.** Session wall time for 1250 s of integration at a 3 s
+cadence:
+
+| fl | t_sub | duty | frames | wall time | reframes |
+|---|---|---|---|---|---|
+| 50 mm | 2.35 s | 78% | 531 | 0.4 h | ~1 |
+| 135 mm | 0.87 s | 29% | 1434 | 1.2 h | ~10 |
+| 200 mm | 0.59 s | 20% | 2125 | 1.8 h | ~21 |
+| 400 mm | 0.29 s | 10% | 4249 | 3.5 h | **~82** |
+
+"23% overhead" is abstract. **"This session will ask you to re-aim 82 times"** is not — that
+belongs in the PARAMETERS step next to the megapixel readout.
+
+Read noise is a second, softer wall at δ=0, because the subs are shortest there. With `RN = 4e⁻`
+at f/5.6, `ε_read = t/(t + RN²/B)`:
+
+| fl | t_sub | dark sky (B=30) | suburban (B=100) | bright (B=400) |
+|---|---|---|---|---|
+| 135 mm | 0.87 s | 62% | 84% | 96% |
+| 200 mm | 0.59 s | 52% | 79% | 94% |
+| 400 mm | 0.29 s | **36%** | 65% | 88% |
+
+On a dark site at 400 mm you throw away two thirds of your signal to read noise, on top of a 10%
+duty cycle. That is the compounding cost, and it is far larger than the shutter-life worry ever
+was.
+
+#### (f) The two extremes fail through opposite mechanisms
+
+| | δ ≈ 90° (pole) | δ ≈ 0° (equator) |
+|---|---|---|
+| rotation `ω·sin δ` | maximum (15°/hr) | **zero** |
+| drift `ω·cos δ` | ~zero (43 px/hr) | **maximum** |
+| what breaks | the envelope never triggers; field erodes silently | the run is shorter than the reframe |
+| warning to show | "fast field rotation" | "you will re-aim N times" |
+
+Both are covered by the same two-term model, with no special-casing — but the *UI emphasis* must
+differ, because the user is being hurt in opposite ways.
+
 ---
 
 ## 3. The path is exactly computable — do not simulate it
