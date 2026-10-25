@@ -195,10 +195,25 @@ fix) is a ~150-line patch, not a driver extension.
    "2.2 s at 50 mm", which is not requestable — the nearest legal values are 2" and 2.5".
    Snap *before* computing frame counts and expected SNR, or the arithmetic quietly drifts
    from what the camera will actually do.
-2. **Bulb stays on the backlog for polar targets.** Drift scales with `cos(dec)`; the frames
-   inspected on this machine were at DEC +89.85, where drift is ~1.3"/s, so multi-minute
-   untracked subs near the pole are physically fine. "Never >30 s" holds for wide-field and
-   fails for a polar mode.
+2. **Bulb does not come back for the pole. ⚠️ Corrected 2026-10-25 — this item had two errors
+   in the same sentence.**
+
+   The original claim: the frames inspected here are at DEC +89.85, *"where drift is ~1.3"/s, so
+   multi-minute untracked subs near the pole are physically fine."*
+
+   - **The number is wrong.** Drift is `ω·cos δ` = 15.04 · cos(89.85°) = **0.026"/s**, i.e.
+     ~95"/hr, or 43 px/hr at 400 mm — matching the measurement in 10 §2.5(f). 1.3"/s corresponds
+     to δ ≈ 85°, not 89.85°.
+   - **And the reasoning is backwards even with the right number.** Near-zero drift is not the
+     binding constraint at the pole — **field rotation is**. Rotational corner smear inside a sub
+     is `0.228·sin δ` px/s and independent of focal length, so a 2 px budget allows only **~8.8 s
+     at the pole whatever the lens** (10 §2.1e). A two-minute sub would smear the corners by
+     ~27 px.
+
+   So the pole makes subs **shorter**, not longer. It is rotation-limited where the equator is
+   translation-limited (§2.5(f)) — the opposite of what was asserted. Bulb stays descoped, and per
+   the README's "no observing modes" rule it is not revived by a declination band: the pole is a
+   different mix of the same two limits, not a mode that needs 30 s+ exposures.
 3. **LENR is the real multiplier.** Long-exposure noise reduction has no EDSDK property (02)
    and is menu-only, so it cannot be switched off in code. Left on, every 2 s sub costs 4 s and
    throughput halves. This belongs in a startup pre-flight check.

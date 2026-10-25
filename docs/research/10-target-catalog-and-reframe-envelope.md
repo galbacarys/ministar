@@ -296,9 +296,34 @@ permits.
 The governing constraint is therefore **duty cycle**:
 
 ```
-t_sub  = min(trailing_limit, cadence)      # never expose longer than you can deliver
-duty   = t_sub / cadence                   # fraction of wall time actually integrating
+t_sub  = min(translation_limit, rotation_limit, cadence)   # never expose longer than you can deliver
+duty   = t_sub / cadence                                   # fraction of wall time actually integrating
 ```
+
+⚠️ **Corrected 2026-10-25 — the `rotation_limit` term was missing.** The original rule was
+`min(trailing_limit, cadence)` with `trailing_limit` derived from *translation* only, so it grew
+without bound as `cos δ` collapses near the pole. Rotational corner smear inside a single exposure
+bounds it instead, and that bound is **independent of focal length** because it is a sky angle
+times a fixed pixel count — the corner radius of this sensor is 3125 px:
+
+```
+rotation_limit = trail_px / (3125 · Ω_rad/s · sin δ)  =  trail_px / (0.2279 · sin δ)   seconds
+```
+
+| δ | translation_limit, 2 px | | | | rotation_limit, 2 px | which binds |
+|---|---|---|---|---|---|---|
+| | 50 mm | 100 mm | 200 mm | 400 mm | (any focal length) | |
+| 45° | 3.33 s | 1.66 s | 0.83 s | 0.42 s | **12.4 s** | translation |
+| 69° | 6.57 s | 3.28 s | 1.64 s | 0.82 s | **9.40 s** | translation |
+| 80° | **13.6 s** | 6.78 s | 3.39 s | 1.69 s | **8.91 s** | rotation at 50 mm, translation above |
+
+The crossover is `tan δ = 66.0 / scale(")` — **75° at 50 mm, 82° at 100 mm, 88° at 400 mm**. This is
+the *per-sub* crossover and is a different quantity from the *envelope* crossover in §2.5(c).
+
+**At the current 1.5-3 s cadence the rotation term never binds** — worst case 0.68 px of corner smear
+at δ=90 — so the omission was latent rather than active. But it was a silent violation waiting for a
+slower pipeline: at 50 mm and δ=80 a 10 s cadence would have permitted a 10 s sub, i.e. 2.24 px of
+corner smear against a 2 px budget, with nothing said.
 
 At a 3 s cadence with a 2 px trail allowance:
 
@@ -314,8 +339,8 @@ real cost — and it compounds with the read-noise penalty 03 already quantified
 subs.
 
 **Sub-length rule (supersedes the framing in 03):** the optimum is not the trailing limit, it is
-`min(trailing_limit, cadence)`. Where trailing permits, expose for the *full* cadence — dead time
-between frames is pure loss. Shorten only when trailing forces it.
+`min(translation_limit, rotation_limit, cadence)`. Where both limits permit, expose for the *full*
+cadence — dead time between frames is pure loss. Shorten only when a limit forces it.
 
 #### Pipeline cadence sets the maximum usable focal length
 
@@ -332,6 +357,13 @@ fl_max = trail_px · 206.265 · pixel_um / (cadence · Ω · cos δ)
 | 2.0 s | 59 mm | 83 mm | 164 mm |
 | 1.5 s | 78 mm | 111 mm | 219 mm |
 | 1.0 s | 118 mm | 166 mm | 328 mm |
+
+⚠️ This ceiling is **translation-only**, and that is correct wherever translation binds. Above the
+per-sub crossover (§2.1e: 75° at 50 mm, 88° at 400 mm) rotation controls instead — but rotational
+smear is focal-length *independent* in pixels, so it does not cap focal length at all. Its effect is
+a **duty-cycle cap** (a cadence cannot be exploited beyond `rotation_limit`), not a focal-length
+cap. Do not read the large numbers at high δ as "long lenses work near the pole"; they mean the
+binding constraint has changed shape.
 
 **Halving the pipeline latency roughly doubles the usable focal length.** That makes cadence a
 *product* parameter rather than an implementation detail — it decides which targets the tool can
@@ -388,7 +420,7 @@ to arrange — 03 already re-anchors the reference every 2-5 min.
 projection reasons, every 2-5 min). Anchoring forever to the *first* frame would accumulate the
 full session rotation; re-anchoring bounds it.
 
-### 2.3 Trailing within a single sub — already covered
+### 2.3 Trailing within a single sub — now a term, not a footnote
 
 Corner smear from rotation *within one exposure*:
 
@@ -397,8 +429,13 @@ dec 45°:  1s 0.16px   2s 0.32px   5s 0.81px  15s 2.42px  30s 4.83px
 dec 80°:  1s 0.22px   2s 0.45px   5s 1.12px  15s 3.37px  30s 6.73px
 ```
 
-At our 0.4-3 s subs this is **sub-pixel** — a non-issue. It becomes visible (2-7 px at the
-corners) at 15-30 s, which is another argument for the short-sub approach 03 already settled on.
+At our 0.4-3 s subs this is **sub-pixel**, which is why it was originally filed as a non-issue. That
+was correct but incomplete: it is sub-pixel *because the cadence caps the sub*, not because the term
+is negligible. When `cos δ` collapses the translation limit grows past it, and it becomes the binding
+constraint on sub length at 50-100 mm for δ ≳ 75-82°.
+
+So it is no longer a footnote — it is `rotation_limit` in the `t_sub` rule of §2.1e. The tables above
+are still the right way to see the magnitude; they are just not the whole rule.
 
 ### 2.4 Synthesis
 

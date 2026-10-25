@@ -302,9 +302,22 @@ map, instead of requiring the user to shoot darks to discover it.
 
 ### 8.3 Where it comes back
 
-**Trigger: if we add the polar-target mode with 10–30 s subs.** Dark current then reaches 3–30 e⁻ and
-genuinely matters; darks become worth shooting, **at the end**, temperature-matched, same argument as
-§7.1. So this is deferred, not refuted.
+⚠️ **Corrected 2026-10-25.** An earlier draft of this section gave the trigger as "the polar-target
+mode with 10–30 s subs". That was wrong in an instructive way: **the trigger is cadence, not
+declination.**
+
+Darks only start to matter once subs exceed ~10 s, and subs are capped by
+`min(translation_limit, rotation_limit, cadence)` (10 §2.1e). At a 1.5–3 s cadence the cap is the
+cadence at *every* declination, so:
+
+> **Darks do not return for any target at any declination under this latency budget.** They come back
+> only if the pipeline itself slows past ~10 s — a slow-box problem, not an observing-mode problem.
+
+There is no polar mode to trigger them (see the README's "no observing modes" rule); declination
+changes the *mix* of the translation and rotation limits, never the pipeline's latency. If a box ever
+degrades enough to force long subs, darks return **at the end**, temperature-matched, on the argument
+of §7.1. So this stays deferred, and now for a reason that does not depend on which targets a user
+picks.
 
 ### 8.4 Bias
 

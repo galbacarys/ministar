@@ -33,6 +33,11 @@ That has consequences, and they are design rules rather than vibes:
   stopping matters far more than shaving 200 ms off a frame.
 - **No purchase may be required.** If a feature only works with a different lens, a
   tracker, or a filter wheel, it is out of scope.
+- **No observing modes.** One continuous parameter range. Declination, focal length and
+  cadence mix smoothly, so the tool takes the worse of the translation and rotation limits
+  rather than switching behaviour at a threshold (10 §2.5). A "polar mode" would be a
+  relaxation of the same numbers — a second code path that can disagree with the first.
+  Declination changes the mix, never the pipeline.
 
 The tradeoffs stay in the docs and on screen; they just stop being gates.
 
