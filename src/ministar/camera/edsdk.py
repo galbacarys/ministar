@@ -28,10 +28,12 @@ import contextlib
 import math
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from ministar.camera import edsdk_ffi
 from ministar.camera.base import CameraInfo, Frame
 from ministar.camera.edsdk_ffi import (
     FAR_STEPS,
@@ -312,9 +314,48 @@ class EdsdkCamera:
         )
 
     def capture(self, exposure_s: float) -> Frame:
+        """Not implemented: a CR2 cannot be decoded into an array without a raw engine.
+
+        The session captures *files* anyway -- see :meth:`capture_to`, which is the
+        path the run loop and the rig probe both use.
+        """
         raise NotImplementedError(
-            "capture and memory download are not yet exercised on hardware (brief 16 §11)"
+            "capture() returns a decoded array and no raw decoder is wired in; use "
+            "capture_to(path) for the file the camera produced (brief 16 §11)"
         )
+
+    def capture_to(self, path: Path, *, timeout_s: float = 120.0) -> Path:
+        """Take one picture and download it to ``path``. Returns the path written.
+
+        The download protocol lives in the FFI so this stays a sequence of four
+        decisions -- where files go, arm the handler, shoot, wait -- and can be
+        driven by a fake FFI in tests (which is how the ordering got checked before
+        any camera was involved).
+
+        ``timeout_s`` must cover the exposure *and* the card write: a 30 s sub is not
+        a hung camera. On timeout any offered item is cancelled, because a body left
+        holding an unclaimed transfer stops shooting (02 §1.7).
+        """
+        ffi = self._require()
+        ffi.set_save_to_host()
+        ffi.arm_transfer_handler()
+        try:
+            ffi.take_picture()
+            item = ffi.wait_for_transfer(timeout_s=timeout_s)
+        except Exception:
+            ffi.drop_transfers()
+            raise
+        return ffi.download_to(item, Path(path))
+
+    @property
+    def dll_source(self) -> tuple[Path, str] | None:
+        """Which ``EDSDK.dll`` this camera would use, and whether it is ours."""
+        if self.dll_path is not None:
+            return Path(self.dll_path), "explicit"
+        try:
+            return edsdk_ffi.resolve_dll(None)
+        except RuntimeError:
+            return None
 
 
 __all__ = [

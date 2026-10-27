@@ -19,19 +19,41 @@ from __future__ import annotations
 import ctypes
 import os
 import time
-from ctypes import POINTER, Structure, byref, c_char, c_int32, c_uint32, c_uint64, c_void_p
+from ctypes import (
+    CFUNCTYPE,
+    POINTER,
+    Structure,
+    byref,
+    c_char,
+    c_char_p,
+    c_int32,
+    c_uint32,
+    c_uint64,
+    c_void_p,
+)
 from dataclasses import dataclass
 from pathlib import Path
 
 EDS_MAX_NAME = 256
 
-#: Self-contained first: NINA ships the SDK's own dependency set beside the DLL.
-_NINA = Path(r"C:\Program Files\N.I.N.A. - Nighttime Imaging 'N' Astronomy")
-DLL_CANDIDATES = (
-    _NINA / "External/x64/Canon/EDSDK.dll",
+#: Where *our* copy lives once installed.
+#:
+#: Licensing, as settled by brief 08 §4 plus Canon's terms: the unmodified DLL (and
+#: headers) may be distributed inside an application without extra permission. What
+#: is *not* allowed is shipping the whole SDK, or shipping modified files -- so the
+#: copy here is byte-for-byte Canon's, and it stays out of git simply because a
+#: proprietary 1.6 MB binary does not belong in the tree (the installer places it).
+_OWN = Path(os.environ.get("MINISTAR_HOME", r"C:\ministar")) / "tools" / "edsdk" / "EDSDK.dll"
+
+#: Other applications that ship the SDK. Development only -- see resolve_dll().
+_NINA = r"C:\Program Files\N.I.N.A. - Nighttime Imaging 'N' Astronomy"
+BORROWED_DLLS = (
+    Path(_NINA + r"\External\x64\Canon\EDSDK.dll"),
     Path(r"C:\Program Files\Adobe\Adobe Lightroom Classic\EDSDK.dll"),
     Path(r"C:\Program Files\ON1\ON1 Photo RAW 2026\EDSDK.dll"),
 )
+
+DLL_CANDIDATES = (_OWN, *BORROWED_DLLS)
 
 # -- property IDs ------------------------------------------------------------
 PROP_PRODUCT_NAME = 0x00000002
@@ -67,6 +89,46 @@ EVF_OUTPUT_PC = 0x00000002
 #: consumes them.
 RETRYABLE_EVF = frozenset({0x000000A0, 0x0000A102, 0x00000081})
 
+# -- still capture -----------------------------------------------------------
+#: ``kEdsSaveTo_*``. Host means the body does not keep a copy; Both keeps a card
+#: copy as insurance against a host crash (02 §1.8).
+SAVE_TO_CAMERA = 0x00000001
+SAVE_TO_HOST = 0x00000002
+SAVE_TO_BOTH = 0x00000003
+
+#: ``kEdsFileCreateDisposition_*`` / ``kEdsAccess_*`` for ``EdsCreateFileStream``.
+FILE_CREATE_ALWAYS = 0x00000001
+ACCESS_READ_WRITE = 0x00000002
+
+#: ``kEdsObjectEvent_DirItemRequestTransfer``: the body is asking us to take a file.
+#: Every such item must be downloaded *or* cancelled, or the camera stops taking
+#: pictures (02 §1.7) -- which is why the protocol layer always ends in one of the two.
+OBJECT_EVENT_DIR_ITEM_REQUEST_TRANSFER = 0x00000208
+
+#: ``EdsObjectEventHandler``: ``void (EdsObjectEvent, EdsBaseRef, EdsVoid* ctx)``.
+ObjectEventHandler = CFUNCTYPE(None, c_uint32, c_void_p, c_void_p)
+
+
+class _EdsDirectoryItemInfo(Structure):
+    #: Field order from ``EdsTypes.h``; the two 32-bit fields pack into the second
+    #: eight bytes, so ``szFileName`` starts at byte 16.
+    _fields_ = [
+        ("size", c_uint64),
+        ("isFolder", c_uint32),
+        ("groupID", c_uint32),
+        ("szFileName", c_char * EDS_MAX_NAME),
+        ("format", c_uint32),
+        ("dateTime", c_uint32),
+    ]
+
+
+class _EdsCapacity(Structure):
+    _fields_ = [
+        ("numberOfFreeClusters", c_int32),
+        ("bytesPerSector", c_int32),
+        ("reset", c_uint32),
+    ]
+
 
 class EdsdkError(RuntimeError):
     """An EDSDK call returned non-zero."""
@@ -100,21 +162,44 @@ def _check(what: str, code: int) -> int:
     return code
 
 
+def resolve_dll(dll_path: Path | None = None) -> tuple[Path, str]:
+    """Which ``EDSDK.dll`` would be used, and where it came from.
+
+    One resolver for both the loader and ``preflight``, because they disagreed: the
+    loader silently preferred N.I.N.A.'s bundled copy while preflight reported only
+    Lightroom's and called the SDK "not configured". Whichever copy is in use, the
+    user should be told which. Borrowing another application's copy is a normal
+    development shortcut; shipping is a separate, settled question -- an unmodified
+    Canon DLL may travel with our installer, the SDK tree may not (08 §4).
+    """
+    if dll_path is not None:
+        return Path(dll_path), "explicit"
+
+    env = os.environ.get("MINISTAR_EDSDK") or os.environ.get("EDSDK_PATH")
+    if env:
+        candidate = Path(env)
+        if candidate.is_dir():
+            candidate = candidate / "EDSDK.dll"
+        if candidate.is_file():
+            return candidate, "MINISTAR_EDSDK"
+
+    if _OWN.is_file():
+        return _OWN, "installed"
+    for path in BORROWED_DLLS:
+        if path.is_file():
+            return path, "borrowed"
+    raise RuntimeError("could not find EDSDK.dll (set MINISTAR_EDSDK to its path)")
+
+
 def load_dll(dll_path: Path | None = None):
     """Load EDSDK.dll from an explicit path, else the known candidates."""
-    candidates = (dll_path,) if dll_path else DLL_CANDIDATES
-    errors: list[str] = []
-    for path in candidates:
-        if path is None or not Path(path).is_file():
-            continue
-        try:
-            if hasattr(os, "add_dll_directory"):
-                os.add_dll_directory(str(Path(path).parent))
-            return ctypes.WinDLL(str(path))
-        except OSError as exc:  # pragma: no cover - platform dependent
-            errors.append(f"{path}: {exc}")
-    detail = "; ".join(errors) if errors else "no candidate DLL exists"
-    raise RuntimeError(f"could not load EDSDK.dll ({detail})")
+    path, _origin = resolve_dll(dll_path)
+    try:
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(str(path.parent))
+        return ctypes.WinDLL(str(path))
+    except OSError as exc:  # pragma: no cover - platform dependent
+        raise RuntimeError(f"could not load {path}: {exc}") from exc
 
 
 class Edsdk:
@@ -122,12 +207,19 @@ class Edsdk:
 
     def __init__(self, dll_path: Path | None = None) -> None:
         self._dll = load_dll(dll_path)
+        #: Which entry points this DLL actually exports, filled in by _bind().
+        self.symbols: dict[str, bool] = {}
         self._bind()
         self._camera: c_void_p | None = None
         self._stream: c_void_p | None = None
         self._evf_image: c_void_p | None = None
         self._live = False
         self._initialized = False
+        #: Kept alive for the SDK's benefit: a collected callback is a crash.
+        self._handler: ObjectEventHandler | None = None
+        #: Items the body has offered us and nobody has claimed yet.
+        self._transfers: list[c_void_p] = []
+        self._transfer_events = 0
 
     def _bind(self) -> None:
         d = self._dll
@@ -176,6 +268,33 @@ class Edsdk:
         self.EdsDownloadEvfImage = sig("EdsDownloadEvfImage", c_uint32, [c_void_p, c_void_p])
         self.EdsGetPointer = sig("EdsGetPointer", c_uint32, [c_void_p, POINTER(c_void_p)])
         self.EdsGetLength = sig("EdsGetLength", c_uint32, [c_void_p, POINTER(c_uint64)])
+
+        def optional(name, restype, argtypes):
+            """Bind if the DLL exports it, and record the answer either way."""
+            try:
+                self.symbols[name] = True
+                return sig(name, restype, argtypes)
+            except AttributeError:
+                # Older SDK builds lack parts of the still-capture surface; failing
+                # here would make live view unusable for no reason.
+                self.symbols[name] = False
+                return None
+
+        # -- still capture (02 §1.7) --
+        self.EdsSetCapacity = optional("EdsSetCapacity", c_uint32, [c_void_p, _EdsCapacity])
+        self.EdsSetObjectEventHandler = optional(
+            "EdsSetObjectEventHandler", c_uint32, [c_void_p, c_uint32, ObjectEventHandler, c_void_p]
+        )
+        self.EdsGetEvent = optional("EdsGetEvent", c_uint32, [])
+        self.EdsGetDirectoryItemInfo = optional(
+            "EdsGetDirectoryItemInfo", c_uint32, [c_void_p, POINTER(_EdsDirectoryItemInfo)]
+        )
+        self.EdsCreateFileStream = optional(
+            "EdsCreateFileStream", c_uint32, [c_char_p, c_uint32, c_uint32, POINTER(c_void_p)]
+        )
+        self.EdsDownload = optional("EdsDownload", c_uint32, [c_void_p, c_uint64, c_void_p])
+        self.EdsDownloadComplete = optional("EdsDownloadComplete", c_uint32, [c_void_p])
+        self.EdsDownloadCancel = optional("EdsDownloadCancel", c_uint32, [c_void_p])
 
     # -- lifecycle ----------------------------------------------------------
     def initialize(self) -> None:
@@ -342,3 +461,130 @@ class Edsdk:
     def keep_alive(self) -> None:
         """Push back the auto-power-off timer (08 §7.4)."""
         self.EdsSendCommand(self.camera, CMD_EXTEND_SHUTDOWN_TIMER, 0)
+
+    # -- still capture ------------------------------------------------------
+    def symbol_report(self) -> dict[str, bool]:
+        """Which still-capture entry points this DLL exports.
+
+        Useful without a camera attached: it separates "our bindings are wrong"
+        from "the body did not behave", which are otherwise the same failure.
+        """
+        return dict(self.symbols)
+
+    def set_save_to_host(self, *, keep_card_copy: bool = False) -> None:
+        """Tell the body where photographed files should go, and how much room we have."""
+        value = c_uint32(SAVE_TO_BOTH if keep_card_copy else SAVE_TO_HOST)
+        _check(
+            "EdsSetPropertyData(SaveTo)",
+            self.EdsSetPropertyData(
+                self.camera, PROP_SAVE_TO, 0, ctypes.sizeof(value), byref(value)
+            ),
+        )
+        if self.EdsSetCapacity is None:
+            return
+        # The body uses this to decide whether to refuse a shot at all. Generous and
+        # reset once, as Canon's samples do; the real free-space check is ours.
+        capacity = _EdsCapacity(numberOfFreeClusters=0x7FFFFFFF, bytesPerSector=0x1000, reset=1)
+        self.EdsSetCapacity(self.camera, capacity)
+
+    def arm_transfer_handler(self) -> None:
+        """Start collecting ``DirItemRequestTransfer`` items into a queue.
+
+        The SDK only delivers events when the host pumps them, and a console process
+        has no message loop, so :meth:`pump` has to be called in the wait loop.
+        """
+        if self.EdsSetObjectEventHandler is None:
+            raise RuntimeError("this EDSDK.dll has no EdsSetObjectEventHandler")
+
+        def on_event(event: int, ref: c_void_p, _context: c_void_p) -> None:
+            # Runs on the SDK's callback; keep it to bookkeeping only.
+            if event == OBJECT_EVENT_DIR_ITEM_REQUEST_TRANSFER:
+                self._transfers.append(ref)
+                self._transfer_events += 1
+
+        self._handler = ObjectEventHandler(on_event)
+        _check(
+            "EdsSetObjectEventHandler",
+            self.EdsSetObjectEventHandler(
+                self.camera, OBJECT_EVENT_DIR_ITEM_REQUEST_TRANSFER, self._handler, None
+            ),
+        )
+        self._transfers.clear()
+        self._transfer_events = 0
+
+    def pump(self) -> None:
+        """Process pending SDK events once. Safe to call in a tight-ish loop."""
+        if self.EdsGetEvent is not None:
+            self.EdsGetEvent()
+
+    def take_picture(self) -> None:
+        """Release the shutter. The file arrives via the transfer handler."""
+        _check(
+            "EdsSendCommand(TakePicture)",
+            self.EdsSendCommand(self.camera, CMD_TAKE_PICTURE, 0),
+        )
+
+    def wait_for_transfer(self, timeout_s: float = 30.0) -> c_void_p:
+        """Block until the body offers a file, and return it. Caller owns the ref.
+
+        The timeout must exceed the exposure plus write time: a 30 s sub on a slow
+        card is not a hung camera. The ``13 §4`` failure mode to watch for is a body
+        that never asks, which is what the timeout reports.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            self.pump()
+            if self._transfers:
+                return self._transfers.pop(0)
+            time.sleep(0.02)
+        raise TimeoutError(
+            f"camera did not offer a file within {timeout_s:g} s "
+            f"({self._transfer_events} transfer event(s) seen)"
+        )
+
+    def download_to(self, item: c_void_p, path: Path) -> Path:
+        """Write one offered item to ``path`` and complete it.
+
+        Always downloads *or* cancels: an item left unclaimed stops the body taking
+        further pictures (02 §1.7).
+        """
+        if self.EdsGetDirectoryItemInfo is None or self.EdsCreateFileStream is None:
+            raise EdsdkError("EdsCreateFileStream", 0)
+        info = _EdsDirectoryItemInfo()
+        _check("EdsGetDirectoryItemInfo", self.EdsGetDirectoryItemInfo(item, byref(info)))
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        stream = c_void_p()
+        _check(
+            "EdsCreateFileStream",
+            self.EdsCreateFileStream(
+                # EDSDK takes the ANSI code page, not UTF-8. Our data dirs are ASCII.
+                os.fsencode(str(target)),
+                FILE_CREATE_ALWAYS,
+                ACCESS_READ_WRITE,
+                byref(stream),
+            ),
+        )
+        try:
+            _check("EdsDownload", self.EdsDownload(item, info.size, stream))
+            _check("EdsDownloadComplete", self.EdsDownloadComplete(item))
+        except Exception:
+            if self.EdsDownloadCancel is not None:
+                self.EdsDownloadCancel(item)
+            raise
+        finally:
+            self.EdsRelease(stream)
+            self.EdsRelease(item)
+        return target
+
+    def drop_transfers(self) -> int:
+        """Cancel anything still queued, so the body is not left waiting."""
+        dropped = 0
+        while self._transfers:
+            item = self._transfers.pop(0)
+            if self.EdsDownloadCancel is not None:
+                self.EdsDownloadCancel(item)
+            self.EdsRelease(item)
+            dropped += 1
+        return dropped

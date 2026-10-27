@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from ministar.config import Settings, find_borrowed_edsdk
+from ministar.config import Settings
 
 Status = Literal["ok", "warn", "fail", "info"]
 
@@ -119,24 +119,40 @@ def _check_astap(settings: Settings) -> list[Check]:
 
 
 def _check_edsdk(settings: Settings) -> list[Check]:
+    """Report the same DLL the loader would pick, not a separate guess.
+
+    These used to disagree: the loader preferred N.I.N.A.'s bundled copy while this
+    check scanned only Lightroom and ON1, so the app could be running against an SDK
+    preflight had not noticed. One resolver, one answer -- see
+    :func:`ministar.camera.edsdk_ffi.resolve_dll`.
+    """
+    from ministar.camera.edsdk_ffi import resolve_dll
+
     if settings.edsdk is not None:
         return [Check("edsdk", "ok", str(settings.edsdk))]
 
-    borrowed = find_borrowed_edsdk()
-    if borrowed:
-        detail = (
-            f"not configured; a copy exists at {borrowed[0]} "
-            "(another app's licence -- set EDSDK_PATH to use it for development)"
-        )
-        return [Check("edsdk", "warn", detail)]
+    try:
+        path, origin = resolve_dll(None)
+    except RuntimeError:
+        return [
+            Check(
+                "edsdk",
+                "fail",
+                "EDSDK.dll not found -- set EDSDK_PATH or place it in <home>/tools/edsdk",
+            )
+        ]
 
-    return [
-        Check(
-            "edsdk",
-            "fail",
-            "EDSDK.dll not found -- set EDSDK_PATH or place it in <home>/tools/edsdk",
-        )
-    ]
+    if origin == "borrowed":
+        return [
+            Check(
+                "edsdk",
+                "warn",
+                f"development copy borrowed from {path.parent.parent.parent} "
+                "-- fine for development; the installer ships our own unmodified copy "
+                "in <home>/tools/edsdk (08 §4)",
+            )
+        ]
+    return [Check("edsdk", "ok", str(path))]
 
 
 def _check_dirs(settings: Settings) -> Check:

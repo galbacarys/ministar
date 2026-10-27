@@ -116,15 +116,13 @@ def find_edsdk(paths: Paths) -> Path | None:
 def find_borrowed_edsdk() -> list[Path]:
     """Other applications' bundled ``EDSDK.dll`` copies, for diagnostics only.
 
-    Lightroom and ON1 ship one. Useful for development on a machine without a
-    Canon developer account, and reported by ``preflight`` so the situation is
-    visible — but never loaded implicitly, because their licences are not ours.
+    The list itself now lives beside the loader (:data:`edsdk_ffi.BORROWED_DLLS`) so
+    there is exactly one of it. It used to be duplicated here, which is how the
+    loader came to prefer N.I.N.A.'s copy while this scan never looked there.
     """
-    candidates = (
-        Path(r"C:\Program Files\Adobe\Adobe Lightroom Classic"),
-        Path(r"C:\Program Files\ON1\ON1 Photo RAW 2026"),
-    )
-    return [dll for d in candidates if (dll := d / EDSDK_DLL).is_file()]
+    from ministar.camera.edsdk_ffi import BORROWED_DLLS
+
+    return [path for path in BORROWED_DLLS if Path(path).is_file()]
 
 
 @dataclass(frozen=True)

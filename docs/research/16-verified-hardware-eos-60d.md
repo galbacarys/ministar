@@ -247,10 +247,45 @@ fails on cadence, not on optics or on what the camera can do.
 
 ## 11. Not yet verified — the next hardware session
 
-1. **Capture**: Tv/ISO/Av setting, `TakePicture`, download to memory, mirror lockup state.
+1. **Capture**: Tv/ISO/Av *setting* and mirror lockup state. (`TakePicture` and the
+   download itself are now verified — see §11.1.)
 2. **`EdsGetPropertyDesc`** — legal Tv/Av/ISO values for this body (gap 1 in brief 08).
 3. **`WillSoonShutDown`** handling over a long session (gap 4).
 4. Whether `AvailableShots` reads sensibly with the correct ID.
 5. The 100–400 mm lens, once fitted: does drive behave the same at that focal length, and
    does autofocus drive differ from the STM behaviour seen here?
 6. Whether the 24 vs 28 mm discrepancy is a mislabel or a different lens.
+
+### 11.1 Verified 2026-10-27 — the still-capture path
+
+`ministar probe` (driven through `tools/sync.sh`, results in `rig-probe.json` on NTFS):
+
+- **Capture + download works.** `EdsSetPropertyData(SaveTo=Host)` → `EdsSetCapacity` →
+  `EdsSetObjectEventHandler(DirItemRequestTransfer)` → `SendCommand(TakePicture)` →
+  `EdsGetEvent` pump → `EdsGetDirectoryItemInfo` → `EdsCreateFileStream` → `EdsDownload` →
+  `EdsDownloadComplete`. A 20 100 177-byte CR2 landed on disk, 5184 x 3456.
+- **Every bound symbol exists** in 13.19.0.6400 (N.I.N.A.'s bundled copy): `EdsSetCapacity`,
+  `EdsSetObjectEventHandler`, `EdsGetEvent`, `EdsGetDirectoryItemInfo`,
+  `EdsCreateFileStream`, `EdsDownload`, `EdsDownloadComplete`, `EdsDownloadCancel`.
+- **Live view survived the still download**, twice: 112 738 and 113 454 bytes readable
+  immediately after each capture, from two consecutive runs (two CR2s, 20 100 177 and
+  20 101 128 bytes). The differing JPEG sizes rule out a stale buffer, so this is a real
+  frame each time. It **contradicts 02 §1.8 ("assume yes", LV is interrupted)**: the
+  "LV never comes back" failure mode did not occur on this body. Capture can therefore run
+  without a stop/restart of the live-view stream — worth re-checking on the long end of the
+  lens, where a 30 s download is a bigger window for it to bite.
+- ⚠️ **`FocalPlaneXResolution` is 72 dpi on this body — a placeholder, not a measurement.**
+  Taken literally it yields a 352.8 µm pitch and a 1828 x 1219 mm sensor: an **82x** error in
+  plate scale, and therefore in every field of view. 72 x 72 is EXIF's "not computed"
+  default. Consequence: **the EXIF pitch is unusable on the 60D**; the plate scale must come
+  from a solve (`Solution.pixel_scale_arcsec`), which needs no pitch at all. `ministar.io.tiff`
+  now refuses an implausible pitch (`PLAUSIBLE_PITCH_UM`) instead of passing it on.
+  ⚠️ And the fallback is not free: the installed ASTAP database is all `.1476` tiles (max
+  **5.14°** field, per `preflight`), while this 24 mm frame is ~34° tall. A wide-field frame
+  cannot be solved until the G05/W08 wide-field tiles are installed, so "solve it and read
+  the scale" needs that database *and* a longer focal length before it can rescue the pitch.
+- Frame size is **5184 x 3456** (17.9 MP), not the 5202 x 3464 used in briefs 01/10's tables.
+  Those numbers came from an earlier solved frame; the envelope maths is unaffected, but the
+  megapixel tables are off by ~0.5%.
+- The capture also confirms 02 §1.7's warning in the flesh: the body offers the file by
+  *event*, so a host that never pumps `EdsGetEvent` would wait forever with no error.

@@ -145,6 +145,20 @@ posed earlier:
 - We do not need to choose between "take on the agreement" and "detect an existing install".
   We do what N.I.N.A. does: ship it, don't version-control it.
 
+**Terms, restated precisely** (re-checked against Canon's terms 2026-10-27). The DLLs *and*
+headers may be redistributed inside an application with **no extra permission from Canon**,
+subject to exactly two conditions:
+
+1. **Not the whole SDK.** Package the files the app actually needs (`EDSDK.dll`, and
+   `EdsImage.dll` if it is ever used); never ship the surrounding SDK directory or its
+   samples.
+2. **Unmodified.** Byte-for-byte as Canon built them. No patching, no re-signing, no
+   stripping, no renaming. If we ever need a fix, it lives in our code, not in their binary.
+
+The "never commit it" rule above is therefore **hygiene, not licensing**: a proprietary
+1.6 MB binary does not belong in the tree, and a git repo is not a release artifact -- the
+installer is.
+
 Also settled: `EDSDK.dll` **13.19.0.6400 (x64)** is already on this machine inside
 Lightroom Classic (and 13.15.20 inside ON1 Photo RAW), so development can start immediately
 without Canon developer registration.

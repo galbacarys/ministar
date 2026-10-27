@@ -8,6 +8,7 @@ counts, frame acceptance -- are testable anywhere, on any OS.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -46,6 +47,11 @@ class FakeFfi:
         self.drive_error = drive_error
         self.grab_error = grab_error
         self.fail_after = fail_after
+        #: Still-capture behaviour: an ordered log of what the protocol asked for.
+        self.events: list[object] = []
+        self.transfer_error: Exception | None = None
+        self.shot_error: Exception | None = None
+        self.transfer_item: object = "offered-item"
         self.sent: list[int] = []
         self.keepalives = 0
         self.initialized = False
@@ -83,6 +89,32 @@ class FakeFfi:
 
     def keep_alive(self) -> None:
         self.keepalives += 1
+
+    # -- still capture ------------------------------------------------------
+    def set_save_to_host(self) -> None:
+        self.events.append("save_to")
+
+    def arm_transfer_handler(self) -> None:
+        self.events.append("arm")
+
+    def take_picture(self) -> None:
+        self.events.append("shoot")
+        if self.shot_error is not None:
+            raise self.shot_error
+
+    def wait_for_transfer(self, timeout_s: float = 30.0) -> object:
+        self.events.append("wait")
+        if self.transfer_error is not None:
+            raise self.transfer_error
+        return self.transfer_item
+
+    def download_to(self, item: object, path) -> Path:
+        self.events.append(("download", str(path)))
+        return Path(path)
+
+    def drop_transfers(self) -> int:
+        self.events.append("drop")
+        return 1
 
     def close(self) -> None:
         self.closed = True
@@ -327,3 +359,47 @@ def test_decode_jpeg_uses_an_installed_backend() -> None:
     decoded = decode_jpeg(jpeg)
 
     assert decoded.shape == (32, 48, 3)
+
+
+# -- still capture ----------------------------------------------------------
+def test_capture_to_downloads_where_it_was_told(tmp_path: Path) -> None:
+    fake = FakeFfi()
+    cam = camera_for(fake)
+    cam.connect()
+
+    out = cam.capture_to(tmp_path / "shot.cr2")
+
+    assert out == tmp_path / "shot.cr2"
+    # The order is the protocol: where files go, arm the handler, shoot, wait, take.
+    assert fake.events == ["save_to", "arm", "shoot", "wait", ("download", str(out))]
+
+
+def test_a_capture_that_never_arrives_is_cancelled(tmp_path: Path) -> None:
+    """An unclaimed transfer stops the body shooting, so the failure path must cancel."""
+    fake = FakeFfi()
+    fake.transfer_error = TimeoutError("camera did not offer a file within 120 s")
+    cam = camera_for(fake)
+    cam.connect()
+
+    with pytest.raises(TimeoutError):
+        cam.capture_to(tmp_path / "x.cr2")
+
+    assert fake.events[-1] == "drop"
+    assert not any(isinstance(event, tuple) and event[0] == "download" for event in fake.events)
+
+
+def test_a_shutter_that_raises_also_cancels(tmp_path: Path) -> None:
+    fake = FakeFfi()
+    fake.shot_error = edsdk_ffi.EdsdkError("EdsSendCommand(TakePicture)", 0x81)
+    cam = camera_for(fake)
+    cam.connect()
+
+    with pytest.raises(edsdk_ffi.EdsdkError):
+        cam.capture_to(tmp_path / "x.cr2")
+
+    assert "drop" in fake.events
+
+
+def test_capture_needs_a_connection(tmp_path: Path) -> None:
+    with pytest.raises(CameraNotConnected):
+        EdsdkCamera().capture_to(tmp_path / "x.cr2")

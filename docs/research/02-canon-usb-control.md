@@ -70,6 +70,9 @@ without login; the v13 agreement is structurally the same — **UNVERIFIED** wor
 * Practical consequences:
   * **Do not vendor `EDSDK.dll` / headers into a public git repo** (Canon explicitly told the
     `pyedsdk` author not to redistribute; that package deliberately ships without the DLL).
+    See 08 §4 for the settled reading, which is narrower than this note sounds: shipping the
+    unmodified DLLs and headers *inside our application* needs no extra permission from Canon.
+    The two conditions are "not the whole SDK" and "files unmodified".
     Pattern used by the ecosystem: fetch-at-build or "drop your own copy in `C:\Canon\EDSDK\`".
   * Shipping the DLL **inside your installer** alongside your app is the intended model, i.e.
     release artifacts may contain it, source repos should not.
