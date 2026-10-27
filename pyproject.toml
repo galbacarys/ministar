@@ -20,6 +20,10 @@ dependencies = [
 [project.optional-dependencies]
 ui = ["pyside6>=6.8"]
 imaging = ["opencv-python-headless>=4.10"]
+# Bench harness in tools/ decodes live-view JPEG; needs Pillow, which the
+# package itself does not. tools/setup.bat installs [dev], so install this too
+# to run tools/focus_ui.py from a fresh checkout.
+bench = ["pillow>=10"]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
