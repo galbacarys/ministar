@@ -218,3 +218,24 @@ than only synthetic data. Nothing has yet touched the camera.
 - Backlash magnitude on a real 3-way head is unmeasured, and it sets whether knob instructions can
   hit the aiming tolerance at all.
 - No decision recorded on the exposure planner that snaps to Canon's discrete Tv table.
+
+## Licence
+
+MIT -- see [LICENSE](LICENSE). It covers this project's own code.
+
+Three dependencies need care, and none of them change the licence of *our* code:
+
+- **EDSDK.dll (Canon) is proprietary and is not covered by MIT.** It is never committed
+  (`.gitignore` blocks `*.dll`) and is currently loaded from an already-installed application.
+  Shipping it inside an installer, as 08 section 4 plans, is governed by Canon's SDK agreement
+  rather than by this one.
+- **PySide6 is LGPL-3.0**, not permissive. It appears only as the optional `ui` extra and nothing
+  imports it. Brief 14 supersedes it with NiceGUI (MIT), so it should be replaced rather than
+  shipped -- doing so leaves no copyleft dependency in the runtime.
+- **Siril (GPL-3.0)** and **ASTAP (MPL-2.0)** are only ever invoked as separate processes and never
+  linked, which is what keeps this project's licence unaffected. The same reasoning must keep
+  applying: do not import Siril.
+
+Runtime dependencies otherwise are permissive: numpy (BSD-3-Clause), OpenCV (Apache-2.0),
+Pillow (MIT-CMU), and NiceGUI (MIT). SEP and python-gphoto2 are LGPL, so if either is adopted as a
+library rather than a subprocess, revisit this section.
