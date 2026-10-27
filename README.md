@@ -85,6 +85,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 13 | [head-calibration.md](docs/research/13-head-calibration.md) | Converts degrees into knob turns: the 2x2 head calibration. |
 | 14 | [portability-browser-ui-and-linux-sbc.md](docs/research/14-portability-browser-ui-and-linux-sbc.md) | Browser UI (NiceGUI), libgphoto2 port, SBC deployment. |
 | 15 | [stacking-pipeline-and-calibration.md](docs/research/15-stacking-pipeline-and-calibration.md) | Per-frame accumulator, why no dark library, flats at the end. |
+| 16 | [verified-hardware-eos-60d.md](docs/research/16-verified-hardware-eos-60d.md) | First hardware run: STM focus-by-wire works, 0xA102 is warm-up, HFD fabricates stars. |
 | 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
@@ -203,6 +204,7 @@ than only synthetic data. Nothing has yet touched the camera.
 | UI | 09, 14 | NiceGUI (supersedes PySide6); browser + native wrapper |
 | libgphoto2 camera backend | 14 | for the Linux/SBC target |
 | Live stack accumulator | 15 | sum/count/M2 at display res; no dark library |
+| Canon focus path | 16 | **verified on hardware**; STM lens drive works |
 | Calibration frames | 15 | flats terminal + optional; no darks, no bias |
 
 **Outstanding research / validation**

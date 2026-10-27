@@ -189,6 +189,14 @@ camera-state handler for `BulbExposureTime`. That removes the single largest rat
 forking at all — the remaining work (`EdsGetPropertyDesc`, memory download, the 15 s timeout
 fix) is a ~150-line patch, not a driver extension.
 
+### Hardware verification (2026-10-25)
+
+The focus path in this brief is now **verified on the real body** -- see
+[16-verified-hardware-eos-60d.md](16-verified-hardware-eos-60d.md). Headline: lens drive
+works with **STM** glass, not only ring-USM, and live view returns `0xA102` for ~0.85 s
+while the EVF warms up, so `EdsDownloadEvfImage` must always be retried rather than
+treated as single-shot. The five gaps listed above are all still real.
+
 ### Consequences to design around
 
 1. **Sub length must snap to the Tv table.** Brief 03 derives optimum sub lengths like

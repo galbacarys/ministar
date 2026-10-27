@@ -111,7 +111,7 @@ no benefit — the sky level is a single scalar.
 
 Three planes, float32, at accumulator resolution:
 
-```python
+```text
 sum_px  += warped           # only where mask is valid
 count   += mask             # 0 or 1
 m2      += ...              # Welford M2 for the per-pixel variance
