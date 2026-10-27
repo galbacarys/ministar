@@ -236,6 +236,12 @@ Three dependencies need care, and none of them change the licence of *our* code:
   linked, which is what keeps this project's licence unaffected. The same reasoning must keep
   applying: do not import Siril.
 
+- **The OpenNGC catalogue is CC-BY-SA-4.0**, vendored *unmodified* in `third_party/openngc/`
+  with its licence text and attribution. Share-alike covers the data file, not this project's
+  code. Shipping it verbatim is deliberate: a reduced or converted copy would be a derivative
+  needing a "changes were made" notice, and a JSON conversion would become an artifact to
+  maintain. Parsing the CSV costs 59 ms for 14 034 rows, so there is nothing to gain.
+
 Runtime dependencies otherwise are permissive: numpy (BSD-3-Clause), OpenCV (Apache-2.0),
 Pillow (MIT-CMU), and NiceGUI (MIT). SEP and python-gphoto2 are LGPL, so if either is adopted as a
 library rather than a subprocess, revisit this section.
