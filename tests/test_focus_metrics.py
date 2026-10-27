@@ -153,3 +153,43 @@ def test_tenengrad_is_zero_on_a_flat_frame() -> None:
     from ministar.focus.metrics import tenengrad
 
     assert tenengrad(np.full((32, 32), 200.0, dtype=np.float32)) == 0.0
+
+
+def test_seed_threshold_does_not_invent_stars_on_a_large_frame() -> None:
+    """Regression: a 3-sigma seed admits a fixed *fraction* of pixels.
+
+    On a 704x1056 frame that produced 27 acceptances for a 14-star field, because
+    the candidate count scales with frame area rather than star content. The seed
+    is now 5 sigma (see metrics docstring).
+    """
+    rng = np.random.default_rng(3)
+    h, w = 704, 1056
+    img = np.full((h, w), 30.0, dtype=np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    for _ in range(14):
+        cy, cx = rng.integers(60, h - 60), rng.integers(60, w - 60)
+        img += 170.0 * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * 2.14**2)))
+    img += rng.normal(0.0, 4.0, (h, w))
+    frame = np.clip(img, 0, 65535).astype(np.uint16)
+
+    hfd, count = measure_hfd(frame)
+
+    assert 10 <= count <= 18, f"expected about 14 stars, got {count}"
+    assert math.isfinite(hfd)
+
+
+def test_saturated_stars_are_rejected_only_for_integer_input() -> None:
+    """The dtype trap, encoded so it cannot regress silently.
+
+    ``saturation_level`` returns None for float, so a float copy of a clipped frame
+    loses saturated-star rejection and reports confident nonsense. Callers must
+    pass the integer image (this is exactly what the UI got wrong).
+    """
+    saturated = star_field((1.5,), peak=200_000.0)  # clips to 65535
+
+    integer_hfd, integer_count = measure_hfd(saturated)
+    float_count = measure_hfd(saturated.astype(np.float32))[1]
+
+    assert integer_count == 0, "integer path must reject clipped stars"
+    assert math.isnan(integer_hfd)
+    assert float_count > 0, "float path is expected to lose the guard - do not rely on it"

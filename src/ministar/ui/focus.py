@@ -96,8 +96,12 @@ class Analysis:
 
 
 def analyse(jpeg: bytes) -> Analysis:
-    gray = to_gray(decode_jpeg(jpeg))
-    hfd, stars = measure_hfd(gray)
+    image = decode_jpeg(jpeg)
+    gray = to_gray(image)
+    # Pass the INTEGER image: saturation_level returns None for float, which would
+    # silently disable saturated-star rejection and fabricate star counts (see
+    # metrics docstring). A live view is full of clipped star cores.
+    hfd, stars = measure_hfd(image)
     return Analysis(hfd=hfd, stars=stars, contrast=tenengrad(gray), thumb=thumbnail(gray))
 
 
@@ -109,6 +113,12 @@ class FakeCamera:
     PSF is modelled on this rig: sigma 0.7 px at best focus, i.e. HFD ~1.75 px
     (brief 03 §3), widening linearly either side.
     """
+
+    #: Deliberately dim and unsaturated: a realistic live view, and it keeps the
+    #: saturation guard from (correctly) discarding every synthetic star.
+    BACKGROUND = 30.0
+    STAR_PEAK = 170.0
+    NOISE = 4.0
 
     def __init__(self, best: int = 24, shape: tuple[int, int] = (704, 1056)) -> None:
         self._position = 0
@@ -139,11 +149,13 @@ class FakeCamera:
 
         h, w = self._shape
         sigma = 0.7 + 0.06 * abs(self._position - self._best)
-        img = np.full((h, w), 200.0, dtype=np.float32)
+        img = np.full((h, w), self.BACKGROUND, dtype=np.float32)
         yy, xx = np.mgrid[0:h, 0:w]
         for cy, cx in self._stars:
-            img += 2500.0 * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma * sigma)))
-        img += self._rng.normal(0.0, 8.0, (h, w))
+            img += self.STAR_PEAK * np.exp(
+                -(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma * sigma))
+            )
+        img += self._rng.normal(0.0, self.NOISE, (h, w))
         gray = np.clip(img, 0, 255).astype(np.uint8)
         ok, buffer = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:  # pragma: no cover - should not happen

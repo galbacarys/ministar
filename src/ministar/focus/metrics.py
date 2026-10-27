@@ -45,6 +45,21 @@ chiefly JPEG block artefacts in a live view — producing a few locally-signific
 multi-pixel blobs. So ``max_stars`` remains a cap and a saturated count means "at
 least this many". When a sweep needs certainty, prefer a real capture over a live
 view (11 §4.2), and treat ``count == max_stars`` as untrustworthy.
+
+Two traps found by measuring, both of which produced *confident* wrong answers:
+
+1. **The seed threshold must be 5 sigma, not 3.** A k-sigma gate admits a fixed
+   *fraction* of pixels, so the absolute number of candidates scales with frame
+   area, not with star content. On a 704x1056 live view a 3-sigma seed admitted
+   ~1300 pixels and produced 27 acceptances on a frame containing exactly 14
+   stars. At 5 sigma the same frame yields exactly 14, and every existing test
+   still passes because real stars are tens of sigma.
+2. **Pass the integer image, not a float copy.** ``saturation_level`` returns
+   ``None`` for float dtypes, which silently disables saturated-star rejection.
+   Measured on the same frame: the uint8 original reports 0 stars (all clipped,
+   correctly excluded) while a float copy reports 40 at HFD 8.05 -- a fabricated
+   result, with no error. Converting to float before measuring is a silent loss of
+   a safety check, so do not do it.
 """
 
 from __future__ import annotations
@@ -79,7 +94,12 @@ def to_gray(image: np.ndarray) -> np.ndarray:
 
 
 def saturation_level(image: np.ndarray) -> float | None:
-    """Full-scale value for an integer image, else ``None``."""
+    """Full-scale value for an integer image, else ``None``.
+
+    ⚠️ Returns ``None`` for float input, which **disables saturated-star
+    rejection**. Callers wanting that check must pass the integer image, not a
+    ``to_gray`` conversion (see the module docstring).
+    """
     dtype = np.asarray(image).dtype
     if np.issubdtype(dtype, np.integer):
         return float(np.iinfo(dtype).max)
@@ -131,11 +151,16 @@ def find_peaks(
     gray: np.ndarray,
     background: float,
     noise: float,
-    threshold_sigma: float = 3.0,
+    threshold_sigma: float = 5.0,
 ) -> np.ndarray:
     """3x3 local maxima above ``background + threshold_sigma * noise``.
 
     Returns peak coordinates, brightest first.
+
+    ⚠️ **5 sigma, not 3.** A k-sigma gate admits a roughly fixed fraction of
+    pixels, so on a large frame the candidate count scales with area rather than
+    with star content: 3 sigma on a 704x1056 frame gave ~1300 candidates and 27
+    acceptances for a 14-star field. 5 sigma gave exactly 14.
     """
     threshold = background + threshold_sigma * noise
     is_peak = gray > threshold
@@ -232,7 +257,7 @@ def measure_hfd(
     *,
     max_stars: int = 40,
     min_stars: int = 5,
-    threshold_sigma: float = 3.0,
+    threshold_sigma: float = 5.0,
     min_star_snr: float = 5.0,
 ) -> tuple[float, int]:
     """Median HFD and accepted star count for a frame.

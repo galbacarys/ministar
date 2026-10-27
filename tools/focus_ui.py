@@ -77,9 +77,10 @@ def analyse(jpeg: bytes) -> Metrics:
 
     img = Image.open(io.BytesIO(jpeg))
     gray_img = img.convert("L")
-    gray = np.asarray(gray_img, dtype=np.float32)
+    gray = np.asarray(gray_img)
 
-    # HFD wants a float image in ADU-ish units; a uint8 grayscale works.
+    # Pass the INTEGER image: saturation_level returns None for float, which would
+    # silently disable saturated-star rejection (see metrics docstring).
     hfd, stars = measure_hfd(gray)
 
     thumb = np.asarray(gray_img.resize((32, 32), Image.BILINEAR), dtype=np.float32)
@@ -89,7 +90,7 @@ def analyse(jpeg: bytes) -> Metrics:
         height=img.height,
         hfd=hfd,
         stars=stars,
-        tenengrad=tenengrad(gray),
+        tenengrad=tenengrad(gray.astype(np.float32)),
         jpeg=jpeg,
         thumb=thumb,
     )
