@@ -207,15 +207,24 @@ def window_slider_max_minutes(optics) -> int:
     return max(1, min(60, int(reachable)))
 
 
-def interval_slider_max_minutes(ceiling_seconds: float | None) -> int:
-    """The target's own limit, in whole minutes, for the PARAMETERS slider.
+def interval_slider_max_minutes(
+    ceiling_seconds: float | None, zero_seconds: float | None = None
+) -> int:
+    """How far the PARAMETERS slider may go, in whole minutes.
 
-    A target that allows 71 s yields 1 minute, not 0: the slider's floor is 1 minute, and
-    a floor of zero would silently mean "no interval chosen" in session state.
+    Two ceilings, whichever binds first. The target's own window is the tight one, but
+    even with no target selected the frame collapses to nothing once the drift exceeds
+    it -- brief 10 §2.1b: "the slider must be clamped at the zero point". Past that the
+    readout would be 0.0 MP for every setting, which is not a setting.
+
+    A floor of 1 minute, never 0: zero would silently mean "no interval chosen" in
+    session state, which is a different thing from "the shortest interval".
     """
-    if ceiling_seconds is None:
-        return 60
-    return max(1, min(60, int(ceiling_seconds // 60)))
+    limits = [60.0]
+    for value in (ceiling_seconds, zero_seconds):
+        if value is not None:
+            limits.append(value / 60.0)
+    return max(1, min(int(min(limits)), 60))
 
 
 def select_row(ctx: Context, row: dict) -> None:
@@ -300,6 +309,10 @@ class Context:
     #: session state mid-render (selecting a target, say) and the button would otherwise
     #: keep the answer it computed before the click.
     nav: Callable[[], None] | None = None
+    #: A profile that overrides the one on disk for this session -- fake-camera mode uses
+    #: it so the screens can be tried at a real focal length without touching the
+    #: measured profile in ``data/rig.json``.
+    rig: RigProfile | None = None
 
 
 def _not_implemented(what: str, brief: str) -> None:
@@ -443,7 +456,7 @@ def render_setup(ctx: Context) -> None:
 
     ui.label("Rig profile").classes("mn-heading")
     rig_store = rig_path(ctx.settings.paths.data)
-    profile = load_rig(rig_store)
+    profile = rig_for(ctx)
     if profile is None:
         ui.label(
             "no profile yet: TARGET shows sizes in arcminutes and cannot judge the frame"
@@ -529,8 +542,7 @@ def render_target(ctx: Context) -> None:
         ui.label("Catalogue is empty: third_party/openngc is missing.").classes("mn-warn")
         return
 
-    rig_store = rig_path(ctx.settings.paths.data)
-    profile = load_rig(rig_store)
+    profile = rig_for(ctx)
     optics = profile.optics() if profile is not None else None
 
     window_start, window_end, window_note = _night_for(datetime.now().astimezone(), site)
@@ -675,6 +687,11 @@ def render_target(ctx: Context) -> None:
     refresh_rows()
 
 
+def rig_for(ctx: Context) -> RigProfile | None:
+    """This session's rig: the override if one was supplied, else what was measured."""
+    return ctx.rig if ctx.rig is not None else load_rig(rig_path(ctx.settings.paths.data))
+
+
 def geometry_svg(width_px: int, height_px: int, keep_width_px: float, keep_height_px: float) -> str:
     """Two nested rectangles: the frame, and what survives the drift.
 
@@ -705,7 +722,7 @@ def render_parameters(ctx: Context) -> None:
     speed; the interval is capped by the target's own size; and the megapixel readout is
     the consequence of the interval rather than a separate setting.
     """
-    profile = load_rig(rig_path(ctx.settings.paths.data))
+    profile = rig_for(ctx)
     optics = profile.optics() if profile is not None else None
     dec = ctx.state.target_dec_deg
 
@@ -757,7 +774,13 @@ def render_parameters(ctx: Context) -> None:
             dec_deg=dec,
         )
 
-    max_min = interval_slider_max_minutes(ceiling)
+    # Zero usable pixels: the drift has eaten the whole frame.
+    zero_s = (
+        optics.window_seconds(fill=0.0, dec_deg=dec)
+        if optics is not None and dec is not None
+        else None
+    )
+    max_min = interval_slider_max_minutes(ceiling, zero_s)
     current_min = float(ctx.state.reframe_interval_s or 300.0) / 60.0
     value = int(min(max(1.0, round(current_min)), max_min))
 
@@ -807,7 +830,12 @@ def render_parameters(ctx: Context) -> None:
     ui.slider(min=1, max=max_min, step=1, value=value, on_change=changed).props(
         "label-always"
     ).classes("mn-slider").style("width: 340px")
-    ui.label(f"slider limit {max_min} min, set by the target").classes("mn-dim")
+    if zero_s is not None and max_min * 60 >= zero_s:
+        ui.label(
+            f"slider limit {max_min} min: past that the drift has eaten the whole frame"
+        ).classes("mn-dim")
+    else:
+        ui.label(f"slider limit {max_min} min, set by the target").classes("mn-dim")
     hint.text = describe(float(value))
     # Record the default too, so leaving the screen does not leave the session claiming
     # no interval was chosen.

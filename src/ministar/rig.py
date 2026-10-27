@@ -34,8 +34,9 @@ from ministar.optics import Optics
 #: File name inside ``Paths.data``.
 RIG_FILENAME = "rig.json"
 
-#: Higher wins. A solve is measured, EXIF is reported, typing is a claim.
-PROVENANCE_ORDER = {"typed": 0, "exif": 1, "solved": 2}
+#: Higher wins. A solve is measured, EXIF is reported, typing is a claim, and a fake
+#: profile (fake camera mode) is worth less than all of them -- it is never saved.
+PROVENANCE_ORDER = {"fake": -1, "typed": 0, "exif": 1, "solved": 2}
 
 #: How far the reported focal length may drift before a profile is considered stale.
 #: Zooms report 1/3-stop steps, so 5% separates "same setting" from "turned the ring".
@@ -96,6 +97,29 @@ class RigProfile:
             camera=exif.model,
             lens=exif.lens_model,
             recorded=recorded,
+        )
+
+    @classmethod
+    def fake(cls, focal_length_mm: float = 135.0, *, pixel_um: float = 4.434) -> RigProfile:
+        """A profile for fake-camera mode, so screens can be tried at a real focal length.
+
+        Default 135 mm: a popular untracked deep-sky length, and one where the frame fit
+        is interesting -- wide enough to hold most of the catalogue, long enough that the
+        reframe window bites. Never written to disk: the measured profile is the user's,
+        and a demo should not overwrite it.
+        """
+        optics = Optics.from_pitch(
+            width_px=5184,
+            height_px=3456,
+            pixel_um=pixel_um,
+            focal_length_mm=focal_length_mm,
+            source="fake",
+        )
+        return cls.from_optics(
+            optics,
+            source="fake",
+            camera="Fake EOS",
+            lens=f"Fake {focal_length_mm:g}mm",
         )
 
     # -- use ----------------------------------------------------------------

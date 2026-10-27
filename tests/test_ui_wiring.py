@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import dataclasses
 
+import pytest
+
 from ministar import preflight as preflight_checks
 from ministar.config import Settings
 from ministar.session import ORDER, Phase, SessionState
@@ -284,3 +286,76 @@ def test_the_fake_camera_offers_the_isos_the_screen_expects() -> None:
     from ministar.ui.station import FakeCamera
 
     assert FakeCamera().iso_options() == (100, 200, 400, 800, 1600, 3200)
+
+
+# -- clamping the interval at the zero point --------------------------------
+def test_the_interval_slider_stops_where_the_frame_does() -> None:
+    """Brief 10 §2.1b: the slider must be clamped at the zero point.
+
+    Past it every setting reads 0.0 MP, which is not a setting -- so the control must not
+    offer it, even though nothing stops the user from choosing a hopeless *target*.
+    """
+    # A 400 mm frame takes 12.8 min to cross at dec 0, so 60 min is unreachable.
+    assert screens.interval_slider_max_minutes(None, zero_seconds=768.0) == 12
+    # A target's own window is tighter still, and wins.
+    assert screens.interval_slider_max_minutes(ceiling_seconds=300.0, zero_seconds=768.0) == 5
+    # No optics at all: nothing to clamp to, and the full hour stands.
+    assert screens.interval_slider_max_minutes(None, None) == 60
+
+
+def test_the_interval_slider_never_collapses_to_zero_minutes() -> None:
+    assert screens.interval_slider_max_minutes(ceiling_seconds=71.0, zero_seconds=71.0) == 1
+
+
+# -- fake mode's rig --------------------------------------------------------
+def test_fake_mode_carries_its_own_135mm_rig() -> None:
+    """Fake mode must not depend on, or disturb, the profile measured from a frame."""
+    from ministar.optics import Optics
+    from ministar.rig import PROVENANCE_ORDER, RigProfile
+
+    profile = RigProfile.fake()
+
+    assert profile.focal_length_mm == 135.0
+    assert profile.source == "fake"
+    assert profile.width_px == 5184
+    assert profile.optics().plate_scale_arcsec == pytest.approx(6.78, abs=0.05)
+    assert PROVENANCE_ORDER["fake"] < PROVENANCE_ORDER["typed"], "a fake must never win"
+    assert RigProfile.fake(50.0).describe().startswith("50 mm")
+    # and it is a normal profile: the screens take it the same way
+    assert isinstance(
+        Optics.from_plate_scale(
+            width_px=profile.width_px,
+            height_px=profile.height_px,
+            plate_scale_arcsec=profile.plate_scale_arcsec,
+        ),
+        Optics,
+    )
+
+
+def test_the_rig_override_is_preferred_over_the_file(tmp_path) -> None:
+    from ministar.config import Settings
+    from ministar.rig import RigProfile
+    from ministar.ui.screens import Context, rig_for
+
+    ctx = Context(
+        state=__import__("ministar.session", fromlist=["SessionState"]).SessionState(),
+        settings=Settings.load(tmp_path),
+        station=None,
+        refresh=lambda: None,
+        rig=RigProfile.fake(),
+    )
+
+    assert rig_for(ctx).focal_length_mm == 135.0
+
+
+def test_without_an_override_the_measured_profile_is_used(tmp_path) -> None:
+    from ministar.config import Settings
+    from ministar.rig import RigProfile, rig_path, save
+    from ministar.session import SessionState
+    from ministar.ui.screens import Context, rig_for
+
+    settings = Settings.load(tmp_path)
+    save(rig_path(settings.paths.data), RigProfile.fake(200.0))
+    ctx = Context(state=SessionState(), settings=settings, station=None, refresh=lambda: None)
+
+    assert rig_for(ctx).focal_length_mm == 200.0

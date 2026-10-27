@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from nicegui import ui
 
 from ministar.config import Settings
+from ministar.rig import RigProfile
 from ministar.session import ORDER, SessionState
 from ministar.ui import screens
 from ministar.ui.station import FakeCamera, Station
@@ -34,6 +35,9 @@ class App:
     session: SessionState
     settings: Settings
     station: Station | None
+    #: Fake-camera mode carries its own 135 mm rig, so the demo does not depend on (or
+    #: disturb) the profile measured from a real frame.
+    rig: RigProfile | None = None
 
 
 _APP: App | None = None
@@ -84,6 +88,7 @@ def wizard_page() -> None:
             settings=app.settings,
             station=app.station,
             refresh=content.refresh,
+            rig=app.rig,
             # Deferred: update_nav is defined below, once the buttons exist.
             nav=lambda: update_nav(),
         )
@@ -138,6 +143,7 @@ def run(
 
     settings = Settings.load()
 
+    fake_rig = RigProfile.fake() if fake else None
     if fake:
         camera = FakeCamera()
         initial_error = ""
@@ -153,7 +159,7 @@ def run(
 
     station = Station(camera, initial_error=initial_error)
     station.start()
-    _APP = App(session=SessionState(), settings=settings, station=station)
+    _APP = App(session=SessionState(), settings=settings, station=station, rig=fake_rig)
 
     if host in {"0.0.0.0", "::"}:
         # Say it out loud: binding all interfaces is a deliberate exposure, not a default
