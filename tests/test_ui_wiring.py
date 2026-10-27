@@ -221,3 +221,37 @@ def test_the_focus_result_line_names_the_failure_and_where_it_stopped() -> None:
     assert "failed" in line
     assert "curve too shallow" in line
     assert "-12" in line
+
+
+def test_selecting_a_target_unblocks_next_immediately(tmp_path) -> None:
+    """Reported from the phone: NEXT stayed dead after picking a target.
+
+    The shell computed "next is allowed" when the screen was drawn; selecting a row
+    changed the state and nothing asked it to look again.
+    """
+    from ministar.config import Settings
+    from ministar.session import SessionState
+    from ministar.ui.screens import Context, select_row
+
+    state = SessionState()
+    nav_calls: list[int] = []
+    ctx = Context(
+        state=state,
+        settings=Settings.load(tmp_path),
+        station=None,
+        refresh=lambda: None,
+        nav=lambda: nav_calls.append(1),
+    )
+    row = {
+        "label": "M31",
+        "ra": 10.6847,
+        "dec": 41.269,
+        "major": 178.0,
+        "minor": 70.0,
+    }
+
+    select_row(ctx, row)
+
+    assert state.target_name == "M31"
+    assert state.target_major_arcmin == 178.0
+    assert nav_calls == [1], "the shell must be told, or NEXT never re-enables"

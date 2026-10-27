@@ -150,3 +150,35 @@ def test_uint8_frames_clip_bright_stars_like_a_camera_does() -> None:
 
     assert frame.dtype == np.uint8
     assert frame.max() == 255
+
+
+def test_a_live_view_preview_cannot_measure_focus() -> None:
+    """Why focus has to run at (nearly) full resolution -- the whole argument, as a test.
+
+    Same scene, same metric, two resolutions. At sensor scale the sweep spans several
+    pixels of HFD: a curve with a fit-able vertex. Downsampled to a 5x live-view
+    preview, the range collapses to well under a pixel, so "best focus" is whichever
+    side of the downsampler the star happened to land on. On the real rig the 60D's
+    live view bins 4.9 sensor pixels per preview pixel, which turns a 1.3-pixel star at
+    400 mm into 0.27 of one.
+    """
+    scene = StarField.random(
+        count=30,
+        seed=7,
+        shape=(2112, 3168),
+        best_position=24,
+        read_noise=2.0,
+        flux_min=150.0,
+        flux_max=400.0,
+    )
+    positions = (24, 44, 94)
+
+    def sweep(bin: int) -> list[float]:
+        return [measure_hfd(scene.render_uint8(p, bin=bin))[0] for p in positions]
+
+    sensor = sweep(1)
+    preview = sweep(5)
+
+    assert sensor == sorted(sensor), f"sensor scale must see the curve, got {sensor}"
+    assert sensor[-1] - sensor[0] > 5.0, f"sensor sweep should span pixels, got {sensor}"
+    assert preview[-1] - preview[0] < 1.5, f"preview should be flat, got {preview}"

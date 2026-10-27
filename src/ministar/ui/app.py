@@ -77,14 +77,15 @@ def wizard_page() -> None:
 
         # Blockers, verbatim from the state machine. No toast/notification: those
         # are bright, and a white flash costs dark adaptation (brief 14 §6).
-        for blocker in app.session.blockers():
-            ui.label(f"* {blocker}").classes("mn-warn")
+        blockers = ui.column().classes("items-center").style("gap: 2px")
 
         context = screens.Context(
             state=app.session,
             settings=app.settings,
             station=app.station,
             refresh=content.refresh,
+            # Deferred: update_nav is defined below, once the buttons exist.
+            nav=lambda: update_nav(),
         )
         with (
             ui.column()
@@ -101,8 +102,22 @@ def wizard_page() -> None:
         with ui.row().classes("justify-center").style("gap: 10px; margin-top: 8px"):
             back = ui.button("back", on_click=go_back).classes("mn-action")
             forward = ui.button("next", on_click=go_next).classes("mn-action")
-            back.set_enabled(index > 0)
-            forward.set_enabled(index < len(ORDER) - 1 and app.session.can_advance())
+
+        def update_nav() -> None:
+            """Re-evaluate the blocker list and the navigation buttons.
+
+            One place decides both, so a screen that changes state mid-render cannot
+            leave the shell showing a stale answer.
+            """
+            blockers.clear()
+            with blockers:
+                for blocker in app.session.blockers():
+                    ui.label(f"* {blocker}").classes("mn-warn")
+            position = ORDER.index(app.session.phase)
+            back.set_enabled(position > 0)
+            forward.set_enabled(position < len(ORDER) - 1 and app.session.can_advance())
+
+        update_nav()
 
     content()
 

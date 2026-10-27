@@ -18,6 +18,15 @@ you control**. So the fake is a real model, not a picture:
 * Noise is Gaussian read noise, optionally varying frame to frame so a live preview
   is not frozen (same ``frame`` index = identical pixels, which the tests rely on).
 
+**Resolution is the point of the model, not an afterthought.** The field is defined at
+*sensor* scale, and ``render(..., bin=k)`` produces the frame a camera would hand you in
+its live-view preview: ``k`` times coarser per axis with the PSF correspondingly smaller.
+On this rig the 60D's 1056x704 live view bins 4.9 sensor pixels per preview pixel, which
+turns a 1.3-pixel star at 400 mm into a 0.27-pixel one -- below the resolution at which
+HFD can measure anything, so a focus routine run on the preview would be fitting the
+downsampler. The fake has to be able to show that failure, or the tests cannot protect
+against it.
+
 What this deliberately is not: real star *geometry*. Pulling actual fields from the
 ASTAP catalogue is the next step (so the star patterns match the sky you are pointing
 at); random placement is a stand-in, and it is why the field is a value object that can
@@ -98,14 +107,28 @@ class StarField:
         offset = self.defocus_px_per_unit * abs(float(position) - self.best_position)
         return math.hypot(self.sigma_best_px, offset)
 
-    def render(self, position: float, *, frame: int = 0, noise: bool = True) -> np.ndarray:
+    def render(
+        self, position: float, *, frame: int = 0, noise: bool = True, bin: int = 1
+    ) -> np.ndarray:
         """The scene as a float image at one focus position.
 
         ``frame`` only changes the noise, so the same position and frame always yield
         identical pixels; a live preview passes an incrementing counter.
+
+        ``bin`` is the preview binning factor: ``bin=5`` renders what a live-view JPEG
+        looks like when it packs ~5 sensor pixels per preview pixel. Positions and PSF
+        divide by it, flux does not (total light is conserved), so the same scene is
+        described at two resolutions and the coarser one genuinely cannot resolve a
+        small star.
         """
-        height, width = self.shape
-        sigma = self.sigma_px(position)
+        bin = max(1, int(bin))
+        height, width = self.shape[0] // bin, self.shape[1] // bin
+        # The downsampler has its own footprint: a star integrated over a preview pixel
+        # can never be smaller than about one of them, whatever the optics say. Without
+        # this term a binned render aliases into single random bright pixels, which is
+        # noise pretending to be a measurement.
+        aperture = 0.5 if bin > 1 else 0.0
+        sigma = math.hypot(self.sigma_px(position) / bin, aperture)
         image = np.full((height, width), float(self.sky), dtype=np.float64)
         if sigma > 0 and self.stars:
             # Normalised so that sum(PSF) == flux: defocus spreads, never dims.
@@ -113,14 +136,15 @@ class StarField:
             reach = max(3, math.ceil(5.0 * sigma))
             denom = 2.0 * sigma * sigma
             for star in self.stars:
-                y0 = max(0, math.floor(star.y) - reach)
-                y1 = min(height, math.floor(star.y) + reach + 1)
-                x0 = max(0, math.floor(star.x) - reach)
-                x1 = min(width, math.floor(star.x) + reach + 1)
+                sy, sx = star.y / bin, star.x / bin
+                y0 = max(0, math.floor(sy) - reach)
+                y1 = min(height, math.floor(sy) + reach + 1)
+                x0 = max(0, math.floor(sx) - reach)
+                x1 = min(width, math.floor(sx) + reach + 1)
                 if y0 >= y1 or x0 >= x1:
                     continue
-                dy = np.arange(y0, y1, dtype=np.float64)[:, None] - star.y
-                dx = np.arange(x0, x1, dtype=np.float64)[None, :] - star.x
+                dy = np.arange(y0, y1, dtype=np.float64)[:, None] - sy
+                dx = np.arange(x0, x1, dtype=np.float64)[None, :] - sx
                 image[y0:y1, x0:x1] += (
                     star.flux * peak_per_flux * np.exp(-(dy * dy + dx * dx) / denom)
                 )
@@ -129,9 +153,12 @@ class StarField:
             image += rng.normal(0.0, self.read_noise, image.shape)
         return np.maximum(image, 0.0)
 
-    def render_uint8(self, position: float, *, frame: int = 0, noise: bool = True) -> np.ndarray:
-        """8-bit frame, as a live-view JPEG would arrive. Bright stars clip, as on sky."""
-        return np.clip(self.render(position, frame=frame, noise=noise), 0.0, 255.0).astype(np.uint8)
+    def render_uint8(
+        self, position: float, *, frame: int = 0, noise: bool = True, bin: int = 1
+    ) -> np.ndarray:
+        """8-bit frame, as a JPEG would arrive. Bright stars clip, as on sky."""
+        image = self.render(position, frame=frame, noise=noise, bin=bin)
+        return np.clip(image, 0.0, 255.0).astype(np.uint8)
 
     @property
     def total_flux(self) -> float:

@@ -217,6 +217,25 @@ def interval_slider_max_minutes(ceiling_seconds: float | None) -> int:
     return max(1, min(60, int(ceiling_seconds // 60)))
 
 
+def select_row(ctx: Context, row: dict) -> None:
+    """Record a clicked table row in session state, and unblock NEXT.
+
+    Split out of the click handler because the second half was *missing* and the
+    symptom was reported from the phone: selecting a target filled in the state, but
+    the shell had already computed that "next" was not allowed and nothing told it to
+    look again. A screen may change state mid-render, so it has to say so.
+    """
+    ctx.state.target_name = str(row.get("label") or "")
+    ctx.state.target_ra_deg = float(row["ra"])
+    ctx.state.target_dec_deg = float(row["dec"])
+    # Extent travels with the selection so PARAMETERS can clamp its slider without
+    # loading the whole catalogue again.
+    ctx.state.target_major_arcmin = row.get("major")
+    ctx.state.target_minor_arcmin = row.get("minor")
+    if ctx.nav is not None:
+        ctx.nav()
+
+
 def _table_row(index: int, row: Row) -> dict[str, object]:
     """Flatten a :class:`Row` into the dict the table wants."""
     return {
@@ -275,6 +294,11 @@ class Context:
     station: Station | None
     #: Re-render the whole wizard (after a state change).
     refresh: Callable[[], None]
+    #: Re-evaluate the shell's own chrome -- the blocker list and whether "next" is
+    #: allowed -- without re-rendering this screen. Needed because a screen can change
+    #: session state mid-render (selecting a target, say) and the button would otherwise
+    #: keep the answer it computed before the click.
+    nav: Callable[[], None] | None = None
 
 
 def _not_implemented(what: str, brief: str) -> None:
@@ -637,13 +661,7 @@ def render_target(ctx: Context) -> None:
         )
         if row is None:
             return
-        ctx.state.target_name = str(row.get("label") or "")
-        ctx.state.target_ra_deg = float(row["ra"])
-        ctx.state.target_dec_deg = float(row["dec"])
-        # Extent travels with the selection so PARAMETERS can clamp its slider without
-        # loading the whole catalogue again.
-        ctx.state.target_major_arcmin = row.get("major")
-        ctx.state.target_minor_arcmin = row.get("minor")
+        select_row(ctx, row)
         selected_line.text = (
             f"selected: {ctx.state.target_name}   "
             f"RA {ctx.state.target_ra_deg:.3f}   Dec {ctx.state.target_dec_deg:+.3f}"
