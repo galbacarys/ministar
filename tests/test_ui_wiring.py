@@ -94,3 +94,69 @@ def test_type_dropdown_choices_map_to_filters() -> None:
     assert types_for(ALL_TYPES) is None
     assert types_for(DEEP_SKY_PRESET) == frozenset(DEFAULT_TARGET_TYPES)
     assert types_for("PN") == frozenset({"PN"})
+
+
+# -- the frame-fit UI -------------------------------------------------------
+def _row(verdict: str, *, window=None) -> object:
+    from ministar.catalog import Target
+    from ministar.targets import Row
+
+    return Row(
+        target=Target(name="X", type="G", ra_deg=0.0, dec_deg=45.0, major_arcmin=60.0),
+        magnitude=8.0,
+        size_arcmin=60.0,
+        max_altitude_deg=60.0,
+        visible_minutes=120.0,
+        verdict=verdict,
+        rank=0,
+        window_seconds=window,
+    )
+
+
+def test_the_window_column_is_present_and_in_seconds() -> None:
+    columns = {column["name"]: column for column in screens.TARGET_COLUMNS}
+
+    assert columns["window"]["label"] == "window (s)"
+    assert columns["window"]["sortable"] is True
+
+
+def test_rows_that_will_not_work_are_dimmed_rather_than_hidden() -> None:
+    """ "inform, never block": still selectable, visibly de-emphasised."""
+    dimmed = screens._table_row(0, _row("short reframe window", window=54.0))
+    fine = screens._table_row(1, _row("good candidate", window=900.0))
+
+    assert dimmed["dim"] is True
+    assert fine["dim"] is False
+    assert dimmed["verdict"] == "short reframe window", "the row still exists"
+
+
+def test_an_endless_window_is_a_sentinel_not_infinity() -> None:
+    """JSON has no inf, and a pole target legitimately never leaves the frame."""
+    endless = screens._table_row(0, _row("good candidate", window=float("inf")))
+    unknown = screens._table_row(1, _row("good candidate", window=None))
+
+    assert endless["window"] == screens._NO_LIMIT_WINDOW
+    assert unknown["window"] == screens._NO_LIMIT_WINDOW
+
+
+def test_the_window_hint_states_the_declination_it_assumed() -> None:
+    from ministar.optics import Optics
+
+    optics = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=200)
+    text = screens.window_hint_for(optics, 300.0)
+
+    assert "5 min" in text
+    assert "dec 45" in text, "a global control must say which declination it used"
+    assert "'" in text, "it quotes a size, which is what a person recognises"
+
+
+def test_without_a_profile_the_hint_admits_it() -> None:
+    assert "no rig profile" in screens.window_hint_for(None, 300.0)
+
+
+def test_a_selected_target_carries_its_extent_for_the_parameters_screen() -> None:
+    """PARAMETERS clamps its slider from state, without reloading the catalogue."""
+    from ministar.session import SessionState
+
+    fields = {field.name for field in dataclasses.fields(SessionState)}
+    assert {"target_major_arcmin", "target_minor_arcmin"} <= fields

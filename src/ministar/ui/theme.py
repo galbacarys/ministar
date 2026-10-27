@@ -54,6 +54,13 @@ body, .nicegui-content { background: #000000 !important; }
                border-bottom: 2px solid #ff5a4d; }
 .mn-step-done { color: #b8534a !important; }
 .mn-card { background: #140405; border: 1px solid #4a1512; border-radius: 6px; }
+/* Applied by :table-row-class-fn to rows that will not work well tonight. Dimmed, not
+   hidden: "inform, never block", and still selectable at the telescope. */
+.mn-row-dim td { opacity: 0.45; }
+/* Slider in the same dark-adapted red as everything else. */
+.mn-slider .q-slider__track { background: #4a1512 !important; }
+.mn-slider .q-slider__selection { background: #ff5a4d !important; }
+.mn-slider .q-slider__thumb { color: #ff5a4d !important; }
 """
 
 

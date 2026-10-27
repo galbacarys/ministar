@@ -66,6 +66,11 @@ class SessionState:
     target_name: str | None = None
     target_ra_deg: float | None = None
     target_dec_deg: float | None = None
+    #: The target's extent, so PARAMETERS can clamp its interval to the object's own
+    #: window without consulting the catalogue again. ``None`` means "size unknown",
+    #: which is a legitimate state and must not clamp anything.
+    target_major_arcmin: float | None = None
+    target_minor_arcmin: float | None = None
 
     # Session parameters (10 §4)
     focal_length_mm: float | None = None

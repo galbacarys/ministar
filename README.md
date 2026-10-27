@@ -137,13 +137,19 @@ src/ministar/
   preflight.py     environment checks, and the camera settings checklist
   cli.py           `ministar preflight | solve | version`
   solver/astap.py  ASTAP driver; the .ini contract is fully verified
-  camera/          base.py = interface + Tv table; edsdk.py = not written yet
+  camera/          base.py = interface + Tv table; edsdk.py = live view, lens drive,
+                   still capture (verified on an EOS 60D), protocol logic injectable
+  catalog.py       OpenNGC loader: 13 372 objects, bands folded onto one scale
+  optics.py        what a frame covers: plate scale, fill, seconds between reframes
+  rig.py           the rig profile and where its numbers came from (solved/exif/typed)
+  targets.py       filtering and ranking for tonight, frame-relative when a rig is set
+  raw.py           RAW -> FITS via dcraw, undebayered, headers from EXIF
   focus/           autofocus: HFD metric, V-curve fit, motion planner, calibration
   session/state.py the setup wizard as a dependency-checked state machine
-  io/fits.py       minimal FITS reader (no astropy)
+  io/              fits.py (reader + writer), tiff.py (EXIF and pixel data)
   stack/           not written yet (design in 03, 06)
   reframe/         not written yet (spec in 07)
-  ui/              not written yet (toolkit in 09)
+  ui/              NiceGUI wizard: screens.py, theme.py (red-on-black), app.py
 tools/
   sync.sh          rsync to C:\ministar\build, optionally run there
   setup.bat        create the Windows venv (once)

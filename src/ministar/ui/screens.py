@@ -23,6 +23,10 @@ from ministar import preflight as preflight_checks
 from ministar import sky as sky_module
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
 from ministar.config import Settings
+from ministar.io.tiff import TiffError, read_frame_exif
+from ministar.rig import RigProfile, better_than, rig_path
+from ministar.rig import load as load_rig
+from ministar.rig import save as save_rig
 from ministar.session import Phase, SessionState
 from ministar.site import Site, site_path
 from ministar.site import load as load_site
@@ -89,6 +93,16 @@ TARGET_COLUMNS = [
         "sortable": True,
         ":format": "v => (v < 0 ? '--' : v)",
     },
+    {
+        # Seconds before the object leaves the frame, at its own size and declination.
+        # The headline number of the whole frame-fit idea: minutes are what a person
+        # plans an evening in, percentages are not.
+        "name": "window",
+        "label": "window (s)",
+        "field": "window",
+        "sortable": True,
+        ":format": "v => (v >= 999999 ? '--' : Math.round(v))",
+    },
     {"name": "maxalt", "label": "max alt", "field": "maxalt", "sortable": True},
     {"name": "minutes", "label": "tonight (min)", "field": "minutes", "sortable": True},
     {
@@ -118,10 +132,28 @@ SURFACE_BRIGHTNESS_HELP = (
     "a total magnitude and differ here. Lower = brighter; above about 22 is a hard ask "
     "from a suburban sky. Blank means the catalogue has no value."
 )
+WINDOW_HELP = (
+    "How long this object stays in the frame before you must re-aim, given how much of "
+    "the frame it fills and how fast the sky moves where it sits. Near the celestial "
+    "pole the same object gives hours; near the equator it gives minutes. This assumes "
+    "the drift runs along the long side of the frame -- rotating the camera makes that "
+    "true. Blank means no rig profile is set."
+)
+
+#: Verdicts that mean "this will not work well tonight", used to dim the row rather
+#: than hide it: still selectable, visibly de-emphasised.
+DIM_VERDICTS = frozenset({"bigger than your frame", "short reframe window"})
+
+#: Sentinel for "no limit": JSON cannot carry the ``inf`` that a pole target earns.
+_NO_LIMIT_WINDOW = 999999.0
 
 #: Heading help keyed by column name, so a test can check every entry names a real
 #: column and that the two misreadable ones are covered.
-COLUMN_HELP = {"mag": APPROX_MAG_HELP, "sb": SURFACE_BRIGHTNESS_HELP}
+COLUMN_HELP = {
+    "mag": APPROX_MAG_HELP,
+    "sb": SURFACE_BRIGHTNESS_HELP,
+    "window": WINDOW_HELP,
+}
 
 
 def _header_slot(label: str, tooltip: str) -> str:
@@ -141,6 +173,20 @@ def _header_slot(label: str, tooltip: str) -> str:
     )
 
 
+def window_hint_for(optics, seconds: float) -> str:
+    """The size a window implies, at a *stated* declination.
+
+    A global control cannot know every row's declination, so it names the one it used
+    (dec 45, a representative mid-latitude target) and the table carries the real
+    per-row number regardless. Without a rig there is no size to quote, and saying so
+    is better than quoting a default.
+    """
+    if optics is None:
+        return f"{seconds / 60:.0f} min between reframes (size unknown: no rig profile)"
+    size = optics.hint_size_arcmin(min_window_s=seconds)
+    return f"{seconds / 60:.0f} min between reframes = up to {size:.0f}' at dec 45"
+
+
 def _table_row(index: int, row: Row) -> dict[str, object]:
     """Flatten a :class:`Row` into the dict the table wants."""
     return {
@@ -156,9 +202,19 @@ def _table_row(index: int, row: Row) -> dict[str, object]:
         ),
         "maxalt": round(row.max_altitude_deg, 1),
         "minutes": round(row.visible_minutes, 0),
+        "window": (
+            _NO_LIMIT_WINDOW
+            if row.window_seconds is None or row.window_seconds == float("inf")
+            else round(row.window_seconds, 0)
+        ),
         "verdict": row.verdict,
+        # Consumed client-side by :table-row-class-fn -- see render_target.
+        "dim": row.verdict in DIM_VERDICTS,
         "ra": round(row.target.ra_deg, 5),
         "dec": round(row.target.dec_deg, 5),
+        # Carried so PARAMETERS can clamp its slider without re-reading the catalogue.
+        "major": row.target.major_arcmin,
+        "minor": row.target.minor_arcmin,
     }
 
 
@@ -330,6 +386,54 @@ def render_setup(ctx: Context) -> None:
     for check in preflight_checks.CAMERA_CHECKS:
         ui.label(f"[ ] {check}").classes("mn-body")
 
+    ui.label("Rig profile").classes("mn-heading")
+    rig_store = rig_path(ctx.settings.paths.data)
+    profile = load_rig(rig_store)
+    if profile is None:
+        ui.label(
+            "no profile yet: TARGET shows sizes in arcminutes and cannot judge the frame"
+        ).classes("mn-warn")
+    else:
+        ui.label(profile.describe()).classes("mn-body")
+        ui.label(
+            f"recorded {profile.recorded or 'unknown'}   camera {profile.camera or '-'}"
+            f"   lens {profile.lens or '-'}"
+        ).classes("mn-dim")
+    ui.label(
+        "Read from a real frame: the plate scale comes out of its EXIF. A solve "
+        "upgrades it later, and an EXIF value never overwrites a solved one."
+    ).classes("mn-dim")
+
+    rig_message = ui.label("").classes("mn-warn")
+
+    def read_rig() -> None:
+        camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
+        if camera is None or not hasattr(camera, "capture_to"):
+            rig_message.text = "camera capture is not available in this session"
+            return
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        frame = ctx.settings.paths.frames / f"rigtest_{stamp}.cr2"
+        try:
+            camera.capture_to(frame)
+            exif = read_frame_exif(frame)
+            candidate = RigProfile.from_frame_exif(exif, recorded=datetime.now().date().isoformat())
+        except (TiffError, RuntimeError, TimeoutError, OSError) as exc:
+            rig_message.text = f"could not read the frame: {type(exc).__name__}: {exc}"
+            return
+        except ValueError as exc:
+            rig_message.text = f"frame cannot define the rig: {exc}"
+            return
+        current = load_rig(rig_store)
+        if not better_than(candidate, current):
+            rig_message.text = f"kept the {current.source} profile: {current.describe()}"
+            return
+        save_rig(rig_store, candidate)
+        rig_message.text = f"saved: {candidate.describe()}"
+        ctx.refresh()
+
+    with ui.row().classes("items-center").style("gap: 10px"):
+        ui.button("read from a test frame", on_click=read_rig).classes("mn-action")
+
     ui.label("Tripod head").classes("mn-heading")
     _not_implemented("Head calibration profiles", "13-head-calibration.md")
 
@@ -370,6 +474,10 @@ def render_target(ctx: Context) -> None:
         ui.label("Catalogue is empty: third_party/openngc is missing.").classes("mn-warn")
         return
 
+    rig_store = rig_path(ctx.settings.paths.data)
+    profile = load_rig(rig_store)
+    optics = profile.optics() if profile is not None else None
+
     window_start, window_end, window_note = _night_for(datetime.now().astimezone(), site)
     min_altitude = 25.0
 
@@ -380,6 +488,13 @@ def render_target(ctx: Context) -> None:
     ).classes("mn-dim")
     if window_note:
         ui.label(window_note).classes("mn-warn")
+    if profile is None:
+        ui.label(
+            "no rig profile: sizes stay in arcminutes and the frame fit is unknown "
+            "(SETUP can read one from a test frame)"
+        ).classes("mn-warn")
+    else:
+        ui.label(f"frame {profile.describe()}").classes("mn-dim")
 
     with ui.row().classes("items-end").style("gap: 12px; flex-wrap: wrap"):
         magnitude = ui.number("max magnitude", value=10.0, min=0.0, max=20.0, step=0.5).classes(
@@ -395,6 +510,20 @@ def render_target(ctx: Context) -> None:
             "mn-body"
         )
         search = ui.input("search").classes("mn-body")
+
+    # The primary control, in the unit an evening is planned in. The default is the
+    # floor rather than a judgement: raising it is the user's call, and the summary line
+    # reports what was excluded instead of hiding it.
+    reachable = 3600.0 if optics is None else optics.window_seconds(fill=0.0, dec_deg=0.0)
+    slider_max = 60 * max(1, min(60, int(reachable // 60)))
+    with ui.row().classes("items-center").style("gap: 12px; flex-wrap: wrap"):
+        window_slider = (
+            ui.slider(min=60, max=slider_max, step=60, value=60)
+            .props("label-always")
+            .classes("mn-slider")
+            .style("width: 320px")
+        )
+        window_hint = ui.label("").classes("mn-dim")
 
     # Human labels: the raw codes ('G', 'Cl+N', '*Ass') are unreadable in a list.
     # Defaults exclude individual stars, of which the catalogue has 547 -- they would
@@ -423,6 +552,10 @@ def render_target(ctx: Context) -> None:
         .classes("mn-body")
         .style("width: 100%; cursor: pointer")
     )
+    # Dim, do not hide. Quasar applies a class per row through this function prop, which
+    # keeps rowClick, sorting and selection intact -- a body slot would silently stop all
+    # three (and would quietly break selection at the telescope).
+    table.props(":table-row-class-fn=\"row => row.dim ? 'mn-row-dim' : ''\"")
 
     # Each explained heading is a slot on the table itself, registered before the rows
     # are ever assigned. One hover, no extra chrome, no second row of small print.
@@ -445,10 +578,11 @@ def render_target(ctx: Context) -> None:
             search=search.value or "",
             min_visible_minutes=float(visible.value or 0.0),
             min_altitude_deg=min_altitude,
+            min_window_seconds=float(window_slider.value or 60.0),
         )
 
     def refresh_rows() -> None:
-        rows = filter_rows(targets, visibility, current_filters())
+        rows = filter_rows(targets, visibility, current_filters(), optics=optics)
         shown = top(rows, TARGET_TABLE_LIMIT)
         table.rows = [_table_row(index, row) for index, row in enumerate(shown)]
         table.update()
@@ -456,6 +590,7 @@ def render_target(ctx: Context) -> None:
             f"{len(shown)} shown of {len(rows)} matching "
             f"(cap {TARGET_TABLE_LIMIT}; loosen a filter to see more)"
         )
+        window_hint.text = window_hint_for(optics, float(window_slider.value or 60.0))
 
     def on_row_click(event) -> None:
         # Quasar emits rowClick with (evt, row, index). Pick the dict by shape rather
@@ -473,24 +608,86 @@ def render_target(ctx: Context) -> None:
         ctx.state.target_name = str(row.get("label") or "")
         ctx.state.target_ra_deg = float(row["ra"])
         ctx.state.target_dec_deg = float(row["dec"])
+        # Extent travels with the selection so PARAMETERS can clamp its slider without
+        # loading the whole catalogue again.
+        ctx.state.target_major_arcmin = row.get("major")
+        ctx.state.target_minor_arcmin = row.get("minor")
         selected_line.text = (
             f"selected: {ctx.state.target_name}   "
             f"RA {ctx.state.target_ra_deg:.3f}   Dec {ctx.state.target_dec_deg:+.3f}"
         )
 
     table.on("rowClick", on_row_click)
-    for widget in (magnitude, visible, smallest, largest, search, types):
+    for widget in (magnitude, visible, window_slider, smallest, largest, search, types):
         widget.on_value_change(lambda _event: refresh_rows())
 
     refresh_rows()
 
 
 def render_parameters(ctx: Context) -> None:
-    ui.label("These feed the reframe envelope and the sub-length rule.").classes("mn-body")
+    """The reframe interval, in seconds, clamped by what the chosen target allows.
+
+    The ceiling is not a preference. Past the object's own window it leaves the frame,
+    so the slider cannot go there -- and when no rig profile is known the clamp is
+    absent and the screen says so instead of pretending to know.
+    """
+    profile = load_rig(rig_path(ctx.settings.paths.data))
+    optics = profile.optics() if profile is not None else None
+
     _field(ctx, "focal length (mm)", "focal_length_mm", kind="number")
     _field(ctx, "exposure (s)", "exposure_s", kind="number")
     _field(ctx, "ISO", "iso", kind="number")
-    _field(ctx, "reframe interval (s)", "reframe_interval_s", kind="number")
+
+    if profile is None:
+        ui.label(
+            "no rig profile: the interval cannot be checked against the target's size"
+        ).classes("mn-warn")
+    else:
+        ui.label(f"frame {profile.describe()}").classes("mn-dim")
+
+    ceiling: float | None = None
+    if (
+        optics is not None
+        and ctx.state.target_major_arcmin is not None
+        and ctx.state.target_dec_deg is not None
+    ):
+        ceiling = optics.window_seconds_for(
+            major_arcmin=ctx.state.target_major_arcmin,
+            minor_arcmin=ctx.state.target_minor_arcmin,
+            dec_deg=ctx.state.target_dec_deg,
+        )
+
+    max_s = 3600 if ceiling is None else max(60, min(3600, int(ceiling // 60) * 60))
+    current = float(ctx.state.reframe_interval_s or 300.0)
+    value = int(min(max(60.0, current), max_s))
+
+    if ceiling is None:
+        ui.label("select a target to see how long it allows between reframes").classes("mn-body")
+    else:
+        ui.label(
+            f"{ctx.state.target_name or 'the target'} allows up to {ceiling / 60:.0f} min "
+            f"({ceiling:.0f} s) between reframes"
+        ).classes("mn-body")
+
+    hint = ui.label("").classes("mn-dim")
+
+    def describe(seconds: float) -> str:
+        return f"taking a frame every {seconds:.0f} s = {seconds / 60:.0f} min"
+
+    def changed(event) -> None:
+        seconds = float(event.value)
+        ctx.state.reframe_interval_s = seconds
+        hint.text = describe(seconds)
+
+    ui.slider(min=60, max=max_s, step=60, value=value, on_change=changed).props(
+        "label-always"
+    ).classes("mn-slider").style("width: 340px")
+    ui.label(f"slider limit {max_s / 60:.0f} min, set by the target").classes("mn-dim")
+    hint.text = describe(float(value))
+    # Record the default too, so leaving the screen does not leave the session claiming
+    # no interval was chosen.
+    ctx.state.reframe_interval_s = float(value)
+
     _not_implemented("Usable-megapixel preview", "10-target-catalog-and-reframe-envelope.md")
 
 
