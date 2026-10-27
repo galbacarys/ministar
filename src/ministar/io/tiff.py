@@ -35,11 +35,23 @@ TAG_MODEL = 0x0110
 TAG_ORIENTATION = 0x0112
 TAG_EXIF_IFD = 0x8769
 
-#: Exif IFD.
+#: The sensor's resolution, in ExifIFD. This is the one that matters.
+#: (``0x011A``/``0x011B``/``0x0128`` look similar but are ``XResolution``/
+#: ``YResolution``/``ResolutionUnit`` -- the TIFF **print** resolution, whose default is
+#: 72 dpi. Reading those and calling it a sensor pitch is a well-known way to be wrong
+#: by a factor of 80; see the note on PLAUSIBLE_PITCH_UM.)
+TAG_FOCAL_PLANE_X_RESOLUTION = 0xA20E
+TAG_FOCAL_PLANE_Y_RESOLUTION = 0xA20F
+TAG_FOCAL_PLANE_RESOLUTION_UNIT = 0xA210
+
+#: TIFF/EP originals of the same three, still written by some bodies (and by Canon in
+#: IFD0 alongside the ExifIFD copies). Fallbacks, not the first choice.
+TAG_FOCAL_PLANE_X_RESOLUTION_EP = 0x920E
+TAG_FOCAL_PLANE_Y_RESOLUTION_EP = 0x920F
+TAG_FOCAL_PLANE_RESOLUTION_UNIT_EP = 0x9210
+
+#: Exif IFD, general.
 TAG_FOCAL_LENGTH = 0x920A
-TAG_FOCAL_PLANE_X_RESOLUTION = 0x011A
-TAG_FOCAL_PLANE_Y_RESOLUTION = 0x011B
-TAG_FOCAL_PLANE_RESOLUTION_UNIT = 0x0128
 TAG_PIXEL_X_DIMENSION = 0xA002
 TAG_PIXEL_Y_DIMENSION = 0xA003
 TAG_LENS_MODEL = 0xA434
@@ -56,12 +68,13 @@ RESOLUTION_UNIT_MICROMETRE = 5
 #: Plausible pixel pitches, in µm. The floor is below any production sensor (phone
 #: sensors reach ~1.4 µm); the ceiling is above medium format (~14 µm).
 #:
-#: This bound exists because of a measured failure: the EOS 60D writes
-#: ``FocalPlaneXResolution = 72`` dpi, which is EXIF's "not computed" placeholder
-#: rather than a measurement. Taken at face value it means a 352.8 µm pitch and an
-#: 1828 x 1219 mm sensor -- an **82x** error in plate scale, and therefore in every
-#: field of view and every object size the picker would show. Trust measured, then
-#: EXIF, then the user -- never a sentinel.
+#: This bound exists because of a measured failure. A first pass at this module read
+#: ``XResolution`` (``0x011A``, the print resolution, default 72 dpi) in the belief that
+#: it was ``FocalPlaneXResolution``, and produced a 352.8 µm pitch and a 1828 x 1219 mm
+#: sensor out of an EOS 60D -- an **82x** error in plate scale and therefore in every
+#: field of view. The real tags are ``0xA20E``/``0xA20F`` (see above), which the same
+#: files populate correctly at ~5728 ppi. The bound stays anyway: a missing or sentinel
+#: value must be refused, not multiplied by, whatever tag it came from.
 PLAUSIBLE_PITCH_UM = (1.0, 20.0)
 
 
@@ -93,44 +106,59 @@ class FrameExif:
     #: EXIF orientation, 1-8. 5-8 mean the frame is stored rotated.
     orientation: int | None = None
 
-    @property
-    def pixel_size_um(self) -> float | None:
-        """Physical pixel pitch, from the focal-plane resolution.
-
-        ``25400 µm per inch`` divided by ``pixels per inch``. This is the number
-        the whole FOV calculation rests on, so an unrecognised (or absent) unit
-        returns ``None`` rather than assuming inches.
-        """
-        resolution = self.focal_plane_x_resolution
+    def _pitch_um(self, resolution: float | None) -> float | None:
+        """Pixels per unit -> micrometres per pixel."""
         if resolution is None or resolution <= 0 or self.resolution_unit is None:
             return None
-        per_mm = {
+        mm_per_unit = {
             RESOLUTION_UNIT_INCH: 25.4,
             RESOLUTION_UNIT_CENTIMETRE: 10.0,
             RESOLUTION_UNIT_MILLIMETRE: 1.0,
             RESOLUTION_UNIT_MICROMETRE: 0.001,
         }.get(self.resolution_unit)
-        if per_mm is None:
+        if mm_per_unit is None:
             return None
         # pixels per <unit> * <mm per unit> = pixels per mm; invert for mm per pixel.
-        return 1000.0 * per_mm / resolution
+        return 1000.0 * mm_per_unit / resolution
+
+    @property
+    def pixel_size_um(self) -> float | None:
+        """Horizontal pixel pitch in µm, from the focal-plane resolution.
+
+        This is the number the whole FOV calculation rests on, so an unrecognised
+        (or absent) unit returns ``None`` rather than assuming inches.
+        """
+        return self._pitch_um(self.focal_plane_x_resolution)
+
+    @property
+    def pixel_size_um_y(self) -> float | None:
+        """Vertical pixel pitch; some bodies report a slightly different value."""
+        return self._pitch_um(self.focal_plane_y_resolution) or self.pixel_size_um
 
     @property
     def sensor_size_mm(self) -> tuple[float, float] | None:
         """Width and height of the *used* area, in mm; ``None`` if the pitch is bogus.
 
-        A sentinel pitch is treated as unknown rather than passed on as a number,
-        because anything downstream would happily multiply by it.
+        Per-axis, because a body may report X and Y resolutions that differ by a
+        percent or two (the 60D writes 5728 and 5808 per inch). A sentinel pitch is
+        treated as unknown rather than passed on, because anything downstream would
+        happily multiply by it.
         """
-        pitch = self.pixel_size_um
-        if pitch is None or not self.pixel_x_dimension or not self.pixel_y_dimension:
+        pitch_x = self.pixel_size_um
+        pitch_y = self.pixel_size_um_y
+        if (
+            pitch_x is None
+            or pitch_y is None
+            or not self.pixel_x_dimension
+            or not self.pixel_y_dimension
+        ):
             return None
         low, high = PLAUSIBLE_PITCH_UM
-        if not low <= pitch <= high:
+        if not low <= pitch_x <= high or not low <= pitch_y <= high:
             return None
         return (
-            self.pixel_x_dimension * pitch / 1000.0,
-            self.pixel_y_dimension * pitch / 1000.0,
+            self.pixel_x_dimension * pitch_x / 1000.0,
+            self.pixel_y_dimension * pitch_y / 1000.0,
         )
 
     def geometry_problem(self) -> str:
@@ -147,8 +175,8 @@ class FrameExif:
             value = self.focal_plane_x_resolution
             return (
                 f"EXIF focal-plane resolution is {value:g} per unit "
-                f"({pitch:.1f} um pitch), which is a placeholder rather than a "
-                "measurement -- plate solve is needed for this body"
+                f"({pitch:.1f} um pitch), which is not a physical sensor pitch -- "
+                "plate solve is needed for this body"
             )
         return ""
 
@@ -193,7 +221,7 @@ def _read_ifd(data: bytes, offset: int, endian: str) -> dict[int, tuple[int, int
     return entries
 
 
-def _raw_value(data: bytes, entry: tuple[int, int, int], endian: str) -> bytes:
+def _raw_value(data, entry: tuple[int, int, int], endian: str) -> bytes | memoryview:
     """The bytes of a field, inline if it fits in four bytes, else at its offset."""
     kind, number, value = entry
     size = _SIZES.get(kind, 0) * number
@@ -206,7 +234,7 @@ def _raw_value(data: bytes, entry: tuple[int, int, int], endian: str) -> bytes:
     return data[value : value + size]
 
 
-def _number(data: bytes, entry: tuple[int, int, int] | None, endian: str) -> float | None:
+def _number(data, entry: tuple[int, int, int] | None, endian: str) -> float | None:
     """SHORT or LONG as a float; RATIONAL as a ratio; anything else ``None``."""
     if entry is None:
         return None
@@ -225,10 +253,45 @@ def _number(data: bytes, entry: tuple[int, int, int] | None, endian: str) -> flo
     return None
 
 
-def _text(data: bytes, entry: tuple[int, int, int] | None, endian: str) -> str:
+def _text(data, entry: tuple[int, int, int] | None, endian: str) -> str:
     if entry is None:
         return ""
-    return _raw_value(data, entry, endian).split(b"\0")[0].decode("ascii", "replace").strip()
+    raw = bytes(_raw_value(data, entry, endian))
+    return raw.split(b"\0")[0].decode("ascii", "replace").strip()
+
+
+def _exif_payload(data: bytes) -> tuple[memoryview, str]:
+    """Locate the TIFF structure holding the EXIF, whatever wraps it.
+
+    Three shapes, all seen in real files:
+
+    * **A TIFF file** -- CR2, NEF, ARW, PEF, ORF, RW2, DNG. The header is the start.
+    * **A proprietary container with an EXIF blob** -- Fuji's RAF has a
+      ``FUJIFILMCCD-RAW`` header and an ``Exif\\0\\0`` + TIFF payload a little way in.
+    * **A JPEG APP1 segment** -- thumbnails, and the JPEG previews inside raw files.
+
+    Byte order is read from the payload, not assumed. Canon writes ``II``, Nikon and
+    Sony ``II``, and a big-endian ``MM`` file is legal TIFF that used to fail here.
+    """
+    view = memoryview(data)
+    if data[:2] in (b"II", b"MM"):
+        return view, "<" if data[:2] == b"II" else ">"
+
+    for identifier in (b"Exif\0\0", b"\xff\xd8\xff\xe1"):
+        start = 0
+        while (found := data.find(identifier, start)) != -1:
+            start = found + 1
+            cursor = found + len(identifier)
+            if identifier.startswith(b"\xff"):
+                # JPEG APP1: a 2-byte length, then the EXIF identifier, then the TIFF.
+                if data[cursor : cursor + 5] != b"Exif\0":
+                    continue
+                cursor += 6
+            header = data[cursor : cursor + 2]
+            if header in (b"II", b"MM"):
+                return view[cursor:], "<" if header == b"II" else ">"
+
+    raise TiffError(f"no TIFF header, and no EXIF payload found (file starts {data[:8]!r})")
 
 
 def read_frame_exif(path: Path | str) -> FrameExif:
@@ -237,15 +300,10 @@ def read_frame_exif(path: Path | str) -> FrameExif:
     Raises :class:`TiffError` only when the file is not TIFF at all -- a camera
     that writes fewer tags than we would like is a normal, silent outcome.
     """
-    data = Path(path).read_bytes()
-    if len(data) < 8:
+    raw_file = Path(path).read_bytes()
+    if len(raw_file) < 8:
         raise TiffError("file is too short to be TIFF")
-    if data[:2] == b"II":
-        endian = "<"
-    elif data[:2] == b"MM":
-        endian = ">"
-    else:
-        raise TiffError(f"not a TIFF/CR2 header: {data[:2]!r}")
+    data, endian = _exif_payload(raw_file)
 
     (magic,) = struct.unpack_from(endian + "H", data, 2)
     if magic != 42:  # CR2 keeps 42 here too; BigTIFF's 43 is out of scope
@@ -265,8 +323,32 @@ def read_frame_exif(path: Path | str) -> FrameExif:
     def tag(number: int) -> tuple[int, int, int] | None:
         return exif.get(number) or ifd0.get(number)
 
+    def pick(*candidates: tuple[str, int]) -> tuple[int, int, int] | None:
+        """First entry present among ``(container, tag)`` pairs, in priority order."""
+        for where, number in candidates:
+            entry = (exif if where == "exif" else ifd0).get(number)
+            if entry is not None:
+                return entry
+        return None
+
     orientation = _number(data, tag(TAG_ORIENTATION), endian)
     focal_35 = _number(data, tag(TAG_FOCAL_LENGTH_35MM), endian)
+    # ExifIFD first, then the TIFF/EP twins (Canon writes both).
+    x_resolution = pick(
+        ("exif", TAG_FOCAL_PLANE_X_RESOLUTION),
+        ("ifd0", TAG_FOCAL_PLANE_X_RESOLUTION_EP),
+        ("exif", TAG_FOCAL_PLANE_X_RESOLUTION_EP),
+    )
+    y_resolution = pick(
+        ("exif", TAG_FOCAL_PLANE_Y_RESOLUTION),
+        ("ifd0", TAG_FOCAL_PLANE_Y_RESOLUTION_EP),
+        ("exif", TAG_FOCAL_PLANE_Y_RESOLUTION_EP),
+    )
+    resolution_unit = pick(
+        ("exif", TAG_FOCAL_PLANE_RESOLUTION_UNIT),
+        ("ifd0", TAG_FOCAL_PLANE_RESOLUTION_UNIT_EP),
+        ("exif", TAG_FOCAL_PLANE_RESOLUTION_UNIT_EP),
+    )
 
     return FrameExif(
         make=_text(data, ifd0.get(TAG_MAKE), endian),
@@ -274,12 +356,10 @@ def read_frame_exif(path: Path | str) -> FrameExif:
         lens_model=_text(data, tag(TAG_LENS_MODEL), endian),
         focal_length_mm=_number(data, tag(TAG_FOCAL_LENGTH), endian),
         focal_length_35mm=None if focal_35 is None else int(focal_35),
-        focal_plane_x_resolution=_number(data, tag(TAG_FOCAL_PLANE_X_RESOLUTION), endian),
-        focal_plane_y_resolution=_number(data, tag(TAG_FOCAL_PLANE_Y_RESOLUTION), endian),
+        focal_plane_x_resolution=_number(data, x_resolution, endian),
+        focal_plane_y_resolution=_number(data, y_resolution, endian),
         resolution_unit=(
-            None
-            if (unit := _number(data, tag(TAG_FOCAL_PLANE_RESOLUTION_UNIT), endian)) is None
-            else int(unit)
+            None if (unit := _number(data, resolution_unit, endian)) is None else int(unit)
         ),
         pixel_x_dimension=(
             None if (px := _number(data, tag(TAG_PIXEL_X_DIMENSION), endian)) is None else int(px)

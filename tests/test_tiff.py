@@ -1,9 +1,16 @@
-"""The CR2/EXIF reader, against synthetic TIFFs.
+"""The CR2/EXIF reader, against synthetic TIFFs and the numbers real bodies report.
 
-A real CR2 is 25 MB and the parser only needs IFD0 and the Exif IFD, so the
-fixtures here are built byte by byte: that makes the byte order, the inline-vs-
-offset rule and the missing-tag cases explicit instead of implicit in one sample
-file. A real frame validates the same code in ``ministar probe`` on hardware.
+A real CR2 is 25 MB and the parser only needs IFD0 and the Exif IFD, so most fixtures
+here are built byte by byte: that makes the byte order, the inline-vs-offset rule and
+the missing-tag cases explicit instead of implicit in one sample file.
+
+The constants are not invented. Each brand case below is a value read out of a real
+file on 2026-10-27:
+
+* Canon EOS 60D CR2: ``0xA20E = 5184000/905`` (inch), and ``0x011A`` **also** = 72
+* Fujifilm X-E5 RAF: ``0xA20E = 1879`` in **centimetres**, inside a proprietary container
+* Nikon 1 AW1 NEF and Sony RX100M7A ARW: ``0xA20E`` **absent**; only the print 0x011A
+  (300 and 350 dpi) is present, which is exactly the trap this reader exists to avoid
 """
 
 from __future__ import annotations
@@ -20,14 +27,15 @@ from ministar.io.tiff import (
     read_frame_exif,
 )
 
-#: A 4.3 µm pitch expressed as pixels per inch, as a body would report it.
-PIXELS_PER_INCH = 25400 / 4.3
-
 
 def build_tiff(
     *,
     endian: str = "<",
-    pixels_per_unit: float = PIXELS_PER_INCH,
+    #: The TIFF *print* resolution (0x011A) -- always present in real files, never useful.
+    print_dpi: float = 72.0,
+    #: The sensor's resolution (0xA20E) in pixels per `unit`. None omits the tags.
+    focal_plane_ppi: float | None = 25400 / 4.3,
+    focal_plane_ppi_y: float | None = None,
     unit: int = RESOLUTION_UNIT_INCH,
     focal_mm: float = 200.0,
     pixel_x: int = 5202,
@@ -43,11 +51,14 @@ def build_tiff(
     def rational(value: float) -> bytes:
         return struct.pack(endian + "II", round(value * 10_000), 10_000)
 
+    def exact(numerator: int, denominator: int) -> bytes:
+        return struct.pack(endian + "II", numerator, denominator)
+
+    ifd0_tags = 7  # Make, Model, Orientation, ExifIFD, XRes, YRes, ResUnit
+    exif_tags = 7 if focal_plane_ppi is not None else 4
     ifd0_offset = 8
-    ifd0_count = 4
-    exif_offset = ifd0_offset + 2 + 12 * ifd0_count + 4
-    exif_count = 7
-    data_offset = exif_offset + 2 + 12 * exif_count + 4
+    exif_offset = ifd0_offset + 2 + 12 * ifd0_tags + 4
+    data_offset = exif_offset + 2 + 12 * exif_tags + 4
 
     blob = bytearray()
 
@@ -59,30 +70,32 @@ def build_tiff(
     make_off = add(make.encode() + b"\0")
     model_off = add(model.encode() + b"\0")
     lens_off = add(lens.encode() + b"\0")
-    x_res_off = add(rational(pixels_per_unit))
-    y_res_off = add(rational(pixels_per_unit))
-    focal_off = add(rational(focal_mm))
+    print_x_off = add(exact(round(print_dpi), 1))
+    print_y_off = add(exact(round(print_dpi), 1))
 
     ifd0 = [
         (0x010F, 2, len(make) + 1, make_off),  # Make
         (0x0110, 2, len(model) + 1, model_off),  # Model
         (0x0112, 3, 1, orientation),  # Orientation
         (0x8769, 4, 1, exif_offset if with_exif_ifd else 0),  # Exif IFD pointer
+        (0x011A, 5, 1, print_x_off),  # XResolution   <- the trap
+        (0x011B, 5, 1, print_y_off),  # YResolution
+        (0x0128, 3, 1, unit),  # ResolutionUnit
     ]
+
     exif = [
-        (0x011A, 5, 1, x_res_off),  # FocalPlaneXResolution
-        (0x011B, 5, 1, y_res_off),  # FocalPlaneYResolution
-        (0x0128, 3, 1, unit),  # FocalPlaneResolutionUnit
-        (0x920A, 5, 1, focal_off),  # FocalLength
+        (0x920A, 5, 1, add(rational(focal_mm))),  # FocalLength
         (0xA002, 4, 1, pixel_x),  # PixelXDimension
         (0xA003, 4, 1, pixel_y),  # PixelYDimension
         (0xA434, 2, len(lens) + 1, lens_off),  # LensModel
     ]
-
-    out = bytearray()
-    out += b"II" if endian == "<" else b"MM"
-    out += struct.pack(endian + "H", 42)
-    out += struct.pack(endian + "I", ifd0_offset)
+    if focal_plane_ppi is not None:
+        exif += [
+            (0xA20E, 5, 1, add(rational(focal_plane_ppi))),  # FocalPlaneXResolution
+            (0xA20F, 5, 1, add(rational(focal_plane_ppi_y or focal_plane_ppi))),
+            (0xA210, 3, 1, unit),  # FocalPlaneResolutionUnit
+        ]
+    exif.sort()
 
     def inline_field(kind: int, value: int) -> bytes:
         """A value that fits in four bytes, left-justified as TIFF 6.0 requires.
@@ -95,20 +108,24 @@ def build_tiff(
         order = "little" if endian == "<" else "big"
         return value.to_bytes(width, order).ljust(4, b"\0")
 
-    def write_ifd(entries, offset: int) -> None:
-        nonlocal out
-        out += struct.pack(endian + "H", len(entries))
-        for tag, kind, count, value in entries:
-            out += struct.pack(endian + "HHI", tag, kind, count)
-            if kind in (3, 4):
-                out += inline_field(kind, value)
-            else:  # ASCII and RATIONAL always live at an offset in these fixtures
-                out += struct.pack(endian + "I", value)
-        out += struct.pack(endian + "I", 0)  # no next IFD
+    out = bytearray()
+    out += b"II" if endian == "<" else b"MM"
+    out += struct.pack(endian + "H", 42)
+    out += struct.pack(endian + "I", ifd0_offset)
 
-    write_ifd(ifd0, ifd0_offset)
-    write_ifd(exif, exif_offset)
-    assert len(out) == data_offset, "fixture layout drifted"
+    def write_ifd(entries) -> None:
+        out.extend(struct.pack(endian + "H", len(entries)))
+        for tag, kind, count, value in entries:
+            out.extend(struct.pack(endian + "HHI", tag, kind, count))
+            if kind in (3, 4):
+                out.extend(inline_field(kind, value))
+            else:  # ASCII and RATIONAL always live at an offset in these fixtures
+                out.extend(struct.pack(endian + "I", value))
+        out.extend(struct.pack(endian + "I", 0))  # no next IFD
+
+    write_ifd(ifd0)
+    write_ifd(exif)
+    assert len(out) == data_offset, f"fixture layout drifted ({len(out)} != {data_offset})"
     out += blob
     return bytes(out)
 
@@ -130,6 +147,20 @@ def test_reads_the_facts_the_picker_needs(tmp_path: Path) -> None:
     assert exif.pixel_y_dimension == 3464
 
 
+def test_the_print_resolution_is_never_mistaken_for_the_sensor(tmp_path: Path) -> None:
+    """The bug this module exists for: 0x011A is XResolution, not a pixel pitch.
+
+    Reading it produced a 352.8 um pitch and a 1.8-metre sensor from an EOS 60D. With
+    no focal-plane tags the honest answer is "unknown", not 72 dpi.
+    """
+    exif = read_frame_exif(write(tmp_path, build_tiff(focal_plane_ppi=None)))
+
+    assert exif.focal_plane_x_resolution is None
+    assert exif.pixel_size_um is None
+    assert exif.sensor_size_mm is None
+    assert "no usable focal-plane resolution" in exif.geometry_problem()
+
+
 def test_pixel_pitch_comes_from_the_resolution_unit(tmp_path: Path) -> None:
     """Inch is the common case, cm happens: both must land on 4.3 µm."""
     inch = read_frame_exif(write(tmp_path, build_tiff(), "inch.cr2"))
@@ -138,23 +169,59 @@ def test_pixel_pitch_comes_from_the_resolution_unit(tmp_path: Path) -> None:
     centimetre = read_frame_exif(
         write(
             tmp_path,
-            build_tiff(unit=RESOLUTION_UNIT_CENTIMETRE, pixels_per_unit=10000 / 4.3),
+            build_tiff(unit=RESOLUTION_UNIT_CENTIMETRE, focal_plane_ppi=10000 / 4.3),
             "cm.cr2",
         )
     )
     assert centimetre.pixel_size_um == pytest.approx(4.3, abs=0.01)
 
 
-def test_sensor_size_is_the_used_area_not_a_guess(tmp_path: Path) -> None:
-    exif = read_frame_exif(write(tmp_path, build_tiff()))
-    width, height = exif.sensor_size_mm  # type: ignore[misc]
+def test_the_eos_60d_numbers_are_usable(tmp_path: Path) -> None:
+    """Real values: 5184000/905 and 3456000/595 pixels per inch, 5184x3456."""
+    exif = read_frame_exif(
+        write(
+            tmp_path,
+            build_tiff(
+                focal_plane_ppi=5184000 / 905,
+                focal_plane_ppi_y=3456000 / 595,
+                pixel_x=5184,
+                pixel_y=3456,
+                focal_mm=24.0,
+            ),
+            "eos60d.cr2",
+        )
+    )
 
-    assert width == pytest.approx(5202 * 4.3 / 1000, abs=0.02)
-    assert height == pytest.approx(3464 * 4.3 / 1000, abs=0.02)
+    assert exif.pixel_size_um == pytest.approx(4.434, abs=0.01)
+    assert exif.geometry_problem() == ""
+    width, height = exif.sensor_size_mm  # type: ignore[misc]
+    assert width == pytest.approx(22.99, abs=0.05)
+    assert height == pytest.approx(15.11, abs=0.05)
+
+
+def test_a_fujifilm_raf_resolution_in_centimetres(tmp_path: Path) -> None:
+    """The X-E5 writes 1879 per cm, i.e. 5.32 um -- and inside a non-TIFF container."""
+    exif = read_frame_exif(
+        write(
+            tmp_path,
+            build_tiff(
+                focal_plane_ppi=1879.0,
+                unit=RESOLUTION_UNIT_CENTIMETRE,
+                pixel_x=4416,
+                pixel_y=2944,
+                make="FUJIFILM",
+                model="X-E5",
+            ),
+            "x-e5.raf",
+        )
+    )
+
+    assert exif.pixel_size_um == pytest.approx(5.322, abs=0.01)
+    assert exif.geometry_problem() == ""
 
 
 def test_big_endian_files_read_the_same(tmp_path: Path) -> None:
-    """Nikon writes MM where Canon writes II, and inline shorts pack differently."""
+    """Nikon writes MM as readily as II, and inline shorts pack differently."""
     little = read_frame_exif(write(tmp_path, build_tiff(), "le.cr2"))
     big = read_frame_exif(write(tmp_path, build_tiff(endian=">"), "be.cr2"))
 
@@ -163,14 +230,13 @@ def test_big_endian_files_read_the_same(tmp_path: Path) -> None:
     assert big.orientation == little.orientation
 
 
-def test_a_body_without_the_resolution_tags_reports_unknown(tmp_path: Path) -> None:
-    """Some bodies omit FocalPlane*: the answer is None, never a guessed pitch."""
-    data = build_tiff(unit=RESOLUTION_UNIT_INCH, pixels_per_unit=0.0)
-    exif = read_frame_exif(write(tmp_path, data))
+def test_a_bogus_focal_plane_value_is_refused(tmp_path: Path) -> None:
+    """72 in the *right* tag is still nonsense: 352 um is not a sensor pitch."""
+    exif = read_frame_exif(write(tmp_path, build_tiff(focal_plane_ppi=72.0)))
 
-    assert exif.pixel_size_um is None
+    assert exif.pixel_size_um == pytest.approx(352.78, abs=0.01), "the conversion is literal"
     assert exif.sensor_size_mm is None
-    assert exif.focal_length_mm is not None, "an unrelated tag must still be read"
+    assert "not a physical sensor pitch" in exif.geometry_problem()
 
 
 def test_orientation_flags_a_stored_rotation(tmp_path: Path) -> None:
@@ -189,36 +255,34 @@ def test_a_missing_exif_ifd_still_yields_ifd0(tmp_path: Path) -> None:
     assert exif.pixel_size_um is None
 
 
-def test_a_file_that_is_not_tiff_is_an_error(tmp_path: Path) -> None:
+def test_an_exif_blob_inside_a_proprietary_container_is_found(tmp_path: Path) -> None:
+    """Fuji's RAF is `FUJIFILMCCD-RAW...` with an Exif+NUL+TIFF payload a little way in."""
+    tiff = build_tiff(make="FUJIFILM", model="X-E5")
+    raf = b"FUJIFILMCCD-RAW 0201FF4137440\0" + b"\0" * 100 + b"Exif\0\0" + tiff
+
+    exif = read_frame_exif(write(tmp_path, raf, "container.raf"))
+
+    assert exif.model == "X-E5"
+    assert exif.pixel_size_um == pytest.approx(4.3, abs=0.01)
+
+
+def test_a_jpeg_app1_segment_is_found(tmp_path: Path) -> None:
+    """Thumbnails and previews wrap the same TIFF in a JPEG APP1 segment."""
+    tiff = build_tiff()
+    length = struct.pack(">H", len(tiff) + 8)
+    jpeg = b"\xff\xd8\xff\xe1" + length + b"Exif\0\0" + tiff + b"\xff\xd9"
+
+    exif = read_frame_exif(write(tmp_path, jpeg, "preview.jpg"))
+
+    assert exif.model == "Canon EOS 60D"
+
+
+def test_a_file_with_no_exif_at_all_is_an_error(tmp_path: Path) -> None:
     path = tmp_path / "not-a-frame.cr2"
-    path.write_bytes(b"\xff\xd8\xff\xe0 this is a JPEG")
+    path.write_bytes(b"\x00\x01\x02\x03 nothing to see here")
 
-    with pytest.raises(TiffError, match="not a TIFF"):
+    with pytest.raises(TiffError, match="no TIFF header"):
         read_frame_exif(path)
-
-
-def test_the_eos_60d_placeholder_resolution_is_rejected(tmp_path: Path) -> None:
-    """Measured on hardware 2026-10-27: the 60D writes 72 dpi, i.e. no measurement.
-
-    Believing it gives a 352.8 um pitch and a 1.8-metre sensor, so every FOV the
-    picker showed would be ~82x too wide. The number must be refused, loudly.
-    """
-    exif = read_frame_exif(
-        write(
-            tmp_path,
-            build_tiff(pixels_per_unit=72.0, unit=RESOLUTION_UNIT_INCH, pixel_x=5184, pixel_y=3456),
-            "eos60d.cr2",
-        )
-    )
-
-    assert exif.pixel_size_um == pytest.approx(352.78, abs=0.01), "the conversion is literal"
-    assert exif.sensor_size_mm is None, "but the derived size must not be"
-    assert "placeholder" in exif.geometry_problem()
-    assert "plate solve" in exif.geometry_problem()
-
-
-def test_plausible_geometry_says_nothing(tmp_path: Path) -> None:
-    assert read_frame_exif(write(tmp_path, build_tiff())).geometry_problem() == ""
 
 
 def test_as_dict_carries_the_derived_values_into_the_report(tmp_path: Path) -> None:

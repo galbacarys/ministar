@@ -6,11 +6,13 @@ Canon-specific, because the numbers come from a profile that any body can fill -
 see :meth:`Optics.from_exif`, :meth:`Optics.from_pitch` and
 :meth:`Optics.from_plate_scale`.
 
-**Plate scale is the root quantity, not pixel pitch.** Measured on the EOS 60D: its
-CR2 reports ``FocalPlaneXResolution = 72`` dpi, EXIF's "not computed" placeholder, so
-a pitch derived from it is 82x wrong. A plate solve measures the scale directly and
-needs no pitch at all, so pitch is accepted as a *convenience input* and validated,
-never as the only route.
+**Plate scale is the root quantity, not pixel pitch.** Mainly because the pitch is
+frequently absent: measured on real files, Canon and Fujifilm write
+``FocalPlaneXResolution`` (5728 ppi on an EOS 60D, 1879 per cm on an X-E5), while a
+Nikon NEF and a Sony ARW carry no focal-plane tags at all and offer only the print
+resolution, ``XResolution`` -- 300 and 350 dpi -- which has nothing to do with the
+sensor. A plate solve measures arcsec per pixel directly and needs no pitch, so pitch
+is a *convenience input*, validated, never the only route.
 
 The one number that decides whether a target is comfortable is not a percentage of
 the frame but *how often the mount must be re-aimed*. An untracked rig drifts at
@@ -52,7 +54,8 @@ TINY_PX = 20.0
 HINT_DEC_DEG = 45.0
 
 #: Accepted pixel pitches, micrometres. The floor is below any production sensor; the
-#: ceiling is above medium format. Canon's 72 dpi placeholder lands at 352 um.
+#: ceiling is above medium format. A print resolution misread as a pitch lands outside
+#: it easily: 72 dpi is 352 um.
 PLAUSIBLE_PITCH_UM = (1.0, 20.0)
 
 
@@ -125,8 +128,9 @@ class Optics:
     def from_exif(cls, exif, source: str = "EXIF") -> Optics:
         """Best effort from a frame's EXIF; ``ValueError`` says what is wrong.
 
-        Deliberately strict: on the 60D this raises, because the pitch is a
-        placeholder. A caller that wants to fall back should catch and say so.
+        Deliberately strict: a Nikon NEF or a Sony ARW has no focal-plane resolution to
+        give, so this raises rather than inventing one. A caller that wants to fall back
+        should catch, say so, and use a solve instead.
         """
         problem = exif.geometry_problem()
         if problem:

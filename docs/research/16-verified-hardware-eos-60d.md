@@ -274,16 +274,37 @@ fails on cadence, not on optics or on what the camera can do.
   "LV never comes back" failure mode did not occur on this body. Capture can therefore run
   without a stop/restart of the live-view stream — worth re-checking on the long end of the
   lens, where a 30 s download is a bigger window for it to bite.
-- ⚠️ **`FocalPlaneXResolution` is 72 dpi on this body — a placeholder, not a measurement.**
-  Taken literally it yields a 352.8 µm pitch and a 1828 x 1219 mm sensor: an **82x** error in
-  plate scale, and therefore in every field of view. 72 x 72 is EXIF's "not computed"
-  default. Consequence: **the EXIF pitch is unusable on the 60D**; the plate scale must come
-  from a solve (`Solution.pixel_scale_arcsec`), which needs no pitch at all. `ministar.io.tiff`
-  now refuses an implausible pitch (`PLAUSIBLE_PITCH_UM`) instead of passing it on.
-  ⚠️ And the fallback is not free: the installed ASTAP database is all `.1476` tiles (max
+- ⚠️ **CORRECTION (2026-10-27, later the same day): the 72 dpi was a bug in our reader, not
+  a quirk of the body.** The CR2 carries two different tag groups:
+
+  | tag | where | value | meaning |
+  |---|---|---|---|
+  | `0x011A`/`0x011B`/`0x0128` | IFD0 | `72/1` | `XResolution` — the TIFF **print** resolution |
+  | `0xA20E`/`0xA20F`/`0xA210` | Exif IFD | `5184000/905`, `3456000/595`, unit 2 | `FocalPlaneXResolution`, i.e. **5728 / 5808 ppi** |
+
+  The first version of `io/tiff.py` read `0x011A` and called it a sensor pitch, producing
+  352.8 µm and a 1828 x 1219 mm sensor: an 82x error. The real tags give **4.434 µm**, a
+  22.99 x 15.11 mm sensor, and a plate scale good to ~3% of the nominal 4.302 µm. So the
+  60D's EXIF pitch **is** usable; the reader was reading the print DPI. The plausibility
+  guard stays — a sentinel must never be multiplied by — but it is no longer the main
+gate on this body.
+
+  Cross-brand checks on real files from raw.pixls.us, same day:
+
+  | body | container | `0xA20E` | print `0x011A` |
+  |---|---|---|---|
+  | Canon EOS 60D | TIFF (CR2) | **5728 ppi**, unit inches | 72 |
+  | Fujifilm X-E5 | proprietary `FUJIFILMCCD-RAW` + EXIF blob at offset 154 | **1879/cm** (5.32 µm) | 72 |
+  | Nikon 1 AW1 | TIFF (NEF) | **absent** | 300 |
+  | Sony RX100M7A | TIFF (ARW) | **absent** | 350 |
+
+  So the tags are standard across makers but the *population* is not: two of the four
+  bodies omit the focal-plane resolution entirely and offer only the print DPI, which is
+  exactly the trap. That is the real argument for plate scale as the root quantity — it
+  is a solve away and needs no pitch, whereas the pitch is sometimes missing.
+  ⚠️ And that fallback is not free: the installed ASTAP database is all `.1476` tiles (max
   **5.14°** field, per `preflight`), while this 24 mm frame is ~34° tall. A wide-field frame
-  cannot be solved until the G05/W08 wide-field tiles are installed, so "solve it and read
-  the scale" needs that database *and* a longer focal length before it can rescue the pitch.
+  cannot be solved until the G05/W08 wide-field tiles are installed.
 - Frame size is **5184 x 3456** (17.9 MP), not the 5202 x 3464 used in briefs 01/10's tables.
   Those numbers came from an earlier solved frame; the envelope maths is unaffected, but the
   megapixel tables are off by ~0.5%.
