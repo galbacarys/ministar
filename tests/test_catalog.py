@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ministar.catalog import (
+    BLUE_TO_VISUAL_MAG,
     COMMON_TYPES,
     DEFAULT_TARGET_TYPES,
     EXCLUDED_TYPES,
@@ -83,9 +84,33 @@ def test_magnitude_falls_back_from_v_to_b_and_says_so(
     assert with_v.magnitude_band == "V"
 
 
+def test_a_blue_only_row_is_shifted_onto_the_visual_scale(
+    targets: tuple[Target, ...],
+) -> None:
+    """One scale for the column and the filter: B-only rows are corrected, not labelled."""
+    blue_only = next(t for t in targets if t.v_mag is None and t.b_mag is not None)
+    assert blue_only.approx_magnitude == round(blue_only.b_mag - BLUE_TO_VISUAL_MAG, 2)
+    assert blue_only.approx_magnitude < blue_only.b_mag, "B reads fainter than V"
+
+    with_v = next(t for t in targets if t.v_mag is not None)
+    assert with_v.approx_magnitude == with_v.v_mag, "a measured V is passed through untouched"
+
+
+def test_the_band_shift_is_the_measured_median_colour(
+    targets: tuple[Target, ...],
+) -> None:
+    """The constant must be this catalogue's own B-V, not a remembered number."""
+    both = [t for t in targets if t.v_mag is not None and t.b_mag is not None]
+    assert both, "expected rows carrying both bands"
+    offsets = sorted(t.b_mag - t.v_mag for t in both)
+    median = offsets[len(offsets) // 2]
+    assert pytest.approx(median, abs=0.01) == BLUE_TO_VISUAL_MAG
+
+
 def test_an_object_with_no_magnitude_at_all_is_none() -> None:
     bare = Target(name="X", type="G", ra_deg=0.0, dec_deg=0.0)
     assert bare.magnitude is None
+    assert bare.approx_magnitude is None
     assert bare.magnitude_band == ""
     assert bare.size_arcmin is None
 

@@ -17,6 +17,10 @@ Absent data is not zero. Magnitude is missing for many rows and surface brightne
 for a quarter of them; an object with no magnitude is excluded *by a magnitude filter*
 and reported as such, never silently treated as infinitely faint.
 
+Magnitude here is the *approximate visual* one (``Target.approx_magnitude``), not the
+raw catalogue band, so one cut means the same thing for a V-measured row and a B-only
+one. Filtering and displaying the same number is what keeps the column honest.
+
 The work is split in two on purpose:
 
 * :func:`compute_visibility` is the expensive part -- one vectorised pass over the
@@ -67,8 +71,9 @@ class Row:
     """One table row: the target plus everything computed for tonight."""
 
     target: Target
+    #: Approximate visual magnitude (``Target.approx_magnitude``); the band is
+    #: already folded in, so no row is 0.7 mag off its neighbour's scale.
     magnitude: float | None
-    magnitude_band: str
     size_arcmin: float | None
     max_altitude_deg: float
     visible_minutes: float
@@ -182,7 +187,7 @@ def filter_rows(
     limit = spec.max_magnitude
 
     for index, target in enumerate(targets):
-        magnitude = target.magnitude
+        magnitude = target.approx_magnitude
         size = target.size_arcmin
 
         # No magnitude means it cannot satisfy "brighter than X", so it is excluded
@@ -218,7 +223,6 @@ def filter_rows(
             Row(
                 target=target,
                 magnitude=magnitude,
-                magnitude_band=target.magnitude_band,
                 size_arcmin=size,
                 max_altitude_deg=float(visibility.max_altitude[index]),
                 visible_minutes=minutes,

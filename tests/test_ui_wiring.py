@@ -59,6 +59,31 @@ def test_a_new_session_starts_at_the_first_phase() -> None:
     assert isinstance(state.can_advance(), bool)
 
 
+def test_the_magnitude_column_folds_the_band_in() -> None:
+    """One approximate scale, so "V" and "B" never reach the table as their own field."""
+    columns = {column["name"]: column for column in screens.TARGET_COLUMNS}
+
+    assert "band" not in columns, "the band belongs inside the number, not beside it"
+    assert columns["mag"]["label"] == "approx. mag"
+    assert columns["mag"]["sortable"] is True, "a renamed column must still sort"
+
+
+def test_both_misreadable_headings_carry_their_explanation() -> None:
+    known = {column["name"] for column in screens.TARGET_COLUMNS}
+    unknown = set(screens.COLUMN_HELP) - known
+    assert not unknown, f"help for columns that do not exist: {unknown}"
+    assert {"mag", "sb"} <= set(screens.COLUMN_HELP)
+
+
+def test_a_helpful_header_cell_stays_sortable() -> None:
+    """A hand-rolled <th> silently drops sorting, the arrow and aria-sort with it."""
+    html = screens._header_slot("approx. mag", "brightness")
+
+    assert ':props="props"' in html, "q-th must receive the table's slot props"
+    assert "approx. mag" in html
+    assert "<q-tooltip" in html and "brightness" in html
+
+
 def test_type_dropdown_choices_map_to_filters() -> None:
     """'(all)' must genuinely mean all, including the stars the default hides."""
     from ministar.catalog import DEFAULT_TARGET_TYPES

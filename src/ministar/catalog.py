@@ -12,9 +12,11 @@ Data quirks that matter (see ``third_party/openngc/README.md``):
   and left to the type filter, because ``inform, never block``.
 * The 10 ``NonEx`` rows are exactly the ones with empty ``RA``/``Dec``, so dropping
   them also fixes coordinate parsing rather than needing a special case.
-* ``V-Mag`` exists for only 30% of rows, ``B-Mag`` for 81%: :attr:`Target.magnitude`
-  falls back to B and :attr:`Target.magnitude_band` says which was used, because
-  silently mixing the two would make a magnitude filter lie.
+* ``V-Mag`` exists for only 30% of rows, ``B-Mag`` for 81%. :attr:`Target.magnitude`
+  is the raw catalogue value in whichever band exists, and
+  :attr:`Target.approx_magnitude` puts both onto one approximate visual scale, so a
+  magnitude filter cannot lie by ~0.7 mag. Anything a user sees or filters on uses
+  the latter.
 * A missing size or surface brightness is *legitimate*, not zero.
 """
 
@@ -85,6 +87,19 @@ TYPE_LABELS = {
 #: Artefacts rather than objects.
 EXCLUDED_TYPES = frozenset({"Dup", "NonEx"})
 
+#: Shift from the blue band to the visual band, in magnitudes.
+#:
+#: Magnitudes are measured through a colour filter, so the same object has a different
+#: number in each band: over the 4 072 rows that carry both, the median ``B - V`` is
+#: 0.71 mag (mean 0.64), i.e. a B-only row reads about 0.7 mag fainter than the same
+#: object would in V. Subtracting this puts a B-only row on an approximate V scale so
+#: one filter cut means the same thing for every row.
+#:
+#: It is a *typical* colour, not a measurement: an individual galaxy can sit half a
+#: magnitude either side. That is why the UI calls the result "approx. mag" and says
+#: so on hover, rather than presenting a converted number as catalogue data.
+BLUE_TO_VISUAL_MAG = 0.71
+
 #: Object classes offered as filters. Everything present in the file is listed so
 #: the UI can show the real set rather than a guess.
 COMMON_TYPES = (
@@ -127,8 +142,26 @@ class Target:
 
     @property
     def magnitude(self) -> float | None:
-        """V if available, else B. Use :attr:`magnitude_band` to know which."""
+        """The raw catalogue value: V if available, else B.
+
+        Mixes two scales, so prefer :attr:`approx_magnitude` for anything a user
+        reads or filters on. :attr:`magnitude_band` says which scale this is.
+        """
         return self.v_mag if self.v_mag is not None else self.b_mag
+
+    @property
+    def approx_magnitude(self) -> float | None:
+        """One approximate visual magnitude, whichever band the catalogue recorded.
+
+        V is used as measured; a B-only row is corrected by
+        :data:`BLUE_TO_VISUAL_MAG`. This is the number the target table shows and the
+        magnitude filter cuts on, so the two can never disagree.
+        """
+        if self.v_mag is not None:
+            return self.v_mag
+        if self.b_mag is not None:
+            return round(self.b_mag - BLUE_TO_VISUAL_MAG, 2)
+        return None
 
     @property
     def magnitude_band(self) -> str:
@@ -236,6 +269,7 @@ def catalog() -> tuple[Target, ...]:
 
 
 __all__ = [
+    "BLUE_TO_VISUAL_MAG",
     "CATALOG_DIR",
     "COMMON_TYPES",
     "DEFAULT_TARGET_TYPES",

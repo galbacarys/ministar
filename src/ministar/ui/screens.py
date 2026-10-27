@@ -73,13 +73,15 @@ TARGET_COLUMNS = [
         ":format": "v => (v < 0 ? '--' : v)",
     },
     {
+        # One scale, not two: the band is folded in by Target.approx_magnitude, and
+        # "approx." is there because the B-to-V shift is a typical colour rather than
+        # a measurement of this object. See APPROX_MAG_HELP.
         "name": "mag",
-        "label": "mag",
+        "label": "approx. mag",
         "field": "mag",
         "sortable": True,
         ":format": "v => (v >= 99 ? '--' : v)",
     },
-    {"name": "band", "label": "band", "field": "band"},
     {
         "name": "sb",
         "label": "surf br",
@@ -99,6 +101,46 @@ TARGET_COLUMNS = [
 ]
 
 
+#: Column headings explain themselves on hover. These are the two numbers a beginner
+#: is most likely to misread -- "V" and "B" look like grades, and a surface brightness
+#: looks like a magnitude -- and an explanation that lives in a document is one nobody
+#: reads at the telescope.
+APPROX_MAG_HELP = (
+    "Brightness measured through a colour filter. V (visual, green-yellow) is what the "
+    "eye and a camera see, but only 30% of the catalogue has it; the rest only ever got "
+    "a blue B measurement, which reads about 0.7 mag fainter for the same object, so "
+    "those values are converted to match. Expect half a magnitude either way. "
+    "Lower number = brighter."
+)
+SURFACE_BRIGHTNESS_HELP = (
+    "How concentrated the light is, in magnitudes per square arcsecond -- not how much "
+    "of it there is. A large faint galaxy and a small bright planetary nebula can share "
+    "a total magnitude and differ here. Lower = brighter; above about 22 is a hard ask "
+    "from a suburban sky. Blank means the catalogue has no value."
+)
+
+#: Heading help keyed by column name, so a test can check every entry names a real
+#: column and that the two misreadable ones are covered.
+COLUMN_HELP = {"mag": APPROX_MAG_HELP, "sb": SURFACE_BRIGHTNESS_HELP}
+
+
+def _header_slot(label: str, tooltip: str) -> str:
+    """A header cell: the label, a small (?), and its explanation on hover.
+
+    ``q-th :props="props"`` is exactly what Quasar's own header cell renders, so
+    binding the slot props to it keeps the column sortable, keeps the sort arrow, and
+    keeps the keyboard and aria-sort behaviour. Hand-rolling the ``th`` loses all
+    three silently -- the table still looks right and stops sorting.
+    """
+    return (
+        '<q-th :props="props">'
+        f"<span>{label}</span>"
+        '<q-icon name="help_outline" size="13px" class="q-ml-xs" style="opacity: 0.55" />'
+        f'<q-tooltip style="font-size: 12px; max-width: 320px">{tooltip}</q-tooltip>'
+        "</q-th>"
+    )
+
+
 def _table_row(index: int, row: Row) -> dict[str, object]:
     """Flatten a :class:`Row` into the dict the table wants."""
     return {
@@ -107,7 +149,6 @@ def _table_row(index: int, row: Row) -> dict[str, object]:
         "type": TYPE_LABELS.get(row.target.type, row.target.type),
         "size": _UNKNOWN_SIZE if row.size_arcmin is None else round(row.size_arcmin, 2),
         "mag": _UNKNOWN_MAG if row.magnitude is None else round(row.magnitude, 2),
-        "band": row.magnitude_band or "-",
         "sb": (
             _UNKNOWN_SIZE
             if row.target.surface_brightness is None
@@ -382,6 +423,12 @@ def render_target(ctx: Context) -> None:
         .classes("mn-body")
         .style("width: 100%; cursor: pointer")
     )
+
+    # Each explained heading is a slot on the table itself, registered before the rows
+    # are ever assigned. One hover, no extra chrome, no second row of small print.
+    for name, help_text in COLUMN_HELP.items():
+        label = next(column["label"] for column in TARGET_COLUMNS if column["name"] == name)
+        table.add_slot(f"header-cell-{name}", _header_slot(str(label), help_text))
 
     # The expensive pass, once. Sliders only re-run the cheap filter below.
     visibility = compute_visibility(

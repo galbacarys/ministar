@@ -111,13 +111,39 @@ def test_minimum_visible_minutes_filters() -> None:
     assert {row.target.name for row in rows} == {"NGC0001", "NGC0003"}
 
 
-def test_magnitude_filter_uses_the_v_then_b_fallback() -> None:
+def test_magnitude_filter_cuts_on_the_approximate_visual_scale() -> None:
     rows = build_rows(
         catalogue(), site=SITE, start=START, end=END, filters=Filters(max_magnitude=10.0)
     )
     names = {row.target.name for row in rows}
-    # NGC0003 is B=12, so too faint even though it has no V magnitude.
+    # NGC0003 is B=12, i.e. about 11.3 once shifted to the visual scale: too faint
+    # either way, which is the point -- the shift must not rescue a hopeless object.
     assert names == {"NGC0001", "NGC0002"}
+
+
+def test_a_blue_only_row_is_not_penalised_for_its_band() -> None:
+    """B reads ~0.7 mag fainter for the same object, so a raw cut would drop this."""
+    blue_only = Target(
+        name="B-ONLY",
+        type="G",
+        ra_deg=0.0,
+        dec_deg=80.0,
+        b_mag=10.4,
+        surface_brightness=20.0,
+    )
+    assert blue_only.magnitude == 10.4, "the raw catalogue value stays raw"
+
+    rows = build_rows(
+        [blue_only],
+        site=SITE,
+        start=START,
+        end=END,
+        filters=Filters(max_magnitude=10.0, min_visible_minutes=0.0),
+    )
+    assert [row.target.name for row in rows] == ["B-ONLY"]
+    # The row carries the same converted number the filter used, so the table cannot
+    # show 10.4 for a row that was admitted as 9.7.
+    assert rows[0].magnitude == pytest.approx(9.69, abs=0.005)
 
 
 def test_an_object_without_any_magnitude_is_excluded_by_a_magnitude_filter() -> None:
@@ -166,7 +192,6 @@ def test_top_prefers_good_candidates_and_respects_the_limit() -> None:
         return Row(
             target=Target(name=name, type="G", ra_deg=0.0, dec_deg=0.0),
             magnitude=magnitude,
-            magnitude_band="V",
             size_arcmin=None,
             max_altitude_deg=60.0,
             visible_minutes=100.0,
