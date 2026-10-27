@@ -34,6 +34,9 @@ it and correctness to lose.
   compact objects, so a missing value must not be read as zero.
 * `M` is zero-padded (`M045`, not `M45`), and M40/M45 are present, so the Messier
   list needs no extra file.
+* The catalogue contains **109** distinct Messier numbers, not 110: the disputed
+  M102 is carried as a `Dup` row whose `M` field is `101`, i.e. OpenNGC declares
+  it a duplicate of M101. Dropping duplicates therefore drops M102 too.
 * Sizes (`MajAx`/`MinAx`) are in arcminutes.
 * A handful of rows have unparseable or empty `RA`/`Dec`; the parser must skip them
   rather than crash.
