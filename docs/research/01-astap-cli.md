@@ -218,6 +218,39 @@ cannot survive a Unix `$?`. Do not use those modes across the WSL boundary.
 
 ---
 
+## 6.0 The .1476 tile format, decoded ✅
+
+Read out of the installed D80 tiles and the manual's appendix 3, 2026-10-27. Our reader
+lives in `ministar/starcatalog.py`; the numbers below are what it was checked against.
+
+* **Naming.** `d80_<ring><cell>.1476`. The sky is cut into rings of `90/17.5 = 5.142857°`
+  in declination (with half-height caps at the poles), then each ring into RA cells.
+  Tile `0101` covers dec −90.000 … −87.429, confirmed by decoding it.
+* **Layout.** 109 bytes of ASCII preamble, then **byte 109 is the record size** (5 for
+  D80/G05/D05/D20/D50; 6 for the V50 family, which appends a colour index), then records.
+* **Star record (5 bytes).** `ra7 ra8 ra9 dec7 dec8`, little-endian; RA is 24-bit,
+  Dec is the low 16 bits:
+  `ra = raw * 360/(256³−1)` deg, `dec = (dec7 + 256·dec8 + 65536·dec9) * 90/(128·256²−1)`.
+* **Header record.** `FF FF FF dec9 mag`, marking a *section*: `FF FF FF` cannot be a real
+  RA. `dec9` is stored offset by **−128**; magnitude as `(byte − 16)/10`. Every star until
+  the next header shares that dec9 and magnitude — which is why the record is 5 bytes and
+  not 7. Stars are sorted bright→faint, and within a magnitude by dec9.
+* ⚠️ **The manual's worked example uses the older declination convention.** It gives Sirius
+  as `C3 06 48` / `D7 39 E8` → −16.7161401°, which requires reading `dec9` as *two's
+  complement*. The shipped tiles need the −128 offset (the same appendix describes it in
+  its header-record example): under two's complement the polar tile decodes to +73° instead
+  of −90…−87.4. RA agrees exactly either way. Trust the files, not the example.
+* **Epoch 2025**, not J2000 — Sirius decodes 33.8″ from its J2000 position, which is its
+  proper motion, not an error. Do not "fix" a decoder that disagrees with J2000 catalogues.
+* **Cost.** ~20 ms per tile with numpy, 166 000 stars in the polar tile; the whole D80 set
+  is 1476 tiles / 1.3 GB, so the index is built once and cached (`star-index.json`).
+
+Why we care: rendering a synthetic frame from *these* stars means ASTAP solves star fields
+we generated from the same data it matches against, which is how pointing and camera roll
+get verified before a clear night.
+
+---
+
 ## 6. Star databases
 
 ✅ This machine: **D80 only** — 1476 tiles named `d80_####.1476`, 1.3 GB, installed
