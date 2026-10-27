@@ -8,10 +8,13 @@ Two deliberate limits, both from brief 10 §1.2:
 * **These are advisory.** A filter hides rows from the current view; it never claims
   an object is unobservable. Anything filtered out can be shown again by loosening a
   control.
-* **No frame-relative verdicts yet.** "Bigger than your frame" needs a focal length,
-  and TARGET runs *before* PARAMETERS in the wizard order (brief 12 §0), so it is not
-  known here. Judging size in arcminutes only avoids inventing an ordering-dependent
-  answer; the frame fit is evaluated later, where it belongs.
+* **Frame-relative verdicts need an :class:`~ministar.optics.Optics`.** "Bigger than
+  your frame" needs a plate scale, and TARGET runs *before* PARAMETERS (brief 12 §0) --
+  but the scale is a property of the *lens*, not of the parameters chosen later, so it
+  is available in time. Pass ``optics=`` and rows carry the fraction of frame the
+  object fills and the seconds before a reframe is needed. Without it (no rig profile
+  yet) those columns are absent and the size verdict falls back to a plain arcminute
+  threshold, which the UI says out loud rather than presenting as measured.
 
 Absent data is not zero. Magnitude is missing for many rows and surface brightness
 for a quarter of them; an object with no magnitude is excluded *by a magnitude filter*
@@ -40,16 +43,19 @@ import numpy as np
 
 from ministar import sky
 from ministar.catalog import Target
+from ministar.optics import DEFAULT_MIN_WINDOW_S, TINY_PX, Optics
 from ministar.site import Site
 
 #: Above this, an extended object is a hard ask from a suburban sky (brief 10 §1.2).
 FAINT_SURFACE_BRIGHTNESS = 22.5
 
-#: Below this the object is a few pixels across on this rig and reads as a dot.
-TINY_ARCMIN = 2.0
+#: Fallback dot threshold, used only when no :class:`Optics` is known. Superseded by
+#: :data:`ministar.optics.TINY_PX`, because 2 arcmin is 7 px at 50 mm and 54 px at
+#: 400 mm -- wrong at one end or the other whatever lens is fitted.
+TINY_ARCMIN_FALLBACK = 2.0
 
-#: Above this it will not fit a single frame at any of our useful focal lengths.
-HUGE_ARCMIN = 100.0
+#: "Huge" no longer has a threshold of its own: it is ``fill > 1``, i.e. bigger than the
+#: frame that is actually fitted, which needs no constant at all.
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,9 @@ class Filters:
     search: str = ""
     min_visible_minutes: float = 0.0
     min_altitude_deg: float = 25.0
+    #: Keep only rows that allow at least this long between reframes. 0 disables it,
+    #: and it is ignored when no optics are known (nothing to compute it from).
+    min_window_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,13 @@ class Row:
     visible_minutes: float
     verdict: str
     rank: int
+    #: Fraction of the frame the object takes, best orientation. ``None`` without optics.
+    fill: float | None = None
+    #: Seconds before it would leave the frame, drift along the long axis. ``None``
+    #: without optics; ``inf`` near the pole, where it does not move.
+    window_seconds: float | None = None
+    #: Pixels across the object's long axis. ``None`` without optics.
+    size_px: float | None = None
 
 
 @dataclass(frozen=True)
@@ -99,20 +115,35 @@ def verdict_for(
     size_arcmin: float | None = None,
     surface_brightness: float | None = None,
     magnitude: float | None = None,
+    fill: float | None = None,
+    window_seconds: float | None = None,
+    size_px: float | None = None,
+    min_window_seconds: float = DEFAULT_MIN_WINDOW_S,
 ) -> str:
     """Plain-language honesty rather than a pass/fail badge (brief 10 §1.2).
 
     A beginner learns nothing from a hidden object and a lot from one labelled *this
-    will be a smudge*.
+    will be a smudge*. With optics the judgement is frame-relative -- the same object
+    is comfortable at 50 mm and impossible at 400 mm -- and the numbers behind it
+    travel on the row, so the table can show 54 s where this says "short reframe
+    window" without the two disagreeing.
     """
     if visible_minutes <= 0.0:
         return "not up tonight"
     if max_altitude_deg < 25.0:
         return "grazes the horizon"
-    if size_arcmin is not None and size_arcmin > HUGE_ARCMIN:
-        return "huge, will not fit one frame"
-    if size_arcmin is not None and size_arcmin < TINY_ARCMIN:
+
+    if fill is not None and fill > 1.0:
+        return "bigger than your frame"
+    if size_px is not None:
+        if size_px < TINY_PX:
+            return "tiny, will be a dot"
+    elif size_arcmin is not None and size_arcmin < TINY_ARCMIN_FALLBACK:
+        # No plate scale: the old fixed threshold, and the UI says it is a fallback.
         return "tiny, will be a dot"
+
+    if window_seconds is not None and window_seconds < min_window_seconds:
+        return "short reframe window"
     if surface_brightness is not None and surface_brightness > FAINT_SURFACE_BRIGHTNESS:
         return "faint surface brightness"
     if magnitude is None and surface_brightness is None:
@@ -125,11 +156,12 @@ def verdict_for(
 _VERDICT_RANK = {
     "good candidate": 0,
     "tiny, will be a dot": 1,
-    "faint surface brightness": 2,
-    "huge, will not fit one frame": 3,
-    "brightness unknown": 4,
-    "grazes the horizon": 5,
-    "not up tonight": 6,
+    "short reframe window": 2,
+    "faint surface brightness": 3,
+    "bigger than your frame": 4,
+    "brightness unknown": 5,
+    "grazes the horizon": 6,
+    "not up tonight": 7,
 }
 
 
@@ -176,8 +208,15 @@ def filter_rows(
     targets: list[Target] | tuple[Target, ...],
     visibility: Visibility,
     filters: Filters | None = None,
+    *,
+    optics: Optics | None = None,
 ) -> list[Row]:
-    """Apply the user's filters to precomputed visibility. Cheap enough to re-run."""
+    """Apply the user's filters to precomputed visibility. Cheap enough to re-run.
+
+    ``optics`` turns arcminutes into frame fractions, pixels and seconds. It is
+    optional so the picker still works before a rig profile exists; without it the
+    frame-relative columns are simply absent rather than filled with guesses.
+    """
     spec = filters or Filters()
     if len(visibility) != len(targets):
         raise ValueError("visibility does not match the target list")
@@ -212,12 +251,36 @@ def filter_rows(
         if minutes < spec.min_visible_minutes:
             continue
 
+        # Frame-relative figures, only when both a rig and a size are known. A missing
+        # minor axis is left to Optics.fill(), which assumes circular (conservative).
+        fill: float | None = None
+        window: float | None = None
+        size_px: float | None = None
+        if optics is not None:
+            major = target.major_arcmin if target.major_arcmin is not None else size
+            if major is not None:
+                fill = optics.fill(major, target.minor_arcmin)
+                size_px = optics.object_size_px(major)
+                window = optics.window_seconds(fill=fill, dec_deg=target.dec_deg)
+        if (
+            spec.min_window_seconds > 0.0
+            and window is not None
+            and window < spec.min_window_seconds
+        ):
+            continue
+
         verdict = verdict_for(
             visible_minutes=minutes,
             max_altitude_deg=float(visibility.max_altitude[index]),
             size_arcmin=size,
             surface_brightness=target.surface_brightness,
             magnitude=magnitude,
+            fill=fill,
+            window_seconds=window,
+            size_px=size_px,
+            min_window_seconds=(
+                spec.min_window_seconds if spec.min_window_seconds > 0 else DEFAULT_MIN_WINDOW_S
+            ),
         )
         rows.append(
             Row(
@@ -228,6 +291,9 @@ def filter_rows(
                 visible_minutes=minutes,
                 verdict=verdict,
                 rank=_VERDICT_RANK.get(verdict, 9),
+                fill=fill,
+                window_seconds=window,
+                size_px=size_px,
             )
         )
     return rows
@@ -240,13 +306,14 @@ def build_rows(
     start: datetime,
     end: datetime,
     filters: Filters | None = None,
+    optics: Optics | None = None,
 ) -> list[Row]:
     """Convenience wrapper: compute visibility, then filter. One night, one call."""
     spec = filters or Filters()
     visibility = compute_visibility(
         targets, site=site, start=start, end=end, min_altitude_deg=spec.min_altitude_deg
     )
-    return filter_rows(targets, visibility, spec)
+    return filter_rows(targets, visibility, spec, optics=optics)
 
 
 def top(rows: list[Row], limit: int) -> list[Row]:
@@ -267,8 +334,7 @@ def top(rows: list[Row], limit: int) -> list[Row]:
 
 __all__ = [
     "FAINT_SURFACE_BRIGHTNESS",
-    "HUGE_ARCMIN",
-    "TINY_ARCMIN",
+    "TINY_ARCMIN_FALLBACK",
     "Filters",
     "Row",
     "Visibility",

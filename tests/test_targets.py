@@ -57,12 +57,47 @@ def catalogue() -> list[Target]:
         ({"visible_minutes": 0.0, "max_altitude_deg": 60.0}, "not up tonight"),
         ({"visible_minutes": 100.0, "max_altitude_deg": 10.0}, "grazes the horizon"),
         (
+            # "Huge" is now frame-relative: without optics there is no frame to be
+            # bigger than, so an oversized arcminute size says nothing by itself.
             {"visible_minutes": 100.0, "max_altitude_deg": 60.0, "size_arcmin": 500.0},
-            "huge, will not fit one frame",
+            "brightness unknown",
         ),
         (
             {"visible_minutes": 100.0, "max_altitude_deg": 60.0, "size_arcmin": 0.5},
             "tiny, will be a dot",
+        ),
+        (
+            {"visible_minutes": 100.0, "max_altitude_deg": 60.0, "fill": 1.3},
+            "bigger than your frame",
+        ),
+        (
+            {
+                "visible_minutes": 100.0,
+                "max_altitude_deg": 60.0,
+                "size_px": 8.0,
+                "fill": 0.05,
+            },
+            "tiny, will be a dot",
+        ),
+        (
+            # 54 s is M31 at 400 mm on the equator: real, and useless to automate.
+            {
+                "visible_minutes": 100.0,
+                "max_altitude_deg": 60.0,
+                "fill": 0.93,
+                "window_seconds": 54.0,
+            },
+            "short reframe window",
+        ),
+        (
+            {
+                "visible_minutes": 100.0,
+                "max_altitude_deg": 60.0,
+                "fill": 0.93,
+                "window_seconds": 54.0,
+                "min_window_seconds": 30.0,
+            },
+            "brightness unknown",
         ),
         (
             {
@@ -202,3 +237,72 @@ def test_top_prefers_good_candidates_and_respects_the_limit() -> None:
     rows = [make("poor", 6, 5.0), make("good-dim", 0, 9.0), make("good-bright", 0, 6.0)]
     ordered = [row.target.name for row in top(rows, 2)]
     assert ordered == ["good-bright", "good-dim"]
+
+
+# -- frame-relative rows ----------------------------------------------------
+def optics_at(focal_mm: float):
+    from ministar.optics import Optics
+
+    return Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=focal_mm)
+
+
+def test_rows_carry_the_frame_arithmetic_when_optics_are_known() -> None:
+    optics = optics_at(200)
+    rows = build_rows(catalogue(), site=SITE, start=START, end=END, optics=optics)
+    ngc1 = next(row for row in rows if row.target.name == "NGC0001")  # 20' at dec 80
+
+    # The fixture has no minor axis, so Optics assumes circular and the SHORT axis
+    # binds. That is the conservative reading, and it is the one the row reports.
+    assert ngc1.fill == pytest.approx(20 * 60 / optics.height_arcsec, rel=0.01)
+    assert ngc1.size_px == pytest.approx(20 * 60 / optics.plate_scale_arcsec, rel=0.01)
+    assert ngc1.window_seconds is not None and ngc1.window_seconds > 0
+
+
+def test_without_optics_the_frame_columns_stay_empty() -> None:
+    """No rig profile means no measurement -- absent, not an invented default."""
+    rows = build_rows(catalogue(), site=SITE, start=START, end=END)
+
+    assert rows, "the rows themselves must still be produced"
+    assert all(
+        row.fill is None and row.window_seconds is None and row.size_px is None for row in rows
+    )
+
+
+def test_the_window_filter_drops_a_target_it_can_judge() -> None:
+    """A 180' object at 400 mm fills 94% of the frame: ~4 minutes at dec 80, seconds at 0."""
+    huge = Target(
+        name="WIDE",
+        type="G",
+        ra_deg=0.0,
+        dec_deg=80.0,
+        v_mag=6.0,
+        major_arcmin=180.0,
+        minor_arcmin=60.0,
+        surface_brightness=20.0,
+    )
+    filters = Filters(min_window_seconds=300.0, min_visible_minutes=0.0)
+
+    kept = build_rows(
+        [huge], site=SITE, start=START, end=END, filters=filters, optics=optics_at(400)
+    )
+    assert kept == []
+
+    generous = build_rows(
+        [huge], site=SITE, start=START, end=END, filters=filters, optics=optics_at(100)
+    )
+    assert [row.target.name for row in generous] == ["WIDE"]
+
+
+def test_the_window_filter_cannot_drop_what_it_cannot_measure() -> None:
+    """Without optics every row passes: silence is not evidence of discomfort."""
+    huge = Target(name="WIDE", type="G", ra_deg=0.0, dec_deg=80.0, v_mag=6.0, major_arcmin=180.0)
+
+    rows = build_rows(
+        [huge],
+        site=SITE,
+        start=START,
+        end=END,
+        filters=Filters(min_window_seconds=300.0, min_visible_minutes=0.0),
+    )
+
+    assert [row.target.name for row in rows] == ["WIDE"]
