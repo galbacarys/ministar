@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from ministar.catalog import (
+    COMMON_TYPES,
+    DEFAULT_TARGET_TYPES,
     EXCLUDED_TYPES,
     Target,
     catalog,
@@ -101,3 +103,14 @@ def test_label_prefers_the_messier_number(targets: tuple[Target, ...]) -> None:
 
 def test_missing_directory_yields_an_empty_catalogue(tmp_path) -> None:
     assert load_catalog(tmp_path) == []
+
+
+def test_default_target_types_drop_bare_stars_but_keep_asterisms() -> None:
+    """The picker must not open with Sirius.
+
+    The catalogue has 547 individual stars; a magnitude-sorted list of them is not a
+    target list. Asterisms stay because they are legitimate wide-field subjects.
+    """
+    assert "*" not in DEFAULT_TARGET_TYPES
+    assert "*Ass" in DEFAULT_TARGET_TYPES
+    assert set(DEFAULT_TARGET_TYPES) <= set(COMMON_TYPES)

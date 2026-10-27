@@ -16,6 +16,15 @@ Two deliberate limits, both from brief 10 §1.2:
 Absent data is not zero. Magnitude is missing for many rows and surface brightness
 for a quarter of them; an object with no magnitude is excluded *by a magnitude filter*
 and reported as such, never silently treated as infinitely faint.
+
+The work is split in two on purpose:
+
+* :func:`compute_visibility` is the expensive part -- one vectorised pass over the
+  catalogue and every sampled time step.
+* :func:`filter_rows` is cheap, and is what a UI calls when a slider moves.
+
+Without that split, dragging a magnitude slider would re-run thirteen thousand sky
+positions per frame.
 """
 
 from __future__ import annotations
@@ -67,6 +76,17 @@ class Row:
     rank: int
 
 
+@dataclass(frozen=True)
+class Visibility:
+    """Precomputed sky figures for every target, aligned with the input order."""
+
+    minutes: np.ndarray
+    max_altitude: np.ndarray
+
+    def __len__(self) -> int:
+        return int(self.minutes.shape[0])
+
+
 def verdict_for(
     *,
     visible_minutes: float,
@@ -108,29 +128,27 @@ _VERDICT_RANK = {
 }
 
 
-def build_rows(
+def compute_visibility(
     targets: list[Target] | tuple[Target, ...],
     *,
     site: Site,
     start: datetime,
     end: datetime,
-    filters: Filters | None = None,
-) -> list[Row]:
-    """Compute every row for tonight, then apply ``filters``.
+    min_altitude_deg: float = 25.0,
+) -> Visibility:
+    """The expensive pass: altitude figures for the whole catalogue.
 
-    Visibility is computed for the whole catalogue in one vectorised pass, because
-    the alternative is 13 000 Python loops. The site must be complete; an incomplete
-    site raises rather than quietly producing unranked numbers.
+    Raises rather than guessing when the site is incomplete, because an unset latitude
+    has no defensible substitute.
     """
     if not site.complete:
         raise ValueError("a complete site (latitude and longitude) is required")
-
-    spec = filters or Filters()
     if not targets:
-        return []
+        empty = np.zeros(0, dtype=float)
+        return Visibility(minutes=empty, max_altitude=empty.copy())
 
-    ra = np.array([t.ra_deg for t in targets], dtype=float)
-    dec = np.array([t.dec_deg for t in targets], dtype=float)
+    ra = np.array([target.ra_deg for target in targets], dtype=float)
+    dec = np.array([target.dec_deg for target in targets], dtype=float)
 
     max_altitude = np.atleast_1d(
         sky.max_altitude_deg(dec, latitude_deg=site.latitude_deg)  # type: ignore[arg-type]
@@ -143,19 +161,32 @@ def build_rows(
             longitude_deg=site.longitude_deg,  # type: ignore[arg-type]
             start=start,
             end=end,
-            min_alt_deg=spec.min_altitude_deg,
+            min_alt_deg=min_altitude_deg,
         )
     )
+    return Visibility(minutes=minutes, max_altitude=max_altitude)
+
+
+def filter_rows(
+    targets: list[Target] | tuple[Target, ...],
+    visibility: Visibility,
+    filters: Filters | None = None,
+) -> list[Row]:
+    """Apply the user's filters to precomputed visibility. Cheap enough to re-run."""
+    spec = filters or Filters()
+    if len(visibility) != len(targets):
+        raise ValueError("visibility does not match the target list")
 
     rows: list[Row] = []
     needle = spec.search.strip().lower()
+    limit = spec.max_magnitude
+
     for index, target in enumerate(targets):
         magnitude = target.magnitude
         size = target.size_arcmin
 
         # No magnitude means it cannot satisfy "brighter than X", so it is excluded
         # rather than treated as infinitely faint. The UI reports how many.
-        limit = spec.max_magnitude
         if limit is not None and (magnitude is None or magnitude > limit):
             continue
         if (
@@ -172,12 +203,13 @@ def build_rows(
             continue
         if needle and needle not in target.name.lower() and needle not in target.label.lower():
             continue
-        if float(minutes[index]) < spec.min_visible_minutes:
+        minutes = float(visibility.minutes[index])
+        if minutes < spec.min_visible_minutes:
             continue
 
         verdict = verdict_for(
-            visible_minutes=float(minutes[index]),
-            max_altitude_deg=float(max_altitude[index]),
+            visible_minutes=minutes,
+            max_altitude_deg=float(visibility.max_altitude[index]),
             size_arcmin=size,
             surface_brightness=target.surface_brightness,
             magnitude=magnitude,
@@ -188,14 +220,29 @@ def build_rows(
                 magnitude=magnitude,
                 magnitude_band=target.magnitude_band,
                 size_arcmin=size,
-                max_altitude_deg=float(max_altitude[index]),
-                visible_minutes=float(minutes[index]),
+                max_altitude_deg=float(visibility.max_altitude[index]),
+                visible_minutes=minutes,
                 verdict=verdict,
                 rank=_VERDICT_RANK.get(verdict, 9),
             )
         )
-
     return rows
+
+
+def build_rows(
+    targets: list[Target] | tuple[Target, ...],
+    *,
+    site: Site,
+    start: datetime,
+    end: datetime,
+    filters: Filters | None = None,
+) -> list[Row]:
+    """Convenience wrapper: compute visibility, then filter. One night, one call."""
+    spec = filters or Filters()
+    visibility = compute_visibility(
+        targets, site=site, start=start, end=end, min_altitude_deg=spec.min_altitude_deg
+    )
+    return filter_rows(targets, visibility, spec)
 
 
 def top(rows: list[Row], limit: int) -> list[Row]:
@@ -220,7 +267,10 @@ __all__ = [
     "TINY_ARCMIN",
     "Filters",
     "Row",
+    "Visibility",
     "build_rows",
+    "compute_visibility",
+    "filter_rows",
     "top",
     "verdict_for",
 ]

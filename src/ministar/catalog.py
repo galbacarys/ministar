@@ -31,6 +31,32 @@ from pathlib import Path
 #: not exist (a packaging task, not a runtime one).
 CATALOG_DIR = Path(__file__).resolve().parents[2] / "third_party" / "openngc"
 
+#: Classes that make sense as *imaging targets*, used as the default filter.
+#:
+#: The catalogue contains 547 individual stars (`*`), so a magnitude-sorted list
+#: opens with Sirius, Rigel and Alnilam. Those are useful to a focus routine and
+#: useless as targets, so they are filtered out by default -- still selectable, per
+#: "inform, never block". Stellar associations and asterisms are kept because they
+#: are legitimate wide-field subjects (M24 is an `*Ass`).
+DEFAULT_TARGET_TYPES = (
+    "G",
+    "GPair",
+    "GTrpl",
+    "GGroup",
+    "OCl",
+    "GCl",
+    "Cl+N",
+    "PN",
+    "HII",
+    "SNR",
+    "Neb",
+    "RfN",
+    "EmN",
+    "DrkN",
+    "Ass",
+    "*Ass",
+)
+
 #: Artefacts rather than objects.
 EXCLUDED_TYPES = frozenset({"Dup", "NonEx"})
 
@@ -187,6 +213,7 @@ def catalog() -> tuple[Target, ...]:
 __all__ = [
     "CATALOG_DIR",
     "COMMON_TYPES",
+    "DEFAULT_TARGET_TYPES",
     "EXCLUDED_TYPES",
     "Target",
     "catalog",

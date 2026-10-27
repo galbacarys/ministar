@@ -15,18 +15,91 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from nicegui import ui
 
 from ministar import preflight as preflight_checks
+from ministar import sky as sky_module
+from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, catalog
 from ministar.config import Settings
 from ministar.session import Phase, SessionState
 from ministar.site import Site, site_path
 from ministar.site import load as load_site
 from ministar.site import save as save_site
 from ministar.site import validate as validate_site
+from ministar.targets import Filters as TargetFilters
+from ministar.targets import Row, compute_visibility, filter_rows, top
 from ministar.ui import focus as focus_screen
 from ministar.ui.station import Station
+
+#: Rows sent to the browser. Quasar renders client-side, so all ~13 000 would be
+#: wasteful; the cap is reported on screen so nothing disappears silently.
+TARGET_TABLE_LIMIT = 300
+
+#: Sentinels so a numeric column still sorts while meaning "unknown". The column
+#: formatters render them as "--".
+_UNKNOWN_SIZE = -1.0
+_UNKNOWN_MAG = 99.0
+
+TARGET_COLUMNS = [
+    {"name": "label", "label": "target", "field": "label", "align": "left", "sortable": True},
+    {"name": "type", "label": "type", "field": "type", "sortable": True},
+    {
+        "name": "size",
+        "label": "size (')",
+        "field": "size",
+        "sortable": True,
+        ":format": "v => (v < 0 ? '--' : v)",
+    },
+    {
+        "name": "mag",
+        "label": "mag",
+        "field": "mag",
+        "sortable": True,
+        ":format": "v => (v >= 99 ? '--' : v)",
+    },
+    {"name": "band", "label": "band", "field": "band"},
+    {
+        "name": "sb",
+        "label": "surf br",
+        "field": "sb",
+        "sortable": True,
+        ":format": "v => (v < 0 ? '--' : v)",
+    },
+    {"name": "maxalt", "label": "max alt", "field": "maxalt", "sortable": True},
+    {"name": "minutes", "label": "tonight (min)", "field": "minutes", "sortable": True},
+    {
+        "name": "verdict",
+        "label": "verdict",
+        "field": "verdict",
+        "sortable": True,
+        "align": "left",
+    },
+]
+
+
+def _table_row(index: int, row: Row) -> dict[str, object]:
+    """Flatten a :class:`Row` into the dict the table wants."""
+    return {
+        "key": f"{index}-{row.target.name}",
+        "label": row.target.label,
+        "type": row.target.type,
+        "size": _UNKNOWN_SIZE if row.size_arcmin is None else round(row.size_arcmin, 2),
+        "mag": _UNKNOWN_MAG if row.magnitude is None else round(row.magnitude, 2),
+        "band": row.magnitude_band or "-",
+        "sb": (
+            _UNKNOWN_SIZE
+            if row.target.surface_brightness is None
+            else round(row.target.surface_brightness, 2)
+        ),
+        "maxalt": round(row.max_altitude_deg, 1),
+        "minutes": round(row.visible_minutes, 0),
+        "verdict": row.verdict,
+        "ra": round(row.target.ra_deg, 5),
+        "dec": round(row.target.dec_deg, 5),
+    }
+
 
 #: Browser geolocation, resolved through a promise. Fails on a non-secure context
 #: (a LAN address over plain http), which is why manual entry must always work.
@@ -201,6 +274,7 @@ def render_setup(ctx: Context) -> None:
 
 
 def render_target(ctx: Context) -> None:
+    """The target picker: real catalogue, real filters, tonight's visibility."""
     site = load_site(site_path(ctx.settings.paths.data))
     if not site.complete:
         ui.label("No observing site set.").classes("mn-warn")
@@ -208,12 +282,109 @@ def render_target(ctx: Context) -> None:
         ui.button("go to SETUP", on_click=lambda: _go(ctx, Phase.SETUP)).classes("mn-action")
         return
 
-    ui.label(f"site: {site.describe()}").classes("mn-body")
-    _not_implemented("Target table", "10-target-catalog-and-reframe-envelope.md")
-    ui.label("Manual entry still works:").classes("mn-body")
-    _field(ctx, "name", "target_name")
-    _field(ctx, "RA (deg)", "target_ra_deg", kind="number")
-    _field(ctx, "Dec (deg)", "target_dec_deg", kind="number")
+    targets = catalog()
+    if not targets:
+        ui.label("Catalogue is empty: third_party/openngc is missing.").classes("mn-warn")
+        return
+
+    window_start, window_end = sky_module.night_window(datetime.now().astimezone())
+    min_altitude = 25.0
+
+    ui.label(f"site {site.describe()}").classes("mn-body")
+    ui.label(
+        f"night {window_start:%H:%M}-{window_end:%H:%M} UTC   |   "
+        f"{len(targets)} objects in catalogue"
+    ).classes("mn-dim")
+
+    with ui.row().classes("items-end").style("gap: 12px; flex-wrap: wrap"):
+        magnitude = ui.number("max magnitude", value=10.0, min=0.0, max=20.0, step=0.5).classes(
+            "mn-body"
+        )
+        visible = ui.number("min visible (min)", value=60.0, min=0.0, max=600.0, step=10).classes(
+            "mn-body"
+        )
+        smallest = ui.number("min size (')", value=0.0, min=0.0, max=300.0, step=1).classes(
+            "mn-body"
+        )
+        largest = ui.number("max size (')", value=300.0, min=0.0, max=600.0, step=10).classes(
+            "mn-body"
+        )
+        search = ui.input("search").classes("mn-body")
+
+    # Defaults exclude individual stars: the catalogue has 547 of them and they would
+    # otherwise fill the top of a magnitude-sorted list with Sirius and Rigel.
+    types = (
+        ui.select(
+            sorted(COMMON_TYPES),
+            multiple=True,
+            value=sorted(DEFAULT_TARGET_TYPES),
+            label="types (none = all)",
+        )
+        .classes("mn-body")
+        .style("min-width: 320px")
+    )
+
+    summary = ui.label("").classes("mn-dim")
+    chosen = ui.label("").classes("mn-body")
+
+    table = (
+        ui.table(
+            columns=TARGET_COLUMNS,
+            rows=[],
+            row_key="key",
+            selection="single",
+            pagination=25,
+        )
+        .classes("mn-body")
+        .style("width: 100%")
+    )
+
+    # The expensive pass, once. Sliders only re-run the cheap filter below.
+    visibility = compute_visibility(
+        targets, site=site, start=window_start, end=window_end, min_altitude_deg=min_altitude
+    )
+
+    def current_filters() -> TargetFilters:
+        selected = types.value or []
+        return TargetFilters(
+            max_magnitude=magnitude.value if magnitude.value else None,
+            min_size_arcmin=smallest.value or None,
+            # The max-size box starts above HUGE_ARCMIN, i.e. "no upper limit".
+            max_size_arcmin=largest.value if largest.value and largest.value < 600 else None,
+            types=frozenset(selected) if selected else None,
+            search=search.value or "",
+            min_visible_minutes=float(visible.value or 0.0),
+            min_altitude_deg=min_altitude,
+        )
+
+    def refresh_rows() -> None:
+        rows = filter_rows(targets, visibility, current_filters())
+        shown = top(rows, TARGET_TABLE_LIMIT)
+        table.rows = [_table_row(index, row) for index, row in enumerate(shown)]
+        table.update()
+        summary.text = (
+            f"{len(shown)} shown of {len(rows)} matching "
+            f"(cap {TARGET_TABLE_LIMIT}; loosen a filter to see more)"
+        )
+
+    def on_select(event) -> None:
+        picked = getattr(event, "selection", None) or []
+        if not picked:
+            return
+        row = picked[0]
+        ctx.state.target_name = str(row.get("label") or "")
+        ctx.state.target_ra_deg = float(row["ra"])
+        ctx.state.target_dec_deg = float(row["dec"])
+        chosen.text = (
+            f"selected: {ctx.state.target_name}  "
+            f"({ctx.state.target_ra_deg:.3f}, {ctx.state.target_dec_deg:.3f})"
+        )
+
+    table.on("select", on_select)
+    for widget in (magnitude, visible, smallest, largest, search, types):
+        widget.on_value_change(lambda _event: refresh_rows())
+
+    refresh_rows()
 
 
 def render_parameters(ctx: Context) -> None:
