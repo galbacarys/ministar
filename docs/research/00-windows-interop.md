@@ -165,6 +165,22 @@ the nested quoting does not survive the WSL interop argv re-quoting. Two working
 This is a strong argument for the `.bat`-as-entry-point rule: it keeps quoting hell inside
 the one language that understands it.
 
+**WSL cannot test a Windows-side server.** ✅ Measured 2026-10-27, and it cost an hour.
+This box runs WSL2 in **mirrored networking**: WSL is assigned the *same* IPv4 addresses
+as Windows (`100.112.68.124` on the Tailscale interface, `192.168.68.68` on the LAN) but
+in a separate stack. So `curl http://100.112.68.124:8080/` from bash hits WSL's own
+interfaces, finds nothing listening, and reports a connection failure that says nothing
+about the Windows process or the firewall. Meanwhile the same URL requested from the
+*Windows* stack answers 200.
+
+Consequences for verification:
+
+- Test a Windows server from Windows: `cmd.exe /c "curl.exe -s -o NUL -w \"%{http_code}\" http://<ip>:<port>/"`.
+- A self-connect still bypasses Windows Firewall's inbound filtering (traffic to a local
+  address is treated as local), so it proves binding, not reachability. Only another
+  machine on the tailnet -- or the phone -- proves reachability.
+- The NAT gateway at `10.255.255.254` is not the route to Windows in this mode.
+
 **Environment.** Use `WSLENV` to forward variables across the boundary (`VAR/w` translates
 a path). Do not assume the Windows process shares the WSL environment — it does not.
 `PATH`, `HOME`, and locale all differ.
