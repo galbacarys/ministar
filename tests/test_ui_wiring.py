@@ -145,13 +145,33 @@ def test_the_window_hint_states_the_declination_it_assumed() -> None:
     optics = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=200)
     text = screens.window_hint_for(optics, 300.0)
 
-    assert "5 min" in text
     assert "dec 45" in text, "a global control must say which declination it used"
     assert "'" in text, "it quotes a size, which is what a person recognises"
+    assert "5 min" not in text, "the slider handle already reads in minutes"
 
 
 def test_without_a_profile_the_hint_admits_it() -> None:
     assert "no rig profile" in screens.window_hint_for(None, 300.0)
+
+
+def test_the_slider_is_in_minutes_and_stops_where_the_sky_does() -> None:
+    """A slider labelled "60" for one minute is a unit bug, not a preference."""
+    from ministar.optics import Optics
+
+    wide = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=24)
+    long = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=400)
+
+    assert screens.window_slider_max_minutes(None) == 60, "no rig: the full hour stands"
+    assert screens.window_slider_max_minutes(wide) == 60, "a 24 mm frame spans 51 min"
+    # At 400 mm a point source crosses the frame in 12.8 min, so 60 is a lie.
+    assert screens.window_slider_max_minutes(long) == 12
+
+
+def test_the_parameters_limit_is_in_minutes_and_never_zero() -> None:
+    assert screens.interval_slider_max_minutes(None) == 60
+    assert screens.interval_slider_max_minutes(276 * 60) == 60, "capped at an hour"
+    assert screens.interval_slider_max_minutes(71.0) == 1, "M31 at 400 mm: 1 min, not 0"
+    assert screens.interval_slider_max_minutes(16531.0) == 60
 
 
 def test_a_selected_target_carries_its_extent_for_the_parameters_screen() -> None:

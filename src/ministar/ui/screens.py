@@ -180,11 +180,37 @@ def window_hint_for(optics, seconds: float) -> str:
     (dec 45, a representative mid-latitude target) and the table carries the real
     per-row number regardless. Without a rig there is no size to quote, and saying so
     is better than quoting a default.
+
+    The window itself is not repeated: the slider handle already reads in minutes.
     """
     if optics is None:
-        return f"{seconds / 60:.0f} min between reframes (size unknown: no rig profile)"
+        return "size unknown: no rig profile"
     size = optics.hint_size_arcmin(min_window_s=seconds)
-    return f"{seconds / 60:.0f} min between reframes = up to {size:.0f}' at dec 45"
+    return f"up to {size:.0f}' at dec 45"
+
+
+def window_slider_max_minutes(optics) -> int:
+    """How far the minimum-window slider can go, in whole minutes.
+
+    Even a point source has a ceiling -- the frame takes that long to cross -- so the
+    slider stops there instead of offering settings the sky cannot honour. Without a
+    rig there is nothing to clamp to and the full hour stands.
+    """
+    if optics is None:
+        return 60
+    reachable = optics.window_seconds(fill=0.0, dec_deg=0.0) / 60.0
+    return max(1, min(60, int(reachable)))
+
+
+def interval_slider_max_minutes(ceiling_seconds: float | None) -> int:
+    """The target's own limit, in whole minutes, for the PARAMETERS slider.
+
+    A target that allows 71 s yields 1 minute, not 0: the slider's floor is 1 minute, and
+    a floor of zero would silently mean "no interval chosen" in session state.
+    """
+    if ceiling_seconds is None:
+        return 60
+    return max(1, min(60, int(ceiling_seconds // 60)))
 
 
 def _table_row(index: int, row: Row) -> dict[str, object]:
@@ -514,11 +540,11 @@ def render_target(ctx: Context) -> None:
     # The primary control, in the unit an evening is planned in. The default is the
     # floor rather than a judgement: raising it is the user's call, and the summary line
     # reports what was excluded instead of hiding it.
-    reachable = 3600.0 if optics is None else optics.window_seconds(fill=0.0, dec_deg=0.0)
-    slider_max = 60 * max(1, min(60, int(reachable // 60)))
+    # Minutes, not seconds: the handle's label must read "1" for one minute, and 60 for
+    # an hour. The conversion to seconds happens once, where the filter is built.
     with ui.row().classes("items-center").style("gap: 12px; flex-wrap: wrap"):
         window_slider = (
-            ui.slider(min=60, max=slider_max, step=60, value=60)
+            ui.slider(min=1, max=window_slider_max_minutes(optics), step=1, value=1)
             .props("label-always")
             .classes("mn-slider")
             .style("width: 320px")
@@ -578,7 +604,8 @@ def render_target(ctx: Context) -> None:
             search=search.value or "",
             min_visible_minutes=float(visible.value or 0.0),
             min_altitude_deg=min_altitude,
-            min_window_seconds=float(window_slider.value or 60.0),
+            # The slider is in minutes; the filter is in seconds.
+            min_window_seconds=float(window_slider.value or 1.0) * 60.0,
         )
 
     def refresh_rows() -> None:
@@ -590,7 +617,7 @@ def render_target(ctx: Context) -> None:
             f"{len(shown)} shown of {len(rows)} matching "
             f"(cap {TARGET_TABLE_LIMIT}; loosen a filter to see more)"
         )
-        window_hint.text = window_hint_for(optics, float(window_slider.value or 60.0))
+        window_hint.text = window_hint_for(optics, float(window_slider.value or 1.0) * 60.0)
 
     def on_row_click(event) -> None:
         # Quasar emits rowClick with (evt, row, index). Pick the dict by shape rather
@@ -657,9 +684,9 @@ def render_parameters(ctx: Context) -> None:
             dec_deg=ctx.state.target_dec_deg,
         )
 
-    max_s = 3600 if ceiling is None else max(60, min(3600, int(ceiling // 60) * 60))
-    current = float(ctx.state.reframe_interval_s or 300.0)
-    value = int(min(max(60.0, current), max_s))
+    max_min = interval_slider_max_minutes(ceiling)
+    current = float(ctx.state.reframe_interval_s or 300.0) / 60.0
+    value = int(min(max(1.0, round(current)), max_min))
 
     if ceiling is None:
         ui.label("select a target to see how long it allows between reframes").classes("mn-body")
@@ -671,22 +698,22 @@ def render_parameters(ctx: Context) -> None:
 
     hint = ui.label("").classes("mn-dim")
 
-    def describe(seconds: float) -> str:
-        return f"taking a frame every {seconds:.0f} s = {seconds / 60:.0f} min"
+    def describe(minutes: float) -> str:
+        return f"taking a frame every {minutes:.0f} min ({minutes * 60:.0f} s)"
 
     def changed(event) -> None:
-        seconds = float(event.value)
-        ctx.state.reframe_interval_s = seconds
-        hint.text = describe(seconds)
+        minutes = float(event.value)
+        ctx.state.reframe_interval_s = minutes * 60.0
+        hint.text = describe(minutes)
 
-    ui.slider(min=60, max=max_s, step=60, value=value, on_change=changed).props(
+    ui.slider(min=1, max=max_min, step=1, value=value, on_change=changed).props(
         "label-always"
     ).classes("mn-slider").style("width: 340px")
-    ui.label(f"slider limit {max_s / 60:.0f} min, set by the target").classes("mn-dim")
+    ui.label(f"slider limit {max_min} min, set by the target").classes("mn-dim")
     hint.text = describe(float(value))
     # Record the default too, so leaving the screen does not leave the session claiming
     # no interval was chosen.
-    ctx.state.reframe_interval_s = float(value)
+    ctx.state.reframe_interval_s = float(value) * 60.0
 
     _not_implemented("Usable-megapixel preview", "10-target-catalog-and-reframe-envelope.md")
 
