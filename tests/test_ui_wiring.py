@@ -180,3 +180,9 @@ def test_a_selected_target_carries_its_extent_for_the_parameters_screen() -> Non
 
     fields = {field.name for field in dataclasses.fields(SessionState)}
     assert {"target_major_arcmin", "target_minor_arcmin"} <= fields
+
+
+def test_the_window_slider_asks_its_question_in_words() -> None:
+    """ "window (s)" is a column heading; the slider needs the question it answers."""
+    assert screens.WINDOW_QUESTION == "How frequently are you willing to reframe?"
+    assert "?" in screens.WINDOW_QUESTION, "a slider without its question is a mystery"

@@ -147,6 +147,10 @@ DIM_VERDICTS = frozenset({"bigger than your frame", "short reframe window"})
 #: Sentinel for "no limit": JSON cannot carry the ``inf`` that a pole target earns.
 _NO_LIMIT_WINDOW = 999999.0
 
+#: Asked of the user, not of the sky: the slider has no meaning without the question it
+#: answers, and "window (s)" in the table is not the same thing as a willingness.
+WINDOW_QUESTION = "How frequently are you willing to reframe?"
+
 #: Heading help keyed by column name, so a test can check every entry names a real
 #: column and that the two misreadable ones are covered.
 COLUMN_HELP = {
@@ -543,6 +547,7 @@ def render_target(ctx: Context) -> None:
     # Minutes, not seconds: the handle's label must read "1" for one minute, and 60 for
     # an hour. The conversion to seconds happens once, where the filter is built.
     with ui.row().classes("items-center").style("gap: 12px; flex-wrap: wrap"):
+        ui.label(WINDOW_QUESTION).classes("mn-body")
         window_slider = (
             ui.slider(min=1, max=window_slider_max_minutes(optics), step=1, value=1)
             .props("label-always")
