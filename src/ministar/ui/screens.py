@@ -25,6 +25,7 @@ from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, ca
 from ministar.config import Settings
 from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
+from ministar.pointing import SolveReport
 from ministar.reframe.roll import parallactic_angle, roll_advice
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
@@ -893,47 +894,80 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
 
 
 def render_point(ctx: Context) -> None:
-    """Camera roll: the sky drifts one way, the frame is 3:2, so turn the camera to match.
+    """POINT, in two stages.
 
-    An untracked rig drags stars along the celestial parallel. Aligning that with the long
-    side of the frame is worth up to 1.5x the time between reframes (brief 10 §2.1c), and it
-    is a five-second action -- which makes it the cheapest win in the whole workflow, and
-    the reason this is a page of its own rather than a line of text.
+    **1. Roll.** An untracked rig drags the sky along the celestial parallel, and whether that
+    runs along the frame's long side decides how much of the frame survives a run -- worth up
+    to 1.5x the time between reframes for a five-second action (brief 10 §2.1c). The eye does
+    this, guided by a CW/CCW indicator, because it is a physical knob.
+
+    **2. Solve.** A captured frame is converted to FITS and solved, which anchors the WCS that
+    everything downstream needs: the envelope, the reframe arrows, and the roll readout itself
+    on a real camera (which cannot report its clamp angle). A solve that describes a *crop* is
+    flagged rather than trusted (brief 07 §1).
     """
-    ui.label("Camera roll").classes("mn-heading")
+    ui.label("Pointing").classes("mn-heading")
     station = ctx.station
     preview = ui.image("").classes("mn-preview")
 
-    advice_line = ui.label("").classes("mn-heading")
-    detail = ui.label("").classes("mn-body")
-    missing = ui.label("").classes("mn-warn")
+    roll_stage = ui.column().classes("w-full items-center")
+    solve_stage = ui.column().classes("w-full items-center")
+    solve_stage.set_visibility(False)
 
-    with ui.row().classes("items-center justify-center").style("gap: 24px"):
-        ccw_label = ui.label("<< CCW").classes("mn-metrics")
-        cw_label = ui.label("CW >>").classes("mn-metrics")
+    # -- stage 1: roll ------------------------------------------------------
+    with roll_stage:
+        ui.label("1. camera roll").classes("mn-heading")
+        advice_line = ui.label("").classes("mn-heading")
+        detail = ui.label("").classes("mn-body")
+        missing = ui.label("").classes("mn-warn")
+        with ui.row().classes("items-center justify-center").style("gap: 24px"):
+            ccw_label = ui.label("<< CCW").classes("mn-metrics")
+            cw_label = ui.label("CW >>").classes("mn-metrics")
 
-    roll_slider = None
-    camera = getattr(station, "camera", None) if station is not None else None
-    if getattr(camera, "set_roll", None) is not None:
-        # Fake camera only: a real user turns the clamp, so there is no control to offer.
-        ui.label("fake camera roll").classes("mn-dim")
-        roll_slider = (
-            ui.slider(min=-180, max=180, step=1, value=int(camera.roll_deg))
-            .props("label-always")
-            .classes("mn-slider")
-            .style("width: 340px")
-        )
+        camera = getattr(station, "camera", None) if station is not None else None
+        if getattr(camera, "set_roll", None) is not None:
+            # Fake camera only: a real user turns the clamp, so there is no control to offer.
+            ui.label("fake camera roll").classes("mn-dim")
+            roll_slider = (
+                ui.slider(min=-180, max=180, step=1, value=int(camera.roll_deg))
+                .props("label-always")
+                .classes("mn-slider")
+                .style("width: 340px")
+            )
+            roll_slider.on_value_change(lambda event: camera.set_roll(float(event.value)))
 
-        def turned(event) -> None:
-            camera.set_roll(float(event.value))
+    # -- stage 2: solve -----------------------------------------------------
+    with solve_stage:
+        ui.label("2. solve").classes("mn-heading")
+        solve_facts = ui.label("").classes("mn-metrics")
+        solve_warnings = ui.label("").classes("mn-warn")
+        solve_note = ui.label("").classes("mn-dim")
 
-        roll_slider.on_value_change(turned)
+        def run_solve() -> None:
+            report, note = _solve(ctx)
+            solve_note.text = note
+            if report is not None:
+                solve_facts.text = "\n".join(report.facts)
+                solve_warnings.text = "\n".join(report.warnings)
+
+        ui.button("capture and solve", on_click=run_solve).classes("mn-action")
+
+    showing = {"roll": True}
+
+    def goto_solve() -> None:
+        showing["roll"] = False
+        roll_stage.set_visibility(False)
+        solve_stage.set_visibility(True)
+
+    ui.button("roll is aligned, solve", on_click=goto_solve).classes("mn-action")
 
     def tick() -> None:
         snapshot = station.snapshot() if station is not None else None
         if snapshot is not None and snapshot.data_uri:
             preview.source = snapshot.data_uri
             preview.update()
+        if not showing["roll"]:
+            return
 
         state = roll_page_state(ctx, station)
         if state is None:
@@ -957,7 +991,72 @@ def render_point(ctx: Context) -> None:
         ccw_label.classes(replace="mn-heading" if advice.direction == "ccw" else "mn-dim")
         cw_label.classes(replace="mn-heading" if advice.direction == "cw" else "mn-dim")
 
+        # A completed solve fills the facts in; the tick does not re-run the solver.
+        if ctx.state.solved and not solve_facts.text:
+            solve_facts.text = (
+                f"RA {ctx.state.pointing_ra_deg / 15.0:.4f} h   "
+                f"Dec {ctx.state.pointing_dec_deg:+.4f} deg"
+            )
+
     ui.timer(0.25, tick)
+
+
+def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
+    """Capture, convert to FITS, solve, and record the result in the session.
+
+    ASTAP cannot read RAW (01 §9), so the capture is converted on the way through -- the same
+    path the run loop will use for every frame.
+    """
+    from ministar.pointing import describe
+    from ministar.raw import convert_to_fits
+    from ministar.solver import SolveHints, solve
+
+    camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
+    if camera is None or getattr(camera, "capture_to", None) is None:
+        return None, "this camera cannot capture in this session (the fake one cannot)"
+    if ctx.settings.astap is None:
+        return None, "astap_cli.exe not found -- run preflight"
+
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    raw = ctx.settings.paths.frames / f"point_{stamp}.cr2"
+    try:
+        camera.capture_to(raw)
+        converted = (
+            convert_to_fits(raw, dcraw=ctx.settings.dcraw)
+            if ctx.settings.dcraw is not None
+            else raw
+        )
+        profile = rig_for(ctx)
+        hints = None
+        if profile is not None:
+            optics = profile.optics()
+            hints = SolveHints(fov_height_deg=optics.height_arcmin / 60.0)
+        result = solve(
+            converted,
+            ctx.settings.astap,
+            out_base=ctx.settings.paths.scratch / f"point_{stamp}",
+            hints=hints,
+        )
+    except Exception as exc:  # a failed capture must not take the page down
+        return None, f"solve failed: {type(exc).__name__}: {exc}"
+
+    if not result.solved or result.solution is None:
+        reason = result.error or result.error_meaning or "unknown"
+        return None, f"not solved: {reason}"
+
+    solution = result.solution
+    ctx.state.solved = True
+    ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
+    expected = None
+    if profile is not None:
+        expected = profile.optics().width_arcmin / 60.0
+    report = describe(
+        solution,
+        width_px=int(getattr(camera, "last_width", 0) or 0) or (profile.width_px if profile else 0),
+        expected_width_deg=expected,
+    )
+    ctx.refresh()
+    return report, f"solved from {converted.name}"
 
 
 def render_run(ctx: Context) -> None:
