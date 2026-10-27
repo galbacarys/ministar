@@ -15,5 +15,5 @@ if not exist "%PY%" (
 )
 
 set "PYTHONPATH=%ROOT%\src"
-"%PY%" -m ministar.ui.focus %*
+"%PY%" -m ministar.ui.app %*
 exit /b %errorlevel%
