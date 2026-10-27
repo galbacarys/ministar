@@ -109,3 +109,89 @@ def read_fits(path: Path | str) -> tuple[np.ndarray, FitsHeader]:
     if planes > 1:
         return np.moveaxis(array, 0, -1), header
     return array[0], header
+
+
+def _card(keyword: str, value: object, comment: str = "") -> str:
+    """One 80-column header card. Values are written the way FITS expects them."""
+    if isinstance(value, bool):
+        text = "T" if value else "F"
+    elif isinstance(value, str):
+        text = f"'{value}'"
+    else:
+        text = str(value)
+    body = f"{keyword:<8}= {text:>20}"
+    card = f"{body} / {comment}" if comment else body
+    return card[:80].ljust(80)
+
+
+def write_fits(
+    path: Path | str,
+    array: np.ndarray,
+    cards: dict[str, object] | None = None,
+    comments: dict[str, str] | None = None,
+) -> Path:
+    """Write a primary HDU: 2-D mono or 3-D (height, width, planes) RGB.
+
+    ``uint16`` is stored the way astronomy expects -- ``BITPIX = 16`` with
+    ``BZERO = 32768`` -- so a sensor frame keeps its full 0-65535 range without
+    becoming float or losing the top half. ``int16``/``float32``/``float64``/``uint8``
+    are written directly.
+
+    Rows are written in the array's own order: row 0 of the numpy array is the first
+    data row in the file. That keeps a write/read round trip exact, which matters more
+    here than matching another tool's convention -- and ASTAP solves either way round
+    (its WCS records the orientation it found).
+    """
+    if array.ndim not in (2, 3):
+        raise FitsError(f"only 2-D or 3-D arrays can be written, got {array.ndim}-D")
+
+    kind = array.dtype
+    if kind == np.uint16:
+        bitpix, bzero = 16, 32768
+        data = (array.astype(np.int32) - bzero).astype(">i2")
+    elif kind == np.int16:
+        bitpix, bzero = 16, 0
+        data = array.astype(">i2")
+    elif kind == np.uint8:
+        bitpix, bzero = 8, 0
+        data = array.astype(">u1")
+    elif kind == np.float32:
+        bitpix, bzero = -32, 0
+        data = array.astype(">f4")
+    elif kind == np.float64:
+        bitpix, bzero = -64, 0
+        data = array.astype(">f8")
+    else:
+        raise FitsError(f"unsupported dtype {kind}; use uint8/uint16/int16/float32/float64")
+
+    height, width = data.shape[0], data.shape[1]
+    planes = data.shape[2] if data.ndim == 3 else 1
+
+    lines = [_card("SIMPLE", True, "conforms to FITS standard"), _card("BITPIX", bitpix, "")]
+    lines.append(_card("NAXIS", 3 if planes > 1 else 2, ""))
+    lines.append(_card("NAXIS1", width, "columns"))
+    lines.append(_card("NAXIS2", height, "rows"))
+    if planes > 1:
+        lines.append(_card("NAXIS3", planes, "planes"))
+    if bzero:
+        lines.append(_card("BZERO", bzero, "unsigned 16-bit offset"))
+    lines.append(_card("BSCALE", 1, ""))
+
+    for key, value in (cards or {}).items():
+        if len(key) > 8:
+            raise FitsError(f"FITS keyword too long: {key!r}")
+        lines.append(_card(key, value, (comments or {}).get(key, "")))
+    lines.append(_card("EXTEND", True, ""))
+
+    # FITS cards are fixed 80-column records with no line separators; a newline in a
+    # header is illegal and makes the file unreadable by everything, including us.
+    header = "".join(line.ljust(80) for line in lines) + "END".ljust(80)
+    raw_header = header.encode("ascii", "replace")
+    raw_header += b" " * (-len(raw_header) % _BLOCK)
+    body = data.tobytes()
+    body += b"\0" * (-len(body) % _BLOCK)
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(raw_header + body)
+    return target

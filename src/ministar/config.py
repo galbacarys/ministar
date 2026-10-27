@@ -125,6 +125,33 @@ def find_borrowed_edsdk() -> list[Path]:
     return [path for path in BORROWED_DLLS if Path(path).is_file()]
 
 
+DCRAW_EXE = "dcraw.exe"
+
+
+def find_dcraw(astap: Path | None, paths: Paths) -> Path | None:
+    """Locate ``dcraw.exe``, which ships inside the ASTAP installation (01 §9).
+
+    Override with ``MINISTAR_DCRAW`` (file or directory). This is the RAW decoder, so
+    "not found" is a hard error for conversion and a warning for everything else --
+    ``astap_cli.exe`` cannot read RAW, so nothing else can fill the gap.
+    """
+    env = os.environ.get("MINISTAR_DCRAW")
+    if env:
+        candidate = Path(env)
+        if candidate.is_dir():
+            candidate = candidate / DCRAW_EXE
+        return candidate if candidate.is_file() else None
+
+    directories = [paths.tools / "astap"]
+    if astap is not None:
+        directories.insert(0, astap.parent)
+    for directory in directories:
+        candidate = directory / DCRAW_EXE
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class Settings:
     """Everything resolved at startup."""
@@ -132,12 +159,15 @@ class Settings:
     paths: Paths
     astap: Path | None
     edsdk: Path | None
+    dcraw: Path | None = None
 
     @classmethod
     def load(cls, home: Path | None = None) -> Settings:
         paths = Paths.under(home or default_home())
+        astap = find_astap(paths)
         return cls(
             paths=paths,
-            astap=find_astap(paths),
+            astap=astap,
             edsdk=find_edsdk(paths),
+            dcraw=find_dcraw(astap, paths),
         )

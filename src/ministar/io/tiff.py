@@ -24,6 +24,8 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 #: TIFF field types, mapped to (struct code, size in bytes). RATIONAL is a pair of
 #: LONGs, so it is handled separately.
 _SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8}
@@ -56,6 +58,9 @@ TAG_PIXEL_X_DIMENSION = 0xA002
 TAG_PIXEL_Y_DIMENSION = 0xA003
 TAG_LENS_MODEL = 0xA434
 TAG_FOCAL_LENGTH_35MM = 0xA405
+TAG_EXPOSURE_TIME = 0x829A
+TAG_ISO = 0x8827
+TAG_DATE_TIME_ORIGINAL = 0x9003
 
 #: ``FocalPlaneResolutionUnit`` values (EXIF 3.0, table 10).
 RESOLUTION_UNIT_NONE = 1
@@ -105,6 +110,19 @@ class FrameExif:
     pixel_y_dimension: int | None = None
     #: EXIF orientation, 1-8. 5-8 mean the frame is stored rotated.
     orientation: int | None = None
+    #: Exposure time in seconds, as recorded (not as requested).
+    exposure_s: float | None = None
+    iso: int | None = None
+    #: ``YYYY:MM:DD HH:MM:SS`` in the camera's local time.
+    date_time_original: str = ""
+
+    @property
+    def date_obs(self) -> str:
+        """The capture time as FITS ``DATE-OBS`` wants it (ISO 8601), or ""."""
+        text = self.date_time_original
+        if len(text) < 19:
+            return ""
+        return text[:10].replace(":", "-") + "T" + text[11:19]
 
     def _pitch_um(self, resolution: float | None) -> float | None:
         """Pixels per unit -> micrometres per pixel."""
@@ -200,6 +218,9 @@ class FrameExif:
             "pixel_x_dimension": self.pixel_x_dimension,
             "pixel_y_dimension": self.pixel_y_dimension,
             "orientation": self.orientation,
+            "exposure_s": self.exposure_s,
+            "iso": self.iso,
+            "date_time_original": self.date_time_original,
             "pixel_size_um": self.pixel_size_um,
             "sensor_width_mm": None if size is None else round(size[0], 3),
             "sensor_height_mm": None if size is None else round(size[1], 3),
@@ -333,6 +354,7 @@ def read_frame_exif(path: Path | str) -> FrameExif:
 
     orientation = _number(data, tag(TAG_ORIENTATION), endian)
     focal_35 = _number(data, tag(TAG_FOCAL_LENGTH_35MM), endian)
+    iso = _number(data, tag(TAG_ISO), endian)
     # ExifIFD first, then the TIFF/EP twins (Canon writes both).
     x_resolution = pick(
         ("exif", TAG_FOCAL_PLANE_X_RESOLUTION),
@@ -368,6 +390,9 @@ def read_frame_exif(path: Path | str) -> FrameExif:
             None if (py := _number(data, tag(TAG_PIXEL_Y_DIMENSION), endian)) is None else int(py)
         ),
         orientation=None if orientation is None else int(orientation),
+        exposure_s=_number(data, tag(TAG_EXPOSURE_TIME), endian),
+        iso=None if iso is None else int(iso),
+        date_time_original=_text(data, tag(TAG_DATE_TIME_ORIGINAL), endian),
     )
 
 
@@ -378,3 +403,91 @@ __all__ = [
     "TiffError",
     "read_frame_exif",
 ]
+
+
+#: Tags describing the image data itself, as opposed to the EXIF block.
+TAG_IMAGE_WIDTH = 0x0100
+TAG_IMAGE_LENGTH = 0x0101
+TAG_BITS_PER_SAMPLE = 0x0102
+TAG_COMPRESSION = 0x0103
+TAG_PHOTOMETRIC = 0x0106
+TAG_STRIP_OFFSETS = 0x0111
+TAG_SAMPLES_PER_PIXEL = 0x0115
+TAG_ROWS_PER_STRIP = 0x0116
+TAG_STRIP_BYTE_COUNTS = 0x0117
+TAG_PLANAR_CONFIG = 0x011C
+TAG_SAMPLE_FORMAT = 0x0153
+
+COMPRESSION_NONE = 1
+
+
+def _numbers(data, entry, endian: str) -> list[int]:
+    """Every value of a SHORT/LONG field, inline or at an offset."""
+    if entry is None:
+        return []
+    kind, count, _ = entry
+    raw = bytes(_raw_value(data, entry, endian))
+    if kind == 3:
+        return list(struct.unpack_from(endian + "H" * count, raw))
+    if kind == 4:
+        return list(struct.unpack_from(endian + "I" * count, raw))
+    return []
+
+
+def read_tiff_array(path: Path | str) -> np.ndarray:
+    """Read the pixels of an **uncompressed** TIFF.
+
+    Narrow on purpose: this exists to read what ``dcraw -T`` writes on its way to
+    FITS, which is uncompressed strips of 16-bit samples. Compression is refused
+    rather than guessed at, and the caller is told which tag said so.
+
+    Returns ``(height, width)`` for one sample per pixel, ``(height, width, samples)``
+    otherwise, in native byte order.
+    """
+    data = Path(path).read_bytes()
+    payload, endian = _exif_payload(data)
+    (ifd_offset,) = struct.unpack_from(endian + "I", payload, 4)
+    tags = _read_ifd(payload, ifd_offset, endian)
+
+    width = (_numbers(payload, tags.get(TAG_IMAGE_WIDTH), endian) or [0])[0]
+    height = (_numbers(payload, tags.get(TAG_IMAGE_LENGTH), endian) or [0])[0]
+    if width <= 0 or height <= 0:
+        raise TiffError("TIFF has no image dimensions")
+
+    compression = (_numbers(payload, tags.get(TAG_COMPRESSION), endian) or [COMPRESSION_NONE])[0]
+    if compression != COMPRESSION_NONE:
+        raise TiffError(f"compressed TIFF (type {compression}) is not supported")
+
+    bits = _numbers(payload, tags.get(TAG_BITS_PER_SAMPLE), endian) or [8]
+    samples = (_numbers(payload, tags.get(TAG_SAMPLES_PER_PIXEL), endian) or [1])[0]
+    planar = (_numbers(payload, tags.get(TAG_PLANAR_CONFIG), endian) or [1])[0]
+    if planar != 1:
+        raise TiffError("only chunky (interleaved) TIFF samples are supported")
+    if len(set(bits)) != 1 or bits[0] not in (8, 16):
+        raise TiffError(f"unsupported BitsPerSample {bits}")
+    if (_numbers(payload, tags.get(TAG_SAMPLE_FORMAT), endian) or [1])[0] != 1:
+        raise TiffError("only unsigned integer samples are supported")
+
+    dtype = np.dtype(f"{'u' if endian == '<' else '>'}1" if bits[0] == 8 else f"{endian}u2")
+    offsets = _numbers(payload, tags.get(TAG_STRIP_OFFSETS), endian)
+    counts = _numbers(payload, tags.get(TAG_STRIP_BYTE_COUNTS), endian)
+    if not offsets or len(offsets) != len(counts):
+        raise TiffError("TIFF is missing strip offsets/byte counts")
+
+    rows_per_strip = (_numbers(payload, tags.get(TAG_ROWS_PER_STRIP), endian) or [height])[0]
+    rows_per_strip = min(rows_per_strip, height)
+
+    chunks: list[np.ndarray] = []
+    for index, (offset, count) in enumerate(zip(offsets, counts, strict=True)):
+        rows = min(rows_per_strip, height - index * rows_per_strip)
+        if rows <= 0:
+            break
+        strip = np.frombuffer(payload, dtype=dtype, count=count // dtype.itemsize, offset=offset)
+        chunks.append(strip[: rows * width * samples].reshape(rows, width, samples))
+
+    if not chunks:
+        raise TiffError("TIFF has no readable strips")
+    array = np.concatenate(chunks, axis=0).astype(dtype.newbyteorder("="))
+    if samples == 1:
+        return array[:, :, 0]
+    return array

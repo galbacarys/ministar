@@ -68,7 +68,13 @@ def _cmd_solve(args: argparse.Namespace) -> int:
 
     if not result.solved or result.solution is None:
         print(f"not solved: {result.error or result.error_meaning or 'unknown'}")
-        if result.starved:
+        # ASTAP says which of these it is; blaming focus for a database gap wastes an
+        # evening. Measured case: a 24 mm frame is 34 deg across, the .1476 tiles
+        # cover 5.14 deg, and the answer is the W08 wide-field database.
+        if any("wide field" in warning.lower() for warning in result.warnings):
+            print("  (this field is wider than the installed star database covers --")
+            print("   install the W08/G05 wide-field tiles for ASTAP)")
+        elif result.starved:
             print("  (no stars detected -- check focus, dew, cloud, exposure length)")
         return 1
 
@@ -187,6 +193,34 @@ def _probe_capture(
         camera.disconnect()
 
 
+def _cmd_to_fits(args: argparse.Namespace) -> int:
+    """Convert one RAW to FITS, so the solver and the stacker never see a CR2.
+
+    dcraw does the decoding (it ships with ASTAP); see ministar.raw for why the flags
+    keep the frame undebayered and linear.
+    """
+    from ministar.io.fits import read_fits
+    from ministar.raw import convert_to_fits
+
+    settings = Settings.load(Path(args.home) if args.home else None)
+    if settings.dcraw is None:
+        print("error: dcraw.exe not found -- it ships inside the ASTAP installation")
+        print("       (set MINISTAR_DCRAW to its path if ASTAP lives somewhere unusual)")
+        return 2
+
+    target = convert_to_fits(args.raw, args.out, dcraw=settings.dcraw)
+    array, header = read_fits(target)
+
+    print(f"{target}")
+    print(f"  {array.shape[1]}x{array.shape[0]}  BITPIX {header.get('BITPIX')}  {array.dtype}")
+    for key in ("INSTRUME", "DATE-OBS", "EXPTIME", "ISO", "FOCALLEN", "XPIXSZ", "BAYERPAT"):
+        value = header.get(key)
+        if value:
+            print(f"  {key:<8} {value}")
+    print(f"  peak {float(array.max()):.0f}  mean {float(array.mean()):.1f}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ministar", description=__doc__)
     parser.add_argument("--home", help="override MINISTAR_HOME")
@@ -219,6 +253,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="only check which EDSDK entry points exist (no camera needed)",
     )
     p_probe.set_defaults(func=_cmd_probe)
+
+    p_fits = sub.add_parser(
+        "to-fits", help="convert a camera RAW to FITS (undebayered, with EXIF headers)"
+    )
+    p_fits.add_argument("raw", help="the .CR2/.NEF/.ARW file")
+    p_fits.add_argument("--out", help="output .fit path (default: beside the RAW)")
+    p_fits.set_defaults(func=_cmd_to_fits)
 
     return parser
 

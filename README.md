@@ -167,6 +167,10 @@ uv venv && uv pip install -e '.[dev]'
 One-time on the Windows side: `C:\ministar\build\tools\setup.bat`, then
 `tools\ministar.bat preflight`.
 
+The console binds **all interfaces** (`0.0.0.0`) so it can be driven from a phone on
+the same private network -- Tailscale in practice. There is no authentication, so the
+network is the security boundary: `--host 127.0.0.1` restores loopback-only.
+
 Verified working end to end: hinting a solve from a previous solution takes
 **~860 ms** including interpreter startup, versus 4-8 s for `-fov 0`.
 

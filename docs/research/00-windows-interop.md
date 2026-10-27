@@ -215,6 +215,13 @@ consequences:
 (verified with a 5-second `ping` sleeper: child count returned to 0). WSL tears down the
 process group. Good news for a supervisor that restarts crashed workers.
 
+⚠️ **But a *server* launched that way survives.** Measured 2026-10-27: `timeout 75 cmd.exe
+/c tools\ui.bat` left the NiceGUI process listening on `0.0.0.0:8080` after the bash side
+exited, and the next launch failed with `[Errno 10048] only one usage of each socket
+address`. The child is not in the group being torn down once it daemonises. Stop servers
+by PID (`taskkill /F /PID <pid>`, findable with `netstat -ano | findstr :8080`), not by
+killing the launcher.
+
 **Per-invocation cost.** ✅ **~43 ms** round trip for `cmd.exe /c echo`, including the
 Windows process spawn. That is a floor on any design that shells out once per frame:
 

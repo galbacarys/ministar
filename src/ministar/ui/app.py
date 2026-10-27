@@ -110,7 +110,11 @@ def wizard_page() -> None:
 def run(
     *,
     fake: bool = False,
-    host: str = "127.0.0.1",
+    #: All interfaces by default: the console is used from a phone on the same private
+    #: network (Tailscale), and a loopback-only server is unreachable from there. There
+    #: is no authentication -- the security boundary is the network, so keep this off
+    #: untrusted LANs.
+    host: str = "0.0.0.0",
     port: int = 8080,
     native: bool = False,
     show: bool = True,
@@ -136,6 +140,12 @@ def run(
     station.start()
     _APP = App(session=SessionState(), settings=settings, station=station)
 
+    if host in {"0.0.0.0", "::"}:
+        # Say it out loud: binding all interfaces is a deliberate exposure, not a default
+        # that quietly happens. There is no login, so the network is the boundary.
+        print(f"serving on all interfaces, port {port} -- no authentication; reach it at")
+        print(f"  http://<this-machine-ip>:{port}/   (Tailscale name or LAN address)")
+
     try:
         ui.run(
             host=host,
@@ -153,7 +163,11 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ministar session wizard")
     parser.add_argument("--fake", action="store_true", help="synthetic stars, no camera")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",
+        help="interface to bind (default: all of them, for phone access over Tailscale)",
+    )
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--native", action="store_true", help="pywebview window")
     parser.add_argument("--no-show", action="store_true", help="do not open a browser")
