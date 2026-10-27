@@ -15,6 +15,10 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2.0",
+    # Runtime, not optional: decoding live-view JPEGs for focus measurement, and
+    # the registration/warp path in the live stack (brief 15). Headless avoids
+    # pulling GUI libraries into a camera-only install.
+    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]
@@ -22,7 +26,6 @@ dependencies = [
 # desktop window and the browser/phone console, which also removes the only
 # copyleft dependency from the runtime.
 ui = ["nicegui>=2.0"]
-imaging = ["opencv-python-headless>=4.10"]
 # Bench harness in tools/ decodes live-view JPEG; needs Pillow, which the
 # package itself does not. tools/setup.bat installs [dev], so install this too
 # to run tools/focus_ui.py from a fresh checkout.

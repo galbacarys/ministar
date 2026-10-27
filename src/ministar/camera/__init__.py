@@ -17,6 +17,7 @@ from ministar.camera.edsdk import (
     EdsdkCamera,
     EdsdkUnavailable,
     MissingImagingDependency,
+    decode_jpeg,
 )
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "EdsdkUnavailable",
     "Frame",
     "MissingImagingDependency",
+    "decode_jpeg",
     "label_for_seconds",
     "snap_shutter",
 ]

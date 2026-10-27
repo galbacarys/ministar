@@ -17,6 +17,7 @@ from ministar.camera.edsdk import (
     CameraNotConnected,
     EdsdkCamera,
     EdsdkUnavailable,
+    decode_jpeg,
     lens_param,
 )
 from ministar.focus.driver import Direction
@@ -294,3 +295,35 @@ def test_operations_after_disconnect_raise_not_connected() -> None:
     cam.disconnect()
     with pytest.raises(CameraNotConnected):
         cam.grab_live_jpeg()
+
+
+# -- protocol conformance ---------------------------------------------------
+def test_edsdk_camera_satisfies_both_protocols() -> None:
+    """The promoted backend must actually be usable where the protocols are expected.
+
+    ``runtime_checkable`` protocols only verify the surface exists, which is
+    exactly right here: the point is that every method the routine and the app
+    call is present, not that hardware has been exercised.
+    """
+    from ministar.camera.base import Camera
+    from ministar.focus.driver import FocusDriver
+
+    cam = camera_for(FakeFfi())
+    assert isinstance(cam, FocusDriver)
+    assert isinstance(cam, Camera)
+
+
+# -- decoding ---------------------------------------------------------------
+def test_decode_jpeg_uses_an_installed_backend() -> None:
+    """Exercises the real decoder rather than an injected one.
+
+    Skipped where no imaging library is installed, which is why the rest of this
+    module injects ``decode`` instead of depending on one.
+    """
+    cv2 = pytest.importorskip("cv2")
+    pixels = (np.random.default_rng(0).random((32, 48, 3)) * 255).astype(np.uint8)
+    jpeg = cv2.imencode(".jpg", pixels)[1].tobytes()
+
+    decoded = decode_jpeg(jpeg)
+
+    assert decoded.shape == (32, 48, 3)

@@ -66,11 +66,14 @@ class MissingImagingDependency(RuntimeError):
 
 
 def decode_jpeg(jpeg: bytes) -> np.ndarray:
-    """Decode a live-view JPEG with whichever imaging library is available.
+    """Decode a live-view JPEG.
 
-    OpenCV first because the stacking pipeline needs it anyway (brief 15), then
-    Pillow, which is only a ``bench`` extra. Keeping the import inside the
-    function means the package imports cleanly with neither installed.
+    OpenCV is a runtime dependency -- it is also the warp/registration backend for
+    the live stack (brief 15) -- so normally this is a one-liner. Pillow is kept
+    as a fallback so a source tree with only the ``bench`` extra still works.
+
+    The imports stay inside the function so that importing :mod:`ministar.camera`
+    costs nothing and so the failure is actionable rather than at import time.
     """
     try:
         import cv2
@@ -88,8 +91,9 @@ def decode_jpeg(jpeg: bytes) -> np.ndarray:
         from PIL import Image
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise MissingImagingDependency(
-            "decoding a live-view JPEG needs OpenCV (pip install ministar[imaging]) "
-            "or Pillow (pip install ministar[bench])"
+            "OpenCV is a required dependency but is not importable; reinstalling "
+            "ministar should restore it. Pillow (pip install ministar[bench]) is "
+            "also accepted as a fallback decoder."
         ) from exc
 
     return np.asarray(Image.open(BytesIO(jpeg)))
