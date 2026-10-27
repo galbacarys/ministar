@@ -167,7 +167,10 @@ def render_focus(
 
     def tick() -> None:
         snap = station.snapshot()
-        name_label.text = f"{snap.name}   frame {snap.frames}"
+        # Just the camera: a frame counter that ticks ten times a second is noise, not
+        # information. The count is still carried on the snapshot -- the focus driver
+        # uses it to prove a frame arrived after a pulse.
+        name_label.text = snap.name
         if snap.data_uri:
             preview.source = snap.data_uri
             preview.update()
