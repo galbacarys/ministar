@@ -18,7 +18,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ui = ["pyside6>=6.8"]
+# Brief 14 sec.2 supersedes PySide6 (LGPL) with NiceGUI (MIT) for both the
+# desktop window and the browser/phone console, which also removes the only
+# copyleft dependency from the runtime.
+ui = ["nicegui>=2.0"]
 imaging = ["opencv-python-headless>=4.10"]
 # Bench harness in tools/ decodes live-view JPEG; needs Pillow, which the
 # package itself does not. tools/setup.bat installs [dev], so install this too

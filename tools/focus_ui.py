@@ -37,13 +37,12 @@ _SRC = _ROOT / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from edsdk_lite import (  # noqa: E402
+from ministar.camera.edsdk_ffi import (  # noqa: E402
     FAR_STEPS,
     NEAR_STEPS,
     Edsdk,
     EdsdkError,
 )
-
 from ministar.focus.metrics import measure_hfd  # noqa: E402
 
 #: Canon needs a settle between pulses or it coalesces them.

@@ -9,11 +9,25 @@ from ministar.camera.base import (
     snap_shutter,
 )
 
+# Imported last: edsdk pulls in ctypes and the focus metrics, and the base types
+# above are what most callers want. Importing the backend here is safe because
+# EDSDK.dll is only loaded when a camera is actually constructed.
+from ministar.camera.edsdk import (
+    CameraNotConnected,
+    EdsdkCamera,
+    EdsdkUnavailable,
+    MissingImagingDependency,
+)
+
 __all__ = [
     "Camera",
     "CameraInfo",
+    "CameraNotConnected",
     "CameraSettings",
+    "EdsdkCamera",
+    "EdsdkUnavailable",
     "Frame",
+    "MissingImagingDependency",
     "label_for_seconds",
     "snap_shutter",
 ]
