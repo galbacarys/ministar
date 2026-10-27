@@ -43,7 +43,7 @@ from ministar.camera.edsdk_ffi import (  # noqa: E402
     Edsdk,
     EdsdkError,
 )
-from ministar.focus.metrics import measure_hfd  # noqa: E402
+from ministar.focus.metrics import measure_hfd, tenengrad  # noqa: E402
 
 #: Canon needs a settle between pulses or it coalesces them.
 PULSE_SETTLE_S = 0.06
@@ -70,12 +70,6 @@ class Metrics:
     #: Independent of whether the scene is sharp enough for a focus metric, which
     #: is the only question that survives a lens cap or a blank wall.
     thumb: np.ndarray
-
-
-def tenengrad(gray: np.ndarray) -> float:
-    """Mean squared gradient magnitude. Rises to a maximum at best focus."""
-    gy, gx = np.gradient(gray)
-    return float(np.mean(gx * gx + gy * gy))
 
 
 def analyse(jpeg: bytes) -> Metrics:
@@ -573,7 +567,7 @@ def run_gui() -> int:
                 text=(
                     f"size      {latest.width}x{latest.height}\n"
                     f"HFD       {hfd_text}\n"
-                    f"sharpness {latest.tenengrad:10.2f}   (Tenengrad; higher = sharper)"
+                    f"contrast  {latest.tenengrad:10.2f}   (Tenengrad; contrast, NOT focus)"
                     f"{change}"
                 )
             )

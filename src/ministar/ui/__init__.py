@@ -1,13 +1,17 @@
-"""Desktop UI.
+"""Operator console.
 
-Not implemented. Toolkit decision in ``docs/research/09-python-gui-windows.md``:
-PySide6 / Qt Widgets, LGPL-3, shipped as a PyInstaller *onedir* tree.
+**NiceGUI**, per brief 14 §2. One codebase serves both deployments: a normal
+browser tab, or a desktop window via ``ui.run(native=True)``, which wraps
+``pywebview`` and the OS webview -- *not* Electron, so no browser engine is
+bundled.
 
-Measured on this hardware: 627 ms cold start, 131.8 MB dist, and ~1.4 ms of GUI
-thread per frame for a 24 MP preview (downscale with OpenCV in the worker, hand
-over an owning ``QImage``, then ``QPixmap.fromImage`` + ``setPixmap``).
+This supersedes the PySide6 decision in brief 09, which assumed a Windows-only
+desktop app. The measurements from that brief still govern the image path -- in
+particular "never scale a 24 MP frame on the GUI thread", which survives as "never
+do camera or heavy image work on the UI thread" in :mod:`ministar.ui.focus`.
 
-Two traps worth remembering: ``QImage.scaled`` is 74.6 ms on 24 MP (12x slower
-than OpenCV) so never call it on the GUI thread, and a ``QImage`` that views a
-garbage-collected numpy buffer returns silent nonsense rather than raising.
+Screens live one-per-module:
+
+* :mod:`ministar.ui.focus` -- live view, HFD, lens drive. The first screen, and
+  the only one whose behaviour is verified on hardware (brief 16).
 """

@@ -124,3 +124,32 @@ def test_starless_live_view_sized_frame_is_not_saturated() -> None:
     hfd, count = measure_hfd(clipped_dark(shape=(704, 1056)))
     assert count < 10, f"starless frame produced {count} fake stars"
     assert math.isnan(hfd)
+
+
+def test_tenengrad_separates_a_star_field_from_a_flat_frame() -> None:
+    """Its real job: proving a frame contains some contrast at all."""
+    from ministar.focus.metrics import tenengrad
+
+    stars = tenengrad(star_field((1.5,)).astype(np.float32))
+    assert stars > 1000.0
+
+
+def test_tenengrad_is_non_monotonic_near_the_sampling_limit() -> None:
+    """A documented limitation, not a bug to "fix" later.
+
+    Tenengrad peaks once the PSF spans a few pixels. This rig is diffraction
+    limited at ~1.75 px HFD (sigma ~0.7 px), which is on the rising side, so the
+    value FALLS as focus improves there. Encoding it here stops anyone quietly
+    using it as a focus metric, or "repairing" the metric to be monotonic.
+    """
+    from ministar.focus.metrics import tenengrad
+
+    undersampled = tenengrad(star_field((0.8,)).astype(np.float32))
+    well_sampled = tenengrad(star_field((3.0,)).astype(np.float32))
+    assert undersampled < well_sampled
+
+
+def test_tenengrad_is_zero_on_a_flat_frame() -> None:
+    from ministar.focus.metrics import tenengrad
+
+    assert tenengrad(np.full((32, 32), 200.0, dtype=np.float32)) == 0.0

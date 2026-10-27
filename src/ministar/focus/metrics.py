@@ -86,6 +86,35 @@ def saturation_level(image: np.ndarray) -> float | None:
     return None
 
 
+def tenengrad(gray: np.ndarray) -> float:
+    """Mean squared gradient magnitude: a *contrast* measure that needs no stars.
+
+    This exists because HFD cannot work without a star field, and there are real
+    situations with none: on a bench, through a lens cap, or on a bright moonlit
+    night.
+
+    ⚠️ **It is not a focus metric, and it must not be used as one.** Tenengrad
+    peaks only while the PSF spans several pixels; below that it *falls* as focus
+    improves, because the gradient energy gets concentrated into fewer and fewer
+    samples. Measured on synthetic stars of equal peak flux:
+
+    | PSF sigma | 0.8 px | 1.5 px | 2.5 px | 3.0 px | 5.0 px |
+    |---|---|---|---|---|---|
+    | tenengrad | 22 238 | 35 221 | 40 322 | **41 292** | 41 047 |
+
+    This rig is diffraction-limited at ~1.75 px HFD, i.e. sigma ~0.7 px (03 §3),
+    which sits on the *rising* side of that curve. So near best focus this number
+    gets **worse as focus improves**. Use HFD for focus (11 §3); use this only to
+    answer "is there any contrast in this frame at all".
+
+    Measured contrast between a capped and an open lens was 0.27 vs 20.0 in
+    arbitrary units (brief 16 §8) -- two orders of magnitude -- so it is a good
+    frame-sanity check even though it is a bad focus metric.
+    """
+    gy, gx = np.gradient(gray)
+    return float(np.mean(gx * gx + gy * gy))
+
+
 def background_and_noise(gray: np.ndarray) -> tuple[float, float]:
     """Coarse global background and noise, used only to *seed* peak candidates.
 
