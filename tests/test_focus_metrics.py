@@ -94,3 +94,33 @@ def pytest_approx(value: float, rel: float = 1e-6):
             return isinstance(other, (int, float)) and abs(other - value) <= abs(value) * rel
 
     return _Approx()
+
+
+def clipped_dark(
+    shape: tuple[int, int] = (200, 300),
+    mean: float = 0.2,
+    sigma: float = 3.0,
+    seed: int = 5,
+) -> np.ndarray:
+    """A lens-capped live view: background pinned hard against the 8-bit floor."""
+    rng = np.random.default_rng(seed)
+    return np.clip(rng.normal(mean, sigma, shape), 0, 255).astype(np.uint8)
+
+
+def test_starless_frame_at_the_black_floor_reports_nothing() -> None:
+    """Regression (brief 16 §7).
+
+    This used to report a full set of confident "stars", because the MAD noise
+    estimate collapsed to zero and the std fallback undershot by ~1.7x, dropping
+    the threshold enough to admit tens of thousands of noise pixels.
+    """
+    hfd, count = measure_hfd(clipped_dark())
+    assert count < 5, f"starless frame produced {count} fake stars"
+    assert math.isnan(hfd)
+
+
+def test_starless_live_view_sized_frame_is_not_saturated() -> None:
+    """At the real 60D live-view resolution the old code hit max_stars exactly."""
+    hfd, count = measure_hfd(clipped_dark(shape=(704, 1056)))
+    assert count < 10, f"starless frame produced {count} fake stars"
+    assert math.isnan(hfd)

@@ -27,15 +27,24 @@ Implementation notes that matter:
 * **Border peaks are dropped.** A cutout that runs off the frame cannot have its
   flux integrated.
 
-⚠️ **Known limitation: a starless frame can still yield "stars".** On the user's
-M81 master bias — which contains no stars at all — this reports 15 at HFD 6.5 px.
-Fixed-pattern noise in a very clean frame is locally significant and can span a
-couple of pixels, so neither the SNR gate nor the ``MIN_SIGNIFICANT_PIXELS`` gate
-rejects it. A real star field yields tens of *isolated* maxima; structured noise
-yields a few clusters. Callers that need certainty (the focus monitor on a cloudy
-night) should treat a low accepted/candidate ratio as suspicious rather than
-relying on the count alone. Not worth more machinery for v1 — you do not focus on
-a master bias.
+⚠️ **Starless frames: mostly fixed, a small residue remains.** An earlier version
+reported 15 "stars" at HFD 6.5 px on a starless M81 master bias, and 40 on a
+lens-capped live view — 40 being the ``max_stars`` cap, so the true figure was
+"at least 40".
+
+The dominant cause was **the noise estimator, not the gates**. On a near-black
+frame roughly half the pixels sit at the dtype floor, so the MAD is exactly zero;
+the old fallback to ``std`` then underestimated sigma by ~1.7x on a one-sided
+clipped distribution (1.66 against a true 3.0). That dropped the candidate
+threshold from 9.0 to 5.0 and admitted ~40 000 pixels — 40 562 measured on a
+704x1056 frame.
+
+``p84 - p50`` (:func:`ministar.focus.noise.robust_sigma`) fixes that, because it
+needs only the upper tail. What can still happen is residual *structured* noise —
+chiefly JPEG block artefacts in a live view — producing a few locally-significant
+multi-pixel blobs. So ``max_stars`` remains a cap and a saturated count means "at
+least this many". When a sweep needs certainty, prefer a real capture over a live
+view (11 §4.2), and treat ``count == max_stars`` as untrustworthy.
 """
 
 from __future__ import annotations
@@ -43,6 +52,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+
+from ministar.focus.noise import robust_sigma
 
 #: Radius of the cutout used to integrate each star.
 #:
@@ -78,15 +89,13 @@ def saturation_level(image: np.ndarray) -> float | None:
 def background_and_noise(gray: np.ndarray) -> tuple[float, float]:
     """Coarse global background and noise, used only to *seed* peak candidates.
 
-    Median and MAD rather than mean and stddev, because stars are outliers. This is
-    deliberately permissive: the real decision is made per star in :func:`hfd_at`.
+    Median for the background because stars are outliers, and ``p84 - p50`` for the
+    noise because a black frame has its lower tail clipped away (see
+    :func:`ministar.focus.noise.robust_sigma`). Deliberately permissive: the real
+    decision is made per star in :func:`measure_star`.
     """
-    median = float(np.median(gray))
-    mad = float(np.median(np.abs(gray - median)))
-    noise = 1.4826 * mad
-    if noise <= 0:
-        noise = max(float(gray.std()), 1e-6)
-    return median, noise
+    background = float(np.median(gray))
+    return background, robust_sigma(gray)
 
 
 def find_peaks(
@@ -150,9 +159,9 @@ def measure_star(
 
     ring = _annulus(patch)
     local_bg = float(np.median(ring))
-    local_noise = 1.4826 * float(np.median(np.abs(ring - local_bg)))
-    if local_noise <= 0:
-        local_noise = max(float(ring.std()), 1e-6)
+    # Same clipping-robust estimator as the global seed: an annulus around a star
+    # in a dark sky is just as prone to a clipped floor.
+    local_noise = robust_sigma(ring)
 
     threshold = min_snr * local_noise
     peak_snr = (float(patch[_WINDOW, _WINDOW]) - local_bg) / local_noise

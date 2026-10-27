@@ -28,6 +28,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ministar.focus.noise import MAD_TO_SIGMA
+
 #: Below this many usable samples the fit is not worth trusting; do another sweep.
 MIN_SAMPLES = 5
 
@@ -113,7 +115,9 @@ def fit_v_curve(
     rejected = 0
     if outlier_sigma > 0 and len(x) > MIN_SAMPLES:
         residual = np.abs(y - (a * x * x + b * x + c))
-        scale = 1.4826 * float(np.median(residual))
+        # Residuals about the fit, not about their own median: this is a scale
+        # estimate for the fit, and MAD_TO_SIGMA names the 1.4826 conversion.
+        scale = MAD_TO_SIGMA * float(np.median(residual))
         if scale > 0:
             keep = residual <= outlier_sigma * scale
             rejected = int((~keep).sum())
