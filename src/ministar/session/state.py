@@ -27,7 +27,10 @@ STATE_FILENAME = "session.json"
 
 
 class Phase(Enum):
+    #: Software/environment readiness. Can be run at home, before driving anywhere.
     PREFLIGHT = "preflight"
+    #: Rig readiness at the site: site location, camera configuration, head profile.
+    SETUP = "setup"
     TARGET = "target"
     PARAMETERS = "parameters"
     FOCUS = "focus"
@@ -38,6 +41,7 @@ class Phase(Enum):
 
 ORDER: tuple[Phase, ...] = (
     Phase.PREFLIGHT,
+    Phase.SETUP,
     Phase.TARGET,
     Phase.PARAMETERS,
     Phase.FOCUS,
@@ -52,6 +56,11 @@ class SessionState:
     """Everything the wizard collects, and the phase it is in."""
 
     phase: Phase = Phase.PREFLIGHT
+
+    #: Mirror of the persistent site file, set by the SETUP screen. Session state
+    #: stays free of disk I/O, so :meth:`blockers` can consult it without loading
+    #: anything.
+    site_ready: bool = False
 
     # Target selection (10 §1)
     target_name: str | None = None
@@ -91,7 +100,9 @@ class SessionState:
             return []
 
         if upcoming is Phase.TARGET:
-            return []
+            # Ranking targets requires a location: without one every visibility
+            # column is unknown, so this is a prerequisite rather than advice.
+            return [] if self.site_ready else ["observing site not set (SETUP)"]
         if upcoming is Phase.PARAMETERS:
             return [] if self.target_name else ["no target selected"]
         if upcoming is Phase.FOCUS:

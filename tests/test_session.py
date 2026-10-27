@@ -13,9 +13,28 @@ def test_fresh_session_starts_at_preflight() -> None:
     assert SessionState().phase is Phase.PREFLIGHT
 
 
-def test_cannot_advance_without_a_target() -> None:
+def test_preflight_leads_to_setup() -> None:
+    """Software readiness first, then rig readiness."""
     state = SessionState()
-    state.advance()  # PREFLIGHT -> TARGET needs nothing
+    state.advance()  # PREFLIGHT -> SETUP needs nothing
+    assert state.phase is Phase.SETUP
+
+
+def test_setup_needs_a_site_before_target() -> None:
+    """Without a location every visibility column is unknown, so it is a blocker."""
+    state = SessionState(phase=Phase.SETUP)
+    assert state.blockers() == ["observing site not set (SETUP)"]
+    with pytest.raises(ValueError, match="observing site"):
+        state.advance()
+
+    state.site_ready = True
+    state.advance()
+    assert state.phase is Phase.TARGET
+
+
+def test_cannot_advance_without_a_target() -> None:
+    state = SessionState(phase=Phase.SETUP, site_ready=True)
+    state.advance()  # SETUP -> TARGET needs a site, which is now set
     assert state.phase is Phase.TARGET
     assert state.blockers() == ["no target selected"]
     with pytest.raises(ValueError, match="no target"):
@@ -24,6 +43,8 @@ def test_cannot_advance_without_a_target() -> None:
 
 def test_full_path_to_running() -> None:
     state = SessionState()
+    state.advance()  # -> SETUP
+    state.site_ready = True
     state.advance()  # -> TARGET
     state.target_name = "M81"
     state.target_ra_deg, state.target_dec_deg = 148.888, 69.065

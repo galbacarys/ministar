@@ -46,9 +46,15 @@ once a head profile exists. Per the README design stance: inform, never block.
 
 Already implemented as `ministar preflight`. Its job is to fail *before* the user
 drives somewhere dark, not after. Reports: ASTAP + its star database, `EDSDK.dll`,
-camera on the bus, lens model and focal length, site latitude/longitude, disk space.
+camera on the bus, lens model and focal length, disk space.
 
-**Also selects the head profile** (13 §8) — a dropdown of named heads, defaulting to the
+**PREFLIGHT is software readiness, and it can be run at home.** It answers "will this
+machine work at all". The rig itself — where we are, and whether the camera is
+configured — is SETUP (§1a). That split came from the operator's own description:
+PREFLIGHT is *"I booted my computer to verify my software is ready"*, SETUP is
+*"I am ready to start my shooting session"*.
+
+**The head profile is selected in SETUP** (§1a, 13 §8) — a dropdown of named heads, defaulting to the
 last one used. It belongs here because it is an equipment property like the camera and
 lens, not a per-target setting. Users commonly own more than one head (a good geared one
 at home, a small travel head in a rucksack), and those need separate profiles: using the
@@ -62,6 +68,29 @@ past failures, and N.I.N.A. only ever surfaced them as a message box.
 
 Non-blocking, per the README design stance, except for things that make the app
 physically unable to work (no ASDK, no database).
+
+---
+
+## 1a. SETUP
+
+Rig readiness, performed **at the site** at the start of a session. Where PREFLIGHT
+checks the installation, SETUP checks that this evening can proceed:
+
+* **Observing site** — latitude and longitude, entered manually or read from the
+  browser's geolocation, persisted to `data/site.json`. Nothing is defaulted: a
+  plausible invented latitude is indistinguishable from a correct one, and both the
+  visibility columns and the reframe geometry depend on it. TARGET cannot rank
+  anything until this is set, so it is a real blocker rather than advice.
+* **Camera configuration** — the entries in `preflight.CAMERA_CHECKS`, confirmed on
+  the body because most cannot be read over USB (08 §7.2b): mode dial on M, lens on
+  MF, mirror lockup as expected, LENR off, auto power-off disabled.
+* **Head profile** — optional. A dropdown of named heads (13 §8), with the option to
+  calibrate a new one. POINT works without it and falls back to stating degrees, so
+  this is offered, never required.
+
+Browsers only expose geolocation in a secure context, so the *find me* button works on
+`127.0.0.1` but not over a LAN address on plain http. Manual entry is therefore always
+available and is the only route on the SBC until we serve over HTTPS.
 
 ---
 
