@@ -186,3 +186,38 @@ def test_the_window_slider_asks_its_question_in_words() -> None:
     """ "window (s)" is a column heading; the slider needs the question it answers."""
     assert screens.WINDOW_QUESTION == "How frequently are you willing to reframe?"
     assert "?" in screens.WINDOW_QUESTION, "a slider without its question is a mystery"
+
+
+# -- the two-stage focus screen ---------------------------------------------
+def test_the_manual_stage_hands_off_with_words_that_keep_the_user_in_charge() -> None:
+    """ "looks good" is a judgement, not a measurement: the manual stage has no metric."""
+    from ministar.ui import focus as focus_screen
+
+    assert focus_screen.MANUAL_ACCEPT_LABEL == "looks good, start focus"
+    assert [stage.value for stage in focus_screen.Stage] == ["manual", "auto", "done"]
+
+
+def test_the_focus_result_line_reports_success_with_its_evidence() -> None:
+    from ministar.focus.routine import FocusResult
+    from ministar.ui import focus as focus_screen
+
+    line = focus_screen.describe_result(
+        FocusResult(ok=True, position=31, hfd=1.78, reason="", pulses=214)
+    )
+
+    assert "position +31" in line
+    assert "1.78" in line
+    assert "214 pulses" in line
+
+
+def test_the_focus_result_line_names_the_failure_and_where_it_stopped() -> None:
+    from ministar.focus.routine import FocusResult
+    from ministar.ui import focus as focus_screen
+
+    line = focus_screen.describe_result(
+        FocusResult(ok=False, position=-12, hfd=float("nan"), reason="curve too shallow", pulses=40)
+    )
+
+    assert "failed" in line
+    assert "curve too shallow" in line
+    assert "-12" in line

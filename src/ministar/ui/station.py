@@ -22,6 +22,7 @@ import numpy as np
 from ministar.camera import decode_jpeg
 from ministar.focus.driver import Direction, PulseResult
 from ministar.focus.metrics import measure_hfd, tenengrad, to_gray
+from ministar.focus.synth import DEFAULT_SHAPE, StarField
 
 #: Pulses per pump tick, so a long sweep keeps the preview moving.
 PULSES_PER_TICK = 4
@@ -63,26 +64,23 @@ def analyse(jpeg: bytes) -> Analysis:
 class FakeCamera:
     """Synthetic star field whose blur depends on position.
 
-    Lets every screen be developed, screenshotted and tested with no hardware. The
-    PSF models this rig: sigma 0.7 px at best focus, i.e. HFD ~1.75 px (brief 03 §3).
+    The scene itself lives in :mod:`ministar.focus.synth`, so every screen developed
+    against this camera sees the same model the tests do: stars spread rather than dim,
+    noise varies frame to frame, and the field is a value object that a real catalogue
+    field can replace without touching this class.
     """
 
-    #: Dim and unsaturated: a realistic live view, and it keeps the saturation
-    #: guard from (correctly) discarding every synthetic star.
-    BACKGROUND = 30.0
-    STAR_PEAK = 170.0
-    NOISE = 4.0
-
-    def __init__(self, best: int = 24, shape: tuple[int, int] = (704, 1056)) -> None:
+    def __init__(
+        self,
+        best: int = 24,
+        shape: tuple[int, int] = DEFAULT_SHAPE,
+        *,
+        seed: int = 1,
+        count: int = 60,
+    ) -> None:
         self._position = 0
-        self._best = best
-        self._shape = shape
-        self._rng = np.random.default_rng(1)
-        h, w = shape
-        self._stars = [
-            (int(self._rng.integers(40, h - 40)), int(self._rng.integers(40, w - 40)))
-            for _ in range(14)
-        ]
+        self._frames = 0
+        self._field = StarField.random(count=count, seed=seed, shape=shape, best_position=best)
         self.name = "Fake EOS (synthetic)"
 
     connected = True
@@ -90,6 +88,10 @@ class FakeCamera:
     @property
     def position(self) -> int:
         return self._position
+
+    @property
+    def field(self) -> StarField:
+        return self._field
 
     def connect(self) -> None:
         return None
@@ -100,17 +102,9 @@ class FakeCamera:
     def grab_live_jpeg(self) -> bytes:
         import cv2
 
-        h, w = self._shape
-        sigma = 0.7 + 0.06 * abs(self._position - self._best)
-        img = np.full((h, w), self.BACKGROUND, dtype=np.float32)
-        yy, xx = np.mgrid[0:h, 0:w]
-        for cy, cx in self._stars:
-            img += self.STAR_PEAK * np.exp(
-                -(((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * sigma * sigma))
-            )
-        img += self._rng.normal(0.0, self.NOISE, (h, w))
-        gray = np.clip(img, 0, 255).astype(np.uint8)
-        ok, buffer = cv2.imencode(".jpg", gray, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        self._frames += 1
+        frame = self._field.render_uint8(self._position, frame=self._frames)
+        ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:  # pragma: no cover - should not happen
             raise RuntimeError("cv2 failed to encode the synthetic frame")
         return buffer.tobytes()
@@ -166,6 +160,11 @@ class Station:
             self._camera.disconnect()
 
     # -- the screens' whole API --------------------------------------------
+    @property
+    def camera(self):
+        """The camera this station drives. Screens use it for capture, not for frames."""
+        return self._camera
+
     def snapshot(self) -> Snapshot:
         with self._lock:
             return self._snap

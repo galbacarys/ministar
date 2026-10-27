@@ -1,8 +1,20 @@
-"""The FOCUS step: live view, HFD, and the lens drive.
+"""The FOCUS step, in two stages.
 
-Rendered both standalone (for bench work) and inside the session wizard, so the
-widgets live in :func:`render_focus` and both callers share them. The camera
-itself belongs to :class:`ministar.ui.station.Station`, not to this module.
+**1. Hand focus.** The lens is driven by the arrow buttons while live view runs, and the
+only job is to get recognisably round stars. No scoring, no curve, no "good enough"
+badge: the judgement is the user's, because at this point the software has no idea
+whether that is a star or a hot pixel. The stage ends with *looks good, start focus*.
+
+**2. Automatic focus.** From wherever the hand left it, the real routine takes over
+(:func:`ministar.focus.routine.autofocus`, ``Start.AT_CURRENT``): sweep, fit the V,
+refine, land. Progress is reported as it goes, because a sweep is tens of pulses and a
+screen that looks frozen is indistinguishable from a hung camera.
+
+Rendered both standalone (bench work) and inside the session wizard, so the widgets
+live here and both callers share them. The camera belongs to
+:class:`ministar.ui.station.Station`; the adapter in
+:mod:`ministar.focus.station_driver` makes that thread-paced camera look like the
+synchronous driver the routine expects.
 
 Run it standalone::
 
@@ -13,13 +25,21 @@ Run it standalone::
 from __future__ import annotations
 
 import argparse
+import threading
 from collections.abc import Callable
+from enum import Enum
 
 from nicegui import ui
 
 from ministar.focus.driver import Direction
+from ministar.focus.routine import FocusResult, Start, autofocus
+from ministar.focus.station_driver import StationDriver
 from ministar.ui.station import FakeCamera, Snapshot, Station
 from ministar.ui.theme import install
+
+#: The hand-off from the eye to the routine. Wording matters: it says the *user* decides,
+#: which is the whole point of the manual stage.
+MANUAL_ACCEPT_LABEL = "looks good, start focus"
 
 #: Ordered far-to-near so the row reads like the lens barrel.
 DRIVE_ROW: tuple[tuple[str, Direction], ...] = (
@@ -32,35 +52,118 @@ DRIVE_ROW: tuple[tuple[str, Direction], ...] = (
 )
 
 
+class Stage(Enum):
+    """Which half of the step the user is in."""
+
+    MANUAL = "manual"
+    AUTO = "auto"
+    DONE = "done"
+
+
+def describe_result(result: FocusResult) -> str:
+    """One honest line about how the automatic stage went."""
+    if not result.ok:
+        return f"autofocus failed: {result.reason} (position {result.position:+d})"
+    return (
+        f"focused at position {result.position:+d}   HFD {result.hfd:.2f} px"
+        f"   ({len(result.samples)} samples, {result.pulses} pulses)"
+    )
+
+
 def render_focus(
     station: Station,
     *,
     on_accept: Callable[[Snapshot], None] | None = None,
+    run_autofocus: Callable[[StationDriver], FocusResult] | None = None,
 ) -> None:
-    """Draw the focus controls into the current container.
+    """Draw the two-stage focus step into the current container.
 
-    ``on_accept`` is offered as a button when given; the wizard uses it to record
-    the achieved focus position and HFD into the session.
+    ``on_accept`` is offered once a focus has been achieved; the wizard uses it to record
+    the position and HFD into the session.
     """
+    adapter_factory: Callable[[Station], StationDriver] = StationDriver
+    runner = run_autofocus or (lambda driver: autofocus(driver, start=Start.AT_CURRENT))
+
     name_label = ui.label("").classes("mn-title")
     preview = ui.image("").classes("mn-preview")
     metrics = ui.label("").classes("mn-metrics")
     warn = ui.label("").classes("mn-warn")
 
-    count = ui.toggle({1: "1", 3: "3", 10: "10"}, value=1).classes("mn-title")
-    with ui.row().classes("items-center justify-center"):
-        for label, direction in DRIVE_ROW:
-            ui.button(label, on_click=lambda d=direction: station.request(d, count.value)).classes(
-                "mn-drive"
-            ).style("margin: 3px")
+    manual = ui.column().classes("w-full items-center")
+    with manual:
+        ui.label("1. hand focus").classes("mn-heading")
+        ui.label("drive until the stars look like points, not discs").classes("mn-dim")
+        count = ui.toggle({1: "1", 3: "3", 10: "10"}, value=1).classes("mn-title")
+        with ui.row().classes("items-center justify-center"):
+            for label, direction in DRIVE_ROW:
+                ui.button(
+                    label, on_click=lambda d=direction: station.request(d, count.value)
+                ).classes("mn-drive").style("margin: 3px")
+        ui.label("lens must be on MF (focus-by-wire)").classes("mn-dim")
 
-    if on_accept is not None:
-        ui.button(
-            "use this focus",
-            on_click=lambda: on_accept(station.snapshot()),
-        ).classes("mn-action").style("margin-top: 8px")
+    auto = ui.column().classes("w-full items-center")
+    with auto:
+        ui.label("2. automatic focus").classes("mn-heading")
+        progress = ui.label("starting...").classes("mn-body")
+    auto.set_visibility(False)
 
-    ui.label("lens must be on MF (focus-by-wire)").classes("mn-dim")
+    done = ui.column().classes("w-full items-center")
+    with done:
+        ui.label("focus").classes("mn-heading")
+        outcome = ui.label("").classes("mn-metrics")
+        if on_accept is not None:
+            ui.button("use this focus", on_click=lambda: on_accept(station.snapshot())).classes(
+                "mn-action"
+            )
+    done.set_visibility(False)
+
+    # Shared between the worker thread and the timer: the routine is synchronous, so its
+    # only route to the screen is a mutable result slot.
+    state: dict[str, object] = {}
+    timer: ui.timer | None = None
+
+    def start_auto() -> None:
+        manual.set_visibility(False)
+        auto.set_visibility(True)
+        progress.text = "sweeping..."
+        driver = adapter_factory(station)
+
+        def worker() -> None:
+            try:
+                state["result"] = runner(driver)
+            except Exception as exc:  # a broken run must not take the screen down
+                state["error"] = f"{type(exc).__name__}: {exc}"
+
+        threading.Thread(target=worker, name="autofocus", daemon=True).start()
+        if timer is not None:
+            timer.activate()
+
+    start = ui.button(MANUAL_ACCEPT_LABEL, on_click=start_auto).classes("mn-action")
+    start.style("margin-top: 8px")
+
+    def poll() -> None:
+        nonlocal timer
+        result = state.get("result")
+        error = state.get("error")
+        snap = station.snapshot()
+        if result is None and error is None:
+            progress.text = (
+                f"sweeping...  position {snap.position:+d}   HFD {snap.hfd:.2f} px"
+                if snap.stars
+                else f"sweeping...  position {snap.position:+d}   (no stars yet)"
+            )
+            return
+
+        if timer is not None:
+            timer.active = False
+        auto.set_visibility(False)
+        done.set_visibility(True)
+        start.set_visibility(False)
+        if error is not None:
+            outcome.text = f"autofocus failed: {error}"
+            return
+        assert isinstance(result, FocusResult)
+        outcome.text = describe_result(result)
 
     def tick() -> None:
         snap = station.snapshot()
@@ -84,6 +187,7 @@ def render_focus(
         warn.text = snap.error
 
     ui.timer(0.10, tick)
+    timer = ui.timer(0.30, poll, active=False)
 
 
 _STATION: Station | None = None
@@ -104,7 +208,7 @@ def focus_page() -> None:
 def run(
     *,
     fake: bool = False,
-    host: str = "127.0.0.1",
+    host: str = "0.0.0.0",
     port: int = 8080,
     native: bool = False,
     show: bool = True,
@@ -143,7 +247,7 @@ def run(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="ministar focus screen")
     parser.add_argument("--fake", action="store_true", help="synthetic stars, no camera")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--native", action="store_true", help="pywebview window")
     parser.add_argument("--no-show", action="store_true", help="do not open a browser")
