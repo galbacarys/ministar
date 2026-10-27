@@ -369,7 +369,10 @@ Derived per §2.1: `pixel_scale = 6.3804e-4 °/px = 2.297″/px`; `PA_y = atan2(
 
 Field: `1958 × 2.297″ = 1.249°` tall. Tolerance `max(5′, 0.05·1.249°=3.75′) = 5′` = 131 px.
 
-Use this frame as the regression fixture: at `φ = +39.16°`, `δ_c = 69.23°`, the camera is rolled
+Use this frame as the regression fixture, taking `φ = +39.16°` **as a fixture parameter only —
+it is not a measured observing latitude.** The real site is a user input (04 §5 notes the
+readouts are only approximate until it is entered). The fixture value was chosen so that
+with `δ_c = 69.23°` the camera is rolled
 essentially 180° from north-up, so `ψ` will be large and any sign error in `q` will be obvious.
 
 **Frame B** — `na_light.fit`, 100 mm, 180 s, 5202×3464, 8.53° tall. ASTAP solved it only after

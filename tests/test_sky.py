@@ -17,7 +17,10 @@ from ministar.sky import (
     visible_minutes,
 )
 
-LAT = 39.16  # recorded site latitude in the briefs
+FIXTURE_LAT = 45.0
+# An ARBITRARY mid-latitude that exists only to exercise the maths. It is NOT the
+# observing site, which is a user input and is not known to this program -- see the
+# module docstring in sky.py. Do not read it as a real location.
 
 
 def test_julian_date_at_j2000_epoch() -> None:
@@ -40,31 +43,29 @@ def test_altitude_at_culmination_equals_max_altitude() -> None:
     """At hour angle zero the two must agree; this is the sign-error test."""
     for dec in (-40.0, 0.0, 41.27, 80.0):
         ra, lst = 123.4, 123.4  # H = 0
-        assert altitude_deg(ra, dec, lst, LAT) == pytest.approx(max_altitude_deg(dec, LAT))
+        at_culmination = altitude_deg(ra, dec, lst, FIXTURE_LAT)
+        assert at_culmination == pytest.approx(max_altitude_deg(dec, FIXTURE_LAT))
 
 
 def test_circumpolar_target_never_sets() -> None:
-    assert float(hours_above(89.9, LAT, 25.0)) == pytest.approx(24.0)
+    assert float(hours_above(89.9, FIXTURE_LAT, 25.0)) == pytest.approx(24.0)
 
 
 def test_target_that_never_rises() -> None:
-    assert float(hours_above(-80.0, LAT, 25.0)) == pytest.approx(0.0)
+    assert float(hours_above(-80.0, FIXTURE_LAT, 25.0)) == pytest.approx(0.0)
 
 
 def test_hours_above_matches_the_closed_form_for_an_equatorial_target() -> None:
-    # cos H0 = sin(25) / cos(39.16) -> H0 = 56.96 deg -> 2*H0/15 = 7.595 h
-    expected = (
-        2.0
-        * math.degrees(math.acos(math.sin(math.radians(25.0)) / math.cos(math.radians(LAT))))
-        / 15.0
-    )
-    assert float(hours_above(0.0, LAT, 25.0)) == pytest.approx(expected, rel=1e-9)
+    # Closed form at whichever latitude the fixture uses: cos H0 = sin(25)/cos(lat).
+    cos_h0 = math.sin(math.radians(25.0)) / math.cos(math.radians(FIXTURE_LAT))
+    expected = 2.0 * math.degrees(math.acos(cos_h0)) / 15.0
+    assert float(hours_above(0.0, FIXTURE_LAT, 25.0)) == pytest.approx(expected, rel=1e-9)
 
 
 def test_hours_above_is_vectorised() -> None:
     import numpy as np
 
-    result = hours_above(np.array([0.0, 89.9, -80.0]), LAT, 25.0)
+    result = hours_above(np.array([0.0, 89.9, -80.0]), FIXTURE_LAT, 25.0)
     assert isinstance(result, np.ndarray)
     assert result.shape == (3,)
     assert result[1] == pytest.approx(24.0)
@@ -76,7 +77,14 @@ def test_visible_minutes_is_bounded_by_the_window() -> None:
     end = datetime(2026, 10, 27, 8, tzinfo=UTC)
     # M31, autumn, from a mid-northern site: up for much of an 8 h night.
     minutes = float(
-        visible_minutes(10.68, 41.27, latitude_deg=LAT, longitude_deg=-77.5, start=start, end=end)
+        visible_minutes(
+            10.68,
+            41.27,
+            latitude_deg=FIXTURE_LAT,
+            longitude_deg=-77.5,  # arbitrary test longitude, not a real site
+            start=start,
+            end=end,
+        )
     )
     assert 0.0 < minutes <= 480.0
     assert minutes > 120.0
@@ -90,8 +98,8 @@ def test_visible_minutes_broadcasts_over_targets() -> None:
     out = visible_minutes(
         np.array([10.68, 5.58]),  # M31 and M42-ish
         np.array([41.27, -5.39]),
-        latitude_deg=LAT,
-        longitude_deg=-77.5,
+        latitude_deg=FIXTURE_LAT,
+        longitude_deg=-77.5,  # arbitrary test longitude, not a real site
         start=start,
         end=end,
     )
@@ -103,4 +111,30 @@ def test_a_window_that_ends_before_it_starts_is_rejected() -> None:
     start = datetime(2026, 10, 27, 4, tzinfo=UTC)
     end = datetime(2026, 10, 27, 0, tzinfo=UTC)
     with pytest.raises(ValueError):
-        visible_minutes(0.0, 0.0, latitude_deg=LAT, longitude_deg=0.0, start=start, end=end)
+        visible_minutes(0.0, 0.0, latitude_deg=FIXTURE_LAT, longitude_deg=0.0, start=start, end=end)
+
+
+@pytest.mark.parametrize(
+    ("func", "params"),
+    [
+        (altitude_deg, ("latitude_deg",)),
+        (max_altitude_deg, ("latitude_deg",)),
+        (hours_above, ("latitude_deg",)),
+        (visible_minutes, ("latitude_deg", "longitude_deg")),
+    ],
+)
+def test_site_coordinates_are_never_defaulted(func, params) -> None:
+    """No built-in observing site, ever.
+
+    A default latitude or longitude would be indistinguishable from a correct answer:
+    a wrong latitude silently changes hours-above, and a wrong longitude shifts the
+    night window by hours. Making these mandatory was a deliberate decision after a
+    fixture value got mistaken for a measured site.
+    """
+    import inspect
+
+    signature = inspect.signature(func)
+    for name in params:
+        assert signature.parameters[name].default is inspect.Parameter.empty, (
+            f"{func.__name__}({name}) must not have a default"
+        )

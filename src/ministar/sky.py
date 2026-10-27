@@ -12,6 +12,13 @@ Two different questions live here and they need different information:
   **longitude** and a real date. Guessing a longitude silently shifts the answer by
   up to hours, which is why the UI asks for one rather than defaulting.
 
+**No site is assumed anywhere in this module.** Latitude and longitude are required
+arguments on every function that needs them, with no defaults and no built-in
+location. That is deliberate: the observing site is supplied by the user, and a
+wrong latitude silently changes hours-above and a wrong longitude shifts the whole
+night window by hours. A plausible default would be indistinguishable from a correct
+answer, which is the worst failure mode there is.
+
 Accuracy is more than enough for session planning: mean sidereal time, no nutation
 or aberration, geometric altitude (no refraction). Refraction matters near the
 horizon, but every threshold we care about starts at 25 degrees.
