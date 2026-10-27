@@ -77,9 +77,14 @@ class FakeCamera:
         *,
         seed: int = 1,
         count: int = 60,
+        roll_deg: float = 0.0,
     ) -> None:
         self._position = 0
         self._frames = 0
+        #: Camera roll as seen from behind the camera, counter-clockwise positive. Zero is
+        #: the common case for a real user clamping a lens on level ground, so it is the
+        #: default the roll page can be tried against.
+        self._roll = float(roll_deg)
         self._field = StarField.random(count=count, seed=seed, shape=shape, best_position=best)
         self.name = "Fake EOS (synthetic)"
 
@@ -92,6 +97,20 @@ class FakeCamera:
     @property
     def field(self) -> StarField:
         return self._field
+
+    @property
+    def roll_deg(self) -> float:
+        return self._roll
+
+    def set_roll(self, degrees: float) -> None:
+        """Turn the fake camera. Real cameras are turned by hand; this is the stand-in."""
+        self._roll = float(degrees) % 360.0
+
+    def render_frame(self) -> np.ndarray:
+        """The scene as an 8-bit frame, rolled. Separate from JPEG so tests need no codec."""
+        self._frames += 1
+        turned = self._field.rotated(-self._roll)
+        return turned.render_uint8(self._position, frame=self._frames)
 
     def iso_options(self) -> tuple[int, ...]:
         """The ISO values this body offers: powers of two x 100 up to 3200.
@@ -111,8 +130,7 @@ class FakeCamera:
     def grab_live_jpeg(self) -> bytes:
         import cv2
 
-        self._frames += 1
-        frame = self._field.render_uint8(self._position, frame=self._frames)
+        frame = self.render_frame()
         ok, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:  # pragma: no cover - should not happen
             raise RuntimeError("cv2 failed to encode the synthetic frame")

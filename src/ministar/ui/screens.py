@@ -25,6 +25,7 @@ from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, ca
 from ministar.config import Settings
 from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
+from ministar.reframe.roll import parallactic_angle, roll_advice
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
 from ministar.rig import save as save_rig
@@ -869,11 +870,94 @@ def render_calibrate(ctx: Context) -> None:
     _not_implemented("Head calibration", "13-head-calibration.md")
 
 
+def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
+    """The parallactic angle and the camera roll, or ``None`` when they are unknown.
+
+    ``q`` needs the site, the target and the time; the roll needs either a solve or a camera
+    that can report it. Nothing here guesses: without the pieces the page says what is
+    missing, because a CW/CCW arrow that is wrong is worse than no arrow.
+    """
+    if ctx.state.target_ra_deg is None or ctx.state.target_dec_deg is None:
+        return None
+    site = load_site(site_path(ctx.settings.paths.data))
+    if not site.complete:
+        return None
+    camera = getattr(station, "camera", None) if station is not None else None
+    roll = getattr(camera, "roll_deg", None)
+    if roll is None:
+        return None
+    lst = sky_module.lst_deg(datetime.now().astimezone(), site.longitude_deg)
+    hour_angle = (lst - ctx.state.target_ra_deg + 180.0) % 360.0 - 180.0
+    q = parallactic_angle(site.latitude_deg, ctx.state.target_dec_deg, hour_angle)
+    return float(q), float(roll)
+
+
 def render_point(ctx: Context) -> None:
-    _not_implemented("Pointing solve and entry corner", "10-target-catalog-and-reframe-envelope.md")
-    ui.label("The ASTAP driver works; what is missing is the capture path to feed it.").classes(
-        "mn-body"
-    )
+    """Camera roll: the sky drifts one way, the frame is 3:2, so turn the camera to match.
+
+    An untracked rig drags stars along the celestial parallel. Aligning that with the long
+    side of the frame is worth up to 1.5x the time between reframes (brief 10 §2.1c), and it
+    is a five-second action -- which makes it the cheapest win in the whole workflow, and
+    the reason this is a page of its own rather than a line of text.
+    """
+    ui.label("Camera roll").classes("mn-heading")
+    station = ctx.station
+    preview = ui.image("").classes("mn-preview")
+
+    advice_line = ui.label("").classes("mn-heading")
+    detail = ui.label("").classes("mn-body")
+    missing = ui.label("").classes("mn-warn")
+
+    with ui.row().classes("items-center justify-center").style("gap: 24px"):
+        ccw_label = ui.label("<< CCW").classes("mn-metrics")
+        cw_label = ui.label("CW >>").classes("mn-metrics")
+
+    roll_slider = None
+    camera = getattr(station, "camera", None) if station is not None else None
+    if getattr(camera, "set_roll", None) is not None:
+        # Fake camera only: a real user turns the clamp, so there is no control to offer.
+        ui.label("fake camera roll").classes("mn-dim")
+        roll_slider = (
+            ui.slider(min=-180, max=180, step=1, value=int(camera.roll_deg))
+            .props("label-always")
+            .classes("mn-slider")
+            .style("width: 340px")
+        )
+
+        def turned(event) -> None:
+            camera.set_roll(float(event.value))
+
+        roll_slider.on_value_change(turned)
+
+    def tick() -> None:
+        snapshot = station.snapshot() if station is not None else None
+        if snapshot is not None and snapshot.data_uri:
+            preview.source = snapshot.data_uri
+            preview.update()
+
+        state = roll_page_state(ctx, station)
+        if state is None:
+            advice_line.text = ""
+            detail.text = ""
+            ccw_label.classes(replace="mn-dim")
+            cw_label.classes(replace="mn-dim")
+            missing.text = (
+                "select a target, set the site, and use a camera that reports its roll "
+                "(the fake one does; a real body needs a solve first)"
+            )
+            return
+        missing.text = ""
+        q, roll = state
+        advice = roll_advice(psi_deg=roll, parallactic_deg=q)
+        advice_line.text = advice.describe().upper()
+        detail.text = (
+            f"roll {roll:+.0f} deg   parallactic {q:+.0f} deg   "
+            f"drift {advice.angle_from_long_axis:.0f} deg off the long side"
+        )
+        ccw_label.classes(replace="mn-heading" if advice.direction == "ccw" else "mn-dim")
+        cw_label.classes(replace="mn-heading" if advice.direction == "cw" else "mn-dim")
+
+    ui.timer(0.25, tick)
 
 
 def render_run(ctx: Context) -> None:

@@ -36,7 +36,7 @@ be built from any list of stars.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -106,6 +106,30 @@ class StarField:
         """PSF width at a focus position. Never below the at-focus value."""
         offset = self.defocus_px_per_unit * abs(float(position) - self.best_position)
         return math.hypot(self.sigma_best_px, offset)
+
+    def rotated(self, degrees: float) -> StarField:
+        """The same scene with the camera rolled: positions turn about the frame centre.
+
+        Rotating the *body* counter-clockwise turns the image content clockwise on screen,
+        so a camera roll of ``psi`` is rendered as ``rotated(-psi)``. Stars that swing out
+        of the frame simply fall outside it, exactly as they would through a viewfinder.
+        """
+        if not degrees:
+            return self
+        height, width = self.shape[0], self.shape[1]
+        centre_y, centre_x = (height - 1) / 2.0, (width - 1) / 2.0
+        angle = math.radians(degrees)
+        cos, sin = math.cos(angle), math.sin(angle)
+        turned = tuple(
+            Star(
+                # Image coordinates: y grows downward, which is why this reads clockwise.
+                x=centre_x + (star.x - centre_x) * cos - (star.y - centre_y) * sin,
+                y=centre_y + (star.x - centre_x) * sin + (star.y - centre_y) * cos,
+                flux=star.flux,
+            )
+            for star in self.stars
+        )
+        return replace(self, stars=turned)
 
     def render(
         self, position: float, *, frame: int = 0, noise: bool = True, bin: int = 1
