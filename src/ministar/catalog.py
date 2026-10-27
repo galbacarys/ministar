@@ -57,6 +57,31 @@ DEFAULT_TARGET_TYPES = (
     "*Ass",
 )
 
+#: Human-readable names for OpenNGC's type codes.
+#:
+#: The raw codes are terse to the point of being unreadable in a list ('G', 'Cl+N',
+#: '*Ass'). A picker that says "Galaxy" is the difference between someone using the
+#: filter and abandoning it.
+TYPE_LABELS = {
+    "G": "Galaxy",
+    "GPair": "Galaxy pair",
+    "GTrpl": "Galaxy triplet",
+    "GGroup": "Galaxy group",
+    "OCl": "Open cluster",
+    "GCl": "Globular cluster",
+    "Cl+N": "Cluster + nebulosity",
+    "PN": "Planetary nebula",
+    "HII": "HII region",
+    "SNR": "Supernova remnant",
+    "Neb": "Nebula",
+    "RfN": "Reflection nebula",
+    "EmN": "Emission nebula",
+    "DrkN": "Dark nebula",
+    "Ass": "Stellar association",
+    "*Ass": "Asterism",
+    "*": "Star",
+}
+
 #: Artefacts rather than objects.
 EXCLUDED_TYPES = frozenset({"Dup", "NonEx"})
 
@@ -215,6 +240,7 @@ __all__ = [
     "COMMON_TYPES",
     "DEFAULT_TARGET_TYPES",
     "EXCLUDED_TYPES",
+    "TYPE_LABELS",
     "Target",
     "catalog",
     "load_catalog",

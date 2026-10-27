@@ -21,7 +21,7 @@ from nicegui import ui
 
 from ministar import preflight as preflight_checks
 from ministar import sky as sky_module
-from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, catalog
+from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
 from ministar.config import Settings
 from ministar.session import Phase, SessionState
 from ministar.site import Site, site_path
@@ -84,7 +84,7 @@ def _table_row(index: int, row: Row) -> dict[str, object]:
     return {
         "key": f"{index}-{row.target.name}",
         "label": row.target.label,
-        "type": row.target.type,
+        "type": TYPE_LABELS.get(row.target.type, row.target.type),
         "size": _UNKNOWN_SIZE if row.size_arcmin is None else round(row.size_arcmin, 2),
         "mag": _UNKNOWN_MAG if row.magnitude is None else round(row.magnitude, 2),
         "band": row.magnitude_band or "-",
@@ -273,6 +273,28 @@ def render_setup(ctx: Context) -> None:
     _not_implemented("Head calibration profiles", "13-head-calibration.md")
 
 
+def _night_for(local_now: datetime, site: Site) -> tuple[datetime, datetime, str]:
+    """Astronomical darkness at the site, or a stated fallback.
+
+    Computed from the real date and the site's coordinates rather than assuming
+    20:00-04:00, because the assumption is wrong by hours at some times of year.
+    """
+    window = sky_module.astronomical_night(
+        local_now,
+        latitude_deg=site.latitude_deg,  # type: ignore[arg-type]
+        longitude_deg=site.longitude_deg,  # type: ignore[arg-type]
+    )
+    if window is not None:
+        return window[0], window[1], ""
+    fallback_start, fallback_end = sky_module.night_window(local_now)
+    return (
+        fallback_start,
+        fallback_end,
+        "no astronomical darkness at this site tonight (the sun never reaches -18 deg); "
+        "using an assumed 20:00-04:00 local window",
+    )
+
+
 def render_target(ctx: Context) -> None:
     """The target picker: real catalogue, real filters, tonight's visibility."""
     site = load_site(site_path(ctx.settings.paths.data))
@@ -287,14 +309,16 @@ def render_target(ctx: Context) -> None:
         ui.label("Catalogue is empty: third_party/openngc is missing.").classes("mn-warn")
         return
 
-    window_start, window_end = sky_module.night_window(datetime.now().astimezone())
+    window_start, window_end, window_note = _night_for(datetime.now().astimezone(), site)
     min_altitude = 25.0
 
     ui.label(f"site {site.describe()}").classes("mn-body")
     ui.label(
-        f"night {window_start:%H:%M}-{window_end:%H:%M} UTC   |   "
+        f"astronomical night {window_start:%H:%M}-{window_end:%H:%M} UTC   |   "
         f"{len(targets)} objects in catalogue"
     ).classes("mn-dim")
+    if window_note:
+        ui.label(window_note).classes("mn-warn")
 
     with ui.row().classes("items-end").style("gap: 12px; flex-wrap: wrap"):
         magnitude = ui.number("max magnitude", value=10.0, min=0.0, max=20.0, step=0.5).classes(
@@ -311,32 +335,33 @@ def render_target(ctx: Context) -> None:
         )
         search = ui.input("search").classes("mn-body")
 
-    # Defaults exclude individual stars: the catalogue has 547 of them and they would
+    # Human labels: the raw codes ('G', 'Cl+N', '*Ass') are unreadable in a list.
+    # Defaults exclude individual stars, of which the catalogue has 547 -- they would
     # otherwise fill the top of a magnitude-sorted list with Sirius and Rigel.
+    type_options = {code: TYPE_LABELS.get(code, code) for code in sorted(COMMON_TYPES)}
     types = (
         ui.select(
-            sorted(COMMON_TYPES),
+            type_options,
             multiple=True,
             value=sorted(DEFAULT_TARGET_TYPES),
-            label="types (none = all)",
+            label="object types (none = all)",
         )
         .classes("mn-body")
         .style("min-width: 320px")
     )
 
     summary = ui.label("").classes("mn-dim")
-    chosen = ui.label("").classes("mn-body")
+    selected_line = ui.label("no object selected - click a row").classes("mn-body")
 
     table = (
         ui.table(
             columns=TARGET_COLUMNS,
             rows=[],
             row_key="key",
-            selection="single",
             pagination=25,
         )
         .classes("mn-body")
-        .style("width: 100%")
+        .style("width: 100%; cursor: pointer")
     )
 
     # The expensive pass, once. Sliders only re-run the cheap filter below.
@@ -367,20 +392,28 @@ def render_target(ctx: Context) -> None:
             f"(cap {TARGET_TABLE_LIMIT}; loosen a filter to see more)"
         )
 
-    def on_select(event) -> None:
-        picked = getattr(event, "selection", None) or []
-        if not picked:
+    def on_row_click(event) -> None:
+        # Quasar emits rowClick with (evt, row, index). Pick the dict by shape rather
+        # than position, so the handler does not depend on argument order.
+        row = next(
+            (
+                argument
+                for argument in (getattr(event, "args", None) or [])
+                if isinstance(argument, dict) and "ra" in argument
+            ),
+            None,
+        )
+        if row is None:
             return
-        row = picked[0]
         ctx.state.target_name = str(row.get("label") or "")
         ctx.state.target_ra_deg = float(row["ra"])
         ctx.state.target_dec_deg = float(row["dec"])
-        chosen.text = (
-            f"selected: {ctx.state.target_name}  "
-            f"({ctx.state.target_ra_deg:.3f}, {ctx.state.target_dec_deg:.3f})"
+        selected_line.text = (
+            f"selected: {ctx.state.target_name}   "
+            f"RA {ctx.state.target_ra_deg:.3f}   Dec {ctx.state.target_dec_deg:+.3f}"
         )
 
-    table.on("select", on_select)
+    table.on("rowClick", on_row_click)
     for widget in (magnitude, visible, smallest, largest, search, types):
         widget.on_value_change(lambda _event: refresh_rows())
 

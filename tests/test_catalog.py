@@ -114,3 +114,12 @@ def test_default_target_types_drop_bare_stars_but_keep_asterisms() -> None:
     assert "*" not in DEFAULT_TARGET_TYPES
     assert "*Ass" in DEFAULT_TARGET_TYPES
     assert set(DEFAULT_TARGET_TYPES) <= set(COMMON_TYPES)
+
+
+def test_every_selectable_type_has_a_human_label() -> None:
+    from ministar.catalog import TYPE_LABELS
+
+    missing = [code for code in COMMON_TYPES if code not in TYPE_LABELS]
+    assert not missing, f"unlabelled types would render as raw codes: {missing}"
+    assert TYPE_LABELS["G"] == "Galaxy"
+    assert TYPE_LABELS["Neb"] == "Nebula"

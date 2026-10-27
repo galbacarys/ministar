@@ -138,3 +138,60 @@ def test_site_coordinates_are_never_defaulted(func, params) -> None:
         assert signature.parameters[name].default is inspect.Parameter.empty, (
             f"{func.__name__}({name}) must not have a default"
         )
+
+
+# -- the sun, and tonight's darkness ----------------------------------------
+def test_sun_is_above_the_horizon_at_local_noon_and_below_at_midnight() -> None:
+    from datetime import timedelta
+
+    from ministar.sky import sun_altitude_deg
+
+    # Longitude 0 so 12:00 UTC IS solar noon; otherwise "noon" is up to 5 h off.
+    lat, lon = 45.0, 0.0
+    local_noon = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    midnight = local_noon + timedelta(hours=12)
+    assert sun_altitude_deg(local_noon, latitude_deg=lat, longitude_deg=lon) > 10.0
+    assert sun_altitude_deg(midnight, latitude_deg=lat, longitude_deg=lon) < 0.0
+
+
+def test_astronomical_night_edges_sit_at_minus_18_degrees() -> None:
+    from ministar.sky import astronomical_night, sun_altitude_deg
+
+    lat, lon = 45.0, -77.0
+    window = astronomical_night(
+        datetime(2026, 10, 27, 21, tzinfo=UTC),
+        latitude_deg=lat,
+        longitude_deg=lon,
+    )
+    assert window is not None
+    start, end = window
+    assert start < end
+    for edge in (start, end):
+        assert sun_altitude_deg(edge, latitude_deg=lat, longitude_deg=lon) == pytest.approx(
+            -18.0, abs=0.1
+        )
+
+
+def test_astronomical_night_length_is_plausible_in_late_october() -> None:
+    from ministar.sky import astronomical_night
+
+    window = astronomical_night(
+        datetime(2026, 10, 27, 21, tzinfo=UTC), latitude_deg=45.0, longitude_deg=-77.0
+    )
+    assert window is not None
+    hours = (window[1] - window[0]).total_seconds() / 3600
+    assert 9.0 < hours < 12.0
+
+
+def test_no_astronomical_night_at_high_latitude_in_midsummer() -> None:
+    """The honest answer is 'none', not a fabricated window."""
+    from ministar.sky import astronomical_night
+
+    assert (
+        astronomical_night(
+            datetime(2026, 6, 21, 22, tzinfo=UTC),
+            latitude_deg=70.0,
+            longitude_deg=20.0,
+        )
+        is None
+    )
