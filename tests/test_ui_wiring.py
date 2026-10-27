@@ -57,3 +57,15 @@ def test_a_new_session_starts_at_the_first_phase() -> None:
     assert state.phase is ORDER[0]
     assert state.phase is Phase.PREFLIGHT
     assert isinstance(state.can_advance(), bool)
+
+
+def test_type_dropdown_choices_map_to_filters() -> None:
+    """'(all)' must genuinely mean all, including the stars the default hides."""
+    from ministar.catalog import DEFAULT_TARGET_TYPES
+    from ministar.ui.screens import ALL_TYPES, DEEP_SKY_PRESET, types_for
+
+    assert types_for(None) is None
+    assert types_for("") is None
+    assert types_for(ALL_TYPES) is None
+    assert types_for(DEEP_SKY_PRESET) == frozenset(DEFAULT_TARGET_TYPES)
+    assert types_for("PN") == frozenset({"PN"})

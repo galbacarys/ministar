@@ -37,6 +37,26 @@ from ministar.ui.station import Station
 #: wasteful; the cap is reported on screen so nothing disappears silently.
 TARGET_TABLE_LIMIT = 300
 
+#: Sentinel choices in the object-type dropdown. A multi-select of every code rendered
+#: sixteen chips and overflowed the panel, so the control is single-select and offers
+#: presets: one chip on screen whatever the catalogue contains.
+ALL_TYPES = "(all)"
+DEEP_SKY_PRESET = "(deep sky)"
+
+
+def types_for(choice: str | None) -> frozenset[str] | None:
+    """Map a dropdown choice to a type filter. ``None`` means no constraint.
+
+    "(all)" must mean *all*, including the 547 individual stars that the deep-sky
+    default hides -- otherwise the option would silently lie about its name.
+    """
+    if not choice or choice == ALL_TYPES:
+        return None
+    if choice == DEEP_SKY_PRESET:
+        return frozenset(DEFAULT_TARGET_TYPES)
+    return frozenset({choice})
+
+
 #: Sentinels so a numeric column still sorts while meaning "unknown". The column
 #: formatters render them as "--".
 _UNKNOWN_SIZE = -1.0
@@ -338,16 +358,15 @@ def render_target(ctx: Context) -> None:
     # Human labels: the raw codes ('G', 'Cl+N', '*Ass') are unreadable in a list.
     # Defaults exclude individual stars, of which the catalogue has 547 -- they would
     # otherwise fill the top of a magnitude-sorted list with Sirius and Rigel.
-    type_options = {code: TYPE_LABELS.get(code, code) for code in sorted(COMMON_TYPES)}
+    type_options = {
+        ALL_TYPES: "all types",
+        DEEP_SKY_PRESET: "deep sky (recommended)",
+        **{code: TYPE_LABELS.get(code, code) for code in sorted(COMMON_TYPES)},
+    }
     types = (
-        ui.select(
-            type_options,
-            multiple=True,
-            value=sorted(DEFAULT_TARGET_TYPES),
-            label="object types (none = all)",
-        )
+        ui.select(type_options, value=DEEP_SKY_PRESET, label="object type")
         .classes("mn-body")
-        .style("min-width: 320px")
+        .style("width: 300px")
     )
 
     summary = ui.label("").classes("mn-dim")
@@ -370,13 +389,12 @@ def render_target(ctx: Context) -> None:
     )
 
     def current_filters() -> TargetFilters:
-        selected = types.value or []
         return TargetFilters(
             max_magnitude=magnitude.value if magnitude.value else None,
             min_size_arcmin=smallest.value or None,
             # The max-size box starts above HUGE_ARCMIN, i.e. "no upper limit".
             max_size_arcmin=largest.value if largest.value and largest.value < 600 else None,
-            types=frozenset(selected) if selected else None,
+            types=types_for(types.value),
             search=search.value or "",
             min_visible_minutes=float(visible.value or 0.0),
             min_altitude_deg=min_altitude,
