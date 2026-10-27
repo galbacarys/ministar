@@ -93,6 +93,15 @@ class FakeCamera:
     def field(self) -> StarField:
         return self._field
 
+    def iso_options(self) -> tuple[int, ...]:
+        """The ISO values this body offers: powers of two x 100 up to 3200.
+
+        The real camera will answer from ``EdsGetPropertyDesc`` once that exists (brief 08
+        gap 1); until then a screen must be able to say "unknown" rather than invent a
+        list, which is why this is a capability the screen *asks about*.
+        """
+        return (100, 200, 400, 800, 1600, 3200)
+
     def connect(self) -> None:
         return None
 

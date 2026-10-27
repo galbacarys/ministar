@@ -255,3 +255,32 @@ def test_selecting_a_target_unblocks_next_immediately(tmp_path) -> None:
     assert state.target_name == "M31"
     assert state.target_major_arcmin == 178.0
     assert nav_calls == [1], "the shell must be told, or NEXT never re-enables"
+
+
+# -- the parameters screen --------------------------------------------------
+def test_the_retained_frame_diagram_is_two_nested_rectangles() -> None:
+    """The only "preview" this screen needs: how much frame the interval costs."""
+    svg = screens.geometry_svg(5202, 3464, 3000, 3464)
+
+    assert svg.count("<rect") == 2
+    assert 'viewBox="0 0 5202 3464"' in svg, "the aspect ratio must be the sensor's"
+    assert 'x="1101.0"' in svg, "the retained rectangle is centred"
+
+
+def test_the_diagram_cannot_be_drawn_bigger_than_the_frame() -> None:
+    svg = screens.geometry_svg(1000, 500, 5000, 5000)
+
+    assert 'x="0.0"' in svg and 'y="0.0"' in svg
+    assert 'width="1000.0"' in svg and 'height="500.0"' in svg
+
+
+def test_an_exhausted_frame_draws_nothing_visible() -> None:
+    svg = screens.geometry_svg(1000, 500, -20, 500)
+
+    assert 'width="0.0"' in svg
+
+
+def test_the_fake_camera_offers_the_isos_the_screen_expects() -> None:
+    from ministar.ui.station import FakeCamera
+
+    assert FakeCamera().iso_options() == (100, 200, 400, 800, 1600, 3200)

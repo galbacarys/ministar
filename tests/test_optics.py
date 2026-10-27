@@ -193,3 +193,38 @@ def test_zero_sized_frames_are_refused() -> None:
         Optics.from_plate_scale(width_px=0, height_px=10, plate_scale_arcsec=1.0)
     with pytest.raises(ValueError):
         Optics.from_plate_scale(width_px=10, height_px=10, plate_scale_arcsec=0.0)
+
+
+# -- what the drift costs ---------------------------------------------------
+@pytest.mark.parametrize(
+    ("focal", "dec", "minutes", "published_mp"),
+    [
+        # Brief 10 §2.1b's measured table, same frame and drift assumption.
+        (50, 45, 5, 17.4),
+        (135, 45, 10, 14.6),
+        (200, 45, 5, 15.5),
+        (200, 0, 5, 14.5),
+        (400, 0, 2, 15.2),
+    ],
+)
+def test_usable_megapixels_reproduces_the_published_table(
+    focal: float, dec: float, minutes: float, published_mp: float
+) -> None:
+    optics = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=focal)
+
+    assert optics.usable_megapixels(dec_deg=dec, seconds=minutes * 60) == pytest.approx(
+        published_mp, rel=0.02
+    )
+
+
+def test_retained_fraction_collapses_to_zero_when_the_drift_exceeds_the_frame() -> None:
+    optics = Optics.from_pitch(width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=400)
+
+    assert optics.retained_fraction(dec_deg=0.0, seconds=60 * 60) == 0.0
+    assert optics.usable_megapixels(dec_deg=0.0, seconds=60 * 60) == 0.0
+
+
+def test_full_megapixels_is_the_frame_itself() -> None:
+    assert Optics.from_pitch(
+        width_px=5202, height_px=3464, pixel_um=4.3, focal_length_mm=200
+    ).full_megapixels() == pytest.approx(18.02, abs=0.01)

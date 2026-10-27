@@ -98,6 +98,19 @@ def snap_shutter(seconds: float) -> float:
     return min(TV_SECONDS, key=lambda tv: abs(math.log(tv) - target))
 
 
+def snap_shutter_down(seconds: float) -> float:
+    """The longest legal Tv that does **not exceed** ``seconds``.
+
+    ``snap_shutter`` picks the nearest value, which can be longer than asked for. For an
+    exposure ceiling that is the wrong direction: the limit came from trailing, so
+    rounding up would put streaks in the frame to save a third of a stop. This floors.
+    """
+    if seconds <= 0:
+        raise ValueError("exposure must be positive")
+    legal = [tv for tv in TV_SECONDS if tv <= seconds]
+    return legal[-1] if legal else TV_SECONDS[0]
+
+
 def label_for_seconds(seconds: float) -> str:
     """Human label for a Tv value, e.g. ``'2"'`` or ``'1/500'``."""
     snapped = snap_shutter(seconds)

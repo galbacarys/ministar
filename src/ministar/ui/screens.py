@@ -23,6 +23,7 @@ from ministar import preflight as preflight_checks
 from ministar import sky as sky_module
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
 from ministar.config import Settings
+from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
@@ -674,52 +675,125 @@ def render_target(ctx: Context) -> None:
     refresh_rows()
 
 
-def render_parameters(ctx: Context) -> None:
-    """The reframe interval, in seconds, clamped by what the chosen target allows.
+def geometry_svg(width_px: int, height_px: int, keep_width_px: float, keep_height_px: float) -> str:
+    """Two nested rectangles: the frame, and what survives the drift.
 
-    The ceiling is not a preference. Past the object's own window it leaves the frame,
-    so the slider cannot go there -- and when no rig profile is known the clamp is
-    absent and the screen says so instead of pretending to know.
+    Drawn in frame pixel units via ``viewBox`` so the aspect ratio is the sensor's, not
+    the container's -- a stretched frame would misrepresent how much is being lost. The
+    retained rectangle is centred, which is where the sky actually sits between reframes.
+    """
+    keep_w = max(0.0, min(float(width_px), keep_width_px))
+    keep_h = max(0.0, min(float(height_px), keep_height_px))
+    x = (width_px - keep_w) / 2.0
+    y = (height_px - keep_h) / 2.0
+    return (
+        f'<svg viewBox="0 0 {width_px} {height_px}" width="100%" '
+        f'style="max-width: 340px; height: auto; display: block">'
+        f'<rect x="0" y="0" width="{width_px}" height="{height_px}" '
+        f'fill="#2a0a0c" stroke="#7a241c" stroke-width="2"/>'
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{keep_w:.1f}" height="{keep_h:.1f}" '
+        f'fill="#a33226" fill-opacity="0.55" stroke="#ff5a4d" stroke-width="2"/>'
+        "</svg>"
+    )
+
+
+def render_parameters(ctx: Context) -> None:
+    """What the evening costs: exposure, ISO, how often to reframe, and what is left.
+
+    Nothing here is a free choice. The focal length is measured, not asked for; the
+    exposure is the longest sub the trailing budget allows, floored to a legal shutter
+    speed; the interval is capped by the target's own size; and the megapixel readout is
+    the consequence of the interval rather than a separate setting.
     """
     profile = load_rig(rig_path(ctx.settings.paths.data))
     optics = profile.optics() if profile is not None else None
+    dec = ctx.state.target_dec_deg
 
-    _field(ctx, "focal length (mm)", "focal_length_mm", kind="number")
-    _field(ctx, "exposure (s)", "exposure_s", kind="number")
-    _field(ctx, "ISO", "iso", kind="number")
-
-    if profile is None:
-        ui.label(
-            "no rig profile: the interval cannot be checked against the target's size"
-        ).classes("mn-warn")
-    else:
+    ui.label(
+        f"focal length {profile.focal_length_mm:g} mm   "
+        f"(measured from a test frame, {profile.source})"
+        if profile is not None and profile.focal_length_mm
+        else "no measured focal length: SETUP reads one from a test frame"
+    ).classes("mn-body" if profile is not None and profile.focal_length_mm else "mn-warn")
+    if profile is not None:
+        ctx.state.focal_length_mm = profile.focal_length_mm
         ui.label(f"frame {profile.describe()}").classes("mn-dim")
 
+    # -- exposure: the trailing ceiling, floored to a legal Tv --------------
+    if optics is not None and dec is not None:
+        choice = choose_exposure(optics, dec)
+        ctx.state.exposure_s = choice.seconds
+        ui.label(
+            f"exposure {choice.label}   (2 px of trailing allows {choice.ceiling_s:.2f} s; "
+            f"this frame trails {choice.trail_px:.1f} px)"
+        ).classes("mn-body")
+    else:
+        ui.label("exposure needs a rig profile and a target's declination").classes("mn-warn")
+
+    # -- ISO: only the values the body says it has --------------------------
+    camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
+    reporter = getattr(camera, "iso_options", None)
+    values = tuple(reporter()) if callable(reporter) else ()
+    if values:
+        current = ctx.state.iso if ctx.state.iso in values else values[len(values) // 2]
+        ctx.state.iso = current
+        ui.select(
+            {value: str(value) for value in values},
+            value=current,
+            label="ISO",
+            on_change=lambda event: setattr(ctx.state, "iso", int(event.value)),
+        ).classes("mn-body")
+    else:
+        ui.label(
+            "this body cannot report its ISO values yet (EdsGetPropertyDesc pending, 08 gap 1)"
+        ).classes("mn-warn")
+
+    # -- the interval, capped by the target's own window --------------------
     ceiling: float | None = None
-    if (
-        optics is not None
-        and ctx.state.target_major_arcmin is not None
-        and ctx.state.target_dec_deg is not None
-    ):
+    if optics is not None and ctx.state.target_major_arcmin is not None and dec is not None:
         ceiling = optics.window_seconds_for(
             major_arcmin=ctx.state.target_major_arcmin,
             minor_arcmin=ctx.state.target_minor_arcmin,
-            dec_deg=ctx.state.target_dec_deg,
+            dec_deg=dec,
         )
 
     max_min = interval_slider_max_minutes(ceiling)
-    current = float(ctx.state.reframe_interval_s or 300.0) / 60.0
-    value = int(min(max(1.0, round(current)), max_min))
+    current_min = float(ctx.state.reframe_interval_s or 300.0) / 60.0
+    value = int(min(max(1.0, round(current_min)), max_min))
 
-    if ceiling is None:
-        ui.label("select a target to see how long it allows between reframes").classes("mn-body")
-    else:
-        ui.label(
-            f"{ctx.state.target_name or 'the target'} allows up to {ceiling / 60:.0f} min "
-            f"({ceiling:.0f} s) between reframes"
-        ).classes("mn-body")
+    ui.label(
+        f"{ctx.state.target_name or 'the target'} allows up to {ceiling / 60:.0f} min "
+        f"({ceiling:.0f} s) between reframes"
+        if ceiling is not None
+        else "select a target to see how long it allows between reframes"
+    ).classes("mn-body")
 
     hint = ui.label("").classes("mn-dim")
+
+    @ui.refreshable
+    def retained() -> None:
+        """How much frame is left at the chosen interval -- the cost, made visible."""
+        seconds = float(ctx.state.reframe_interval_s or 300.0)
+        if optics is None or dec is None:
+            ui.label("usable megapixels need a rig profile and a target").classes("mn-warn")
+            return
+        usable = optics.usable_megapixels(dec_deg=dec, seconds=seconds)
+        full = optics.full_megapixels()
+        drift = optics.drift_px(dec_deg=dec, seconds=seconds)
+        ui.html(
+            geometry_svg(
+                optics.width_px,
+                optics.height_px,
+                optics.width_px - drift,
+                optics.height_px,
+            )
+        )
+        kept = 100.0 * usable / full if full else 0.0
+        ui.label(
+            f"{usable:.1f} of {full:.1f} MP usable   ({kept:.0f}% of the frame, "
+            f"{drift:.0f} px of drift)"
+        ).classes("mn-metrics")
+        ctx.state.usable_mp = usable
 
     def describe(minutes: float) -> str:
         return f"taking a frame every {minutes:.0f} min ({minutes * 60:.0f} s)"
@@ -728,6 +802,7 @@ def render_parameters(ctx: Context) -> None:
         minutes = float(event.value)
         ctx.state.reframe_interval_s = minutes * 60.0
         hint.text = describe(minutes)
+        retained.refresh()
 
     ui.slider(min=1, max=max_min, step=1, value=value, on_change=changed).props(
         "label-always"
@@ -738,7 +813,7 @@ def render_parameters(ctx: Context) -> None:
     # no interval was chosen.
     ctx.state.reframe_interval_s = float(value) * 60.0
 
-    _not_implemented("Usable-megapixel preview", "10-target-catalog-and-reframe-envelope.md")
+    retained()
 
 
 def render_focus(ctx: Context) -> None:

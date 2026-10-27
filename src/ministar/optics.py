@@ -216,6 +216,42 @@ class Optics:
     ) -> float:
         return self.window_seconds(fill=self.fill(major_arcmin, minor_arcmin), dec_deg=dec_deg)
 
+    def drift_px(self, *, dec_deg: float, seconds: float) -> float:
+        """How far the sky moves in ``seconds``, in pixels.
+
+        Drift along the long axis is the planning assumption throughout (brief 10
+        §2.1c: rotate the camera and it is a five-second action), so this is one
+        scalar rather than a vector.
+        """
+        return self.drift_arcsec_per_s(dec_deg) * seconds / self.plate_scale_arcsec
+
+    def retained_fraction(self, *, dec_deg: float, seconds: float) -> float:
+        """Fraction of the frame covered by **every** frame in a run of that interval.
+
+        The intersection of two rectangles offset by the drift is itself a rectangle, so
+        this is exact rather than an estimate: ``(W - dx)(H - dy) / (W H)`` with the
+        drift on the long axis.
+        """
+        dx = min(self.width_px, self.drift_px(dec_deg=dec_deg, seconds=seconds))
+        return max(0.0, (self.width_px - dx) / self.width_px)
+
+    def usable_megapixels(self, *, dec_deg: float, seconds: float) -> float:
+        """Megapixels left after the drift, which is what the user actually loses.
+
+        Percentages are abstract; a frame collapsing from 18 MP to 3.9 MP is not. The
+        number reaches zero once the drift exceeds the frame, which is the other reason
+        the interval slider needs a ceiling.
+        """
+        return (
+            self.width_px
+            * self.height_px
+            * self.retained_fraction(dec_deg=dec_deg, seconds=seconds)
+            / 1e6
+        )
+
+    def full_megapixels(self) -> float:
+        return self.width_px * self.height_px / 1e6
+
     def max_fill(self, *, dec_deg: float, min_window_s: float) -> float:
         """The largest fill that still leaves ``min_window_s`` between reframes."""
         rate = self.drift_arcsec_per_s(dec_deg)
