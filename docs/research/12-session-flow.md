@@ -390,8 +390,47 @@ The run available is the **chord** of the frame along the drift, `min(W/|ux|, H/
 the projection `|ux|W + |uy|H`. The two agree at roll 0 and 90 deg and disagree everywhere
 else by hundreds of pixels, which is why the bug was invisible in the axis-aligned case.
 
-**Open question this raised.** The chord is longest along the frame *diagonal* (6228 px at the
-corner angle against 5183 px along the long axis, ~20% more run), not along the long axis that
-`roll_advice` targets. "Align the drift with the long side" is therefore a near-optimum, not
-the optimum -- left alone here because the diagonal case also clips the trailing star trails
-earlier, which the model does not yet describe.
+**Settled: the long axis is right, and it is provably area-optimal.** The chord is longest
+along the frame *diagonal* (6228 px at the corner angle against 5183 px along the long axis,
+~20% more run), which briefly looked like an argument for rolling diagonally. It is not, once
+the cost is counted in pixels rather than seconds: the kept fraction of a run is
+`(W - D|ux|)(H - D|uy|)`, so the area lost per unit drift is `D(W|uy| + H|ux|)`, minimised at
+`|uy| = 0` -- drift along the long side. For a 5184x3456 frame that is 3455 units of loss per
+unit of drift against 5084 on the diagonal, so the diagonal pays **47% more pixels** for its
+20% longer run. At 135 mm a 20-minute run is already short of the 60-minute ceiling, so the
+extra run is worth nothing and the pixels are worth a great deal: **align with the long axis**.
+
+---
+
+# Field rotation: why the usable-frame number is optimistic near the pole
+
+`optics.retained_fraction` models the run as a straight translation, which is exact for
+translation and says nothing about *rotation*. The camera's footprint does not slide across
+the sky -- it rotates about the celestial pole, so the sky content turns inside the frame while
+it drifts (`theta = 15.0411 deg/h * t`, independent of declination).
+
+Measured by clipping the frame against its own displaced-and-rotated copies over the interval
+(`/tmp/rot.py`: build the footprint in sky coordinates, rotate about the pole, project into the
+target-centred tangent plane, intersect):
+
+| frame | dec | interval | straight-line model | measured | |
+|---|---|---|---|---|---|
+| 135 mm | 0 | 20 min | 48.6% | 51.1% | model pessimistic |
+| 135 mm | 41 | 20 min | 61.4% | 62.2% | within a point |
+| 400 mm | 0 | 10 min | 23.9% | 24.5% | within a point |
+| 135 mm | 70 | 60 min | 47.3% | 45.7% | model slightly optimistic |
+| 135 mm | 85 | 60 min | 86.6% | 80.4% | **6 points optimistic** |
+| 135 mm | 89 | 60 min | 97.3% | 88.2% | **9 points optimistic** |
+
+The control that proves rotation is in the measurement: at dec 89 the drift is 0.2% of a frame
+per 20 min, so the straight-line model says "nothing happens" (99.1%) while the measured figure
+is 95.5% -- rotation alone.
+
+So: at mid declinations and quarter-hour intervals -- where this rig actually works -- the
+closed form is right to within a percentage point, and the rectangle it draws *is* the kept
+region. Near the pole it is wrong twice over: the number is optimistic, and the kept region is
+an octagon (frame intersected with its own rotation), not a rectangle. The written rule:
+
+- `|dec| < 75 deg` or interval < 30 min: straight-line model, rectangle, no caveat.
+- Otherwise: say so on PARAMETERS, because "the object barely drifts" is not "the frame is
+  intact" -- near the pole it turns instead.

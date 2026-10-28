@@ -40,7 +40,7 @@ def gnomonic(ra0_deg: float, dec0_deg: float, ra_deg, dec_deg) -> tuple[np.ndarr
     ra0 = math.radians(ra0_deg)
     dec0 = math.radians(dec0_deg)
     delta_ra = ra - ra0
-    d = math.sin(dec0) * np.sin(dec) + math.cos(dec0) * np.cos(dec) * math.cos(delta_ra)
+    d = np.sin(dec0) * np.sin(dec) + np.cos(dec0) * np.cos(dec) * np.cos(delta_ra)
     xi = np.cos(dec) * np.sin(delta_ra) / d
     eta = (np.sin(dec) * math.cos(dec0) - np.cos(dec) * math.sin(dec0) * np.cos(delta_ra)) / d
     return xi, eta
@@ -64,15 +64,7 @@ class TangentPlane:
 
     def project(self, ra_deg: np.ndarray, dec_deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Sky positions to 0-based pixel coordinates ``(x, y)``."""
-        ra = np.radians(np.asarray(ra_deg, dtype=float))
-        dec = np.radians(np.asarray(dec_deg, dtype=float))
-        ra0 = math.radians(self.ra_deg)
-        dec0 = math.radians(self.dec_deg)
-        delta_ra = ra - ra0
-
-        d = math.sin(dec0) * np.sin(dec) + math.cos(dec0) * np.cos(dec) * np.cos(delta_ra)
-        xi = np.cos(dec) * np.sin(delta_ra) / d
-        eta = (np.sin(dec) * math.cos(dec0) - np.cos(dec) * math.sin(dec0) * np.cos(delta_ra)) / d
+        xi, eta = gnomonic(self.ra_deg, self.dec_deg, ra_deg, dec_deg)
 
         pa = math.radians(self.pa_y_deg)
         # Rotate the sky offset into the image axes: +y is at pa_y, +x is 90 deg from it.

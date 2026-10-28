@@ -816,3 +816,13 @@ design stance; excluding does not.
   were 180 s at 100 mm, so tracking exists in their workflow)? The envelope model assumes a
   fixed camera; a tracked session makes drift ≈ 0 and the whole feature collapses to "pick a
   target". Keep the model untracked-only and treat tracking as out of scope.
+
+## The envelope assumes translation; rotation is the pole's problem
+
+`retained_fraction` is exact for a pure translation of the frame and blind to rotation, which
+is the right approximation at mid declinations (`12 §Field rotation` has the measurements:
+within 1 point at dec 41 for 20 min). It becomes optimistic by 6-9 points within an hour of
+dec 85-89, where the drift rate `15.04 cos(dec)` correctly approaches zero and the frame is
+then doing something the model has no term for: turning. Any target whose declination puts it
+inside the pole's rotation zone needs that caveat next to the number rather than a silently
+confident megapixel count.
