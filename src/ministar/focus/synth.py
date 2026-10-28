@@ -101,6 +101,33 @@ class StarField:
             stars.append(Star(x=x, y=y, flux=float(min(flux, flux_max))))
         return cls(stars=tuple(stars), shape=shape, seed=seed, **kwargs)  # type: ignore[arg-type]
 
+    @classmethod
+    def from_stars(
+        cls,
+        x_px,
+        y_px,
+        mag,
+        *,
+        shape: tuple[int, int],
+        best_position: int = 24,
+        mag_zero: float = 6.0,
+        flux_at_mag_zero: float = 620.0,
+        **kwargs: object,
+    ) -> StarField:
+        """A scene from catalogue stars already projected into this frame's pixels.
+
+        Flux follows the magnitude scale (``10**(-0.4 dmag)``) and is scaled so a mag-6 star
+        peaks just under the 8-bit ceiling at best focus: bright stars clip, faint ones sit
+        at the noise, which is what a real live view looks like and what keeps the star
+        detector honest.
+        """
+        fluxes = flux_at_mag_zero * 10.0 ** (-0.4 * (np.asarray(mag, dtype=float) - mag_zero))
+        stars = tuple(
+            Star(x=float(x), y=float(y), flux=float(flux))
+            for x, y, flux in zip(x_px, y_px, fluxes, strict=True)
+        )
+        return cls(stars=stars, shape=shape, best_position=best_position, **kwargs)  # type: ignore[arg-type]
+
     # -- the optics model ---------------------------------------------------
     def sigma_px(self, position: float) -> float:
         """PSF width at a focus position. Never below the at-focus value."""

@@ -963,7 +963,17 @@ def render_point(ctx: Context) -> None:
 
     ui.button("roll is aligned, solve", on_click=goto_solve).classes("mn-action")
 
+    def aim_fake() -> None:
+        """Point the fake telescope where the session is pointed, so the view is the target."""
+        camera = getattr(station, "camera", None) if station is not None else None
+        setter = getattr(camera, "set_pointing", None)
+        if setter is None or camera.pointing is not None:
+            return
+        if ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None:
+            setter(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+
     def tick() -> None:
+        aim_fake()
         snapshot = station.snapshot() if station is not None else None
         if snapshot is not None and snapshot.data_uri:
             preview.source = snapshot.data_uri
@@ -1019,15 +1029,25 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     if ctx.settings.astap is None:
         return None, "astap_cli.exe not found -- run preflight"
 
+    # The fake camera is aimed here rather than on a tripod: point it where the user pointed.
+    if (
+        getattr(camera, "set_pointing", None) is not None
+        and ctx.state.target_ra_deg is not None
+        and ctx.state.target_dec_deg is not None
+    ):
+        camera.set_pointing(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-    raw = ctx.settings.paths.frames / f"point_{stamp}.cr2"
+    suffix = ".fit" if getattr(camera, "disposable_frames", False) else ".cr2"
+    raw = ctx.settings.paths.frames / f"point_{stamp}{suffix}"
     try:
         camera.capture_to(raw)
-        converted = (
-            convert_to_fits(raw, dcraw=ctx.settings.dcraw)
-            if ctx.settings.dcraw is not None
-            else raw
-        )
+        if raw.suffix.lower() in {".fit", ".fits"}:
+            converted = raw  # the fake writes what ASTAP reads directly
+        elif ctx.settings.dcraw is not None:
+            converted = convert_to_fits(raw, dcraw=ctx.settings.dcraw)
+        else:
+            converted = raw
         profile = rig_for(ctx)
         hints = None
         if profile is not None:
@@ -1039,6 +1059,10 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
             out_base=ctx.settings.paths.scratch / f"point_{stamp}",
             hints=hints,
         )
+        # Synthetic frames are not imaging: delete the capture once it has been solved.
+        # The .ini/.wcs in scratch stay, because they are the evidence.
+        if getattr(camera, "disposable_frames", False):
+            converted.unlink(missing_ok=True)
     except Exception as exc:  # a failed capture must not take the page down
         return None, f"solve failed: {type(exc).__name__}: {exc}"
 

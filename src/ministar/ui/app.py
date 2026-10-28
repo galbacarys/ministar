@@ -145,8 +145,15 @@ def run(
 
     fake_rig = RigProfile.fake() if fake else None
     if fake:
-        camera = FakeCamera()
-        initial_error = ""
+        # The fake shows the real sky when a star database is installed, which is what makes
+        # its captures solvable. Without one it still runs, with random stars and no solving.
+        from ministar.starcatalog import find_catalog
+
+        catalog = find_catalog(settings, cache=settings.paths.data / "star-index.json")
+        camera = FakeCamera(optics=fake_rig.optics() if fake_rig else None, catalog=catalog)
+        initial_error = (
+            "" if catalog is not None else "no ASTAP star database: fake frames cannot be solved"
+        )
     else:
         from ministar.camera import EdsdkCamera
 

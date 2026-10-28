@@ -12,10 +12,12 @@ Kept separate from any screen so that several screens can share one camera
 from __future__ import annotations
 
 import base64
+import math
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 import numpy as np
 
@@ -78,15 +80,37 @@ class FakeCamera:
         seed: int = 1,
         count: int = 60,
         roll_deg: float = 0.0,
+        #: With a catalogue and a rig, the fake shows the *real* sky it is pointed at, which
+        #: is what makes its captures solvable. Without them it shows random stars, which
+        #: cannot be solved -- and says so rather than producing a mysterious failure.
+        catalog=None,
+        optics=None,
+        pointing: tuple[float, float] | None = None,
+        mag_limit: float = 11.0,
+        #: Flux of a magnitude-0 star. Calibrated so a mag-11 star clears five sigma of the
+        #: read noise in a 2 s frame: fainter than that and the solver correctly reports "not
+        #: enough stars", which is a fake-frame artefact rather than a pipeline problem.
+        flux_at_mag_zero: float = 6200.0,
     ) -> None:
         self._position = 0
         self._frames = 0
+        self._best = best
         #: Camera roll as seen from behind the camera, counter-clockwise positive. Zero is
         #: the common case for a real user clamping a lens on level ground, so it is the
         #: default the roll page can be tried against.
         self._roll = float(roll_deg)
+        self._catalog = catalog
+        self._optics = optics
+        self._pointing = pointing
+        self._mag_limit = mag_limit
+        self._flux_at_mag_zero = float(flux_at_mag_zero)
+        self._scene: StarField | None = None
+        self._scene_key: tuple | None = None
         self._field = StarField.random(count=count, seed=seed, shape=shape, best_position=best)
         self.name = "Fake EOS (synthetic)"
+
+    #: Frames this camera writes are synthetic and worthless once solved.
+    disposable_frames = True
 
     connected = True
 
@@ -103,8 +127,84 @@ class FakeCamera:
         return self._roll
 
     def set_roll(self, degrees: float) -> None:
-        """Turn the fake camera. Real cameras are turned by hand; this is the stand-in."""
+        """Turn the fake camera. Real cameras are turned by hand; this is the stand-in.
+
+        For the fake, the roll *is* the position angle of the image's +y axis: there is no
+        ground frame to relate it to, and the projection needs exactly that quantity.
+        """
         self._roll = float(degrees) % 360.0
+
+    def set_pointing(self, ra_deg: float, dec_deg: float) -> None:
+        """Aim the fake camera. A real one is aimed by the user on the tripod."""
+        self._pointing = (float(ra_deg), float(dec_deg))
+
+    @property
+    def pointing(self) -> tuple[float, float] | None:
+        return self._pointing
+
+    def scene(self) -> StarField:
+        """The current field, rebuilt when the pointing or roll changes."""
+        if self._catalog is None or self._optics is None or self._pointing is None:
+            return self._field.rotated(-self._roll)
+        key = (self._pointing, round(self._roll, 3))
+        if self._scene is None or self._scene_key != key:
+            from ministar.projection import TangentPlane, stars_in_frame
+
+            ra0, dec0 = self._pointing
+            plane = TangentPlane(
+                ra_deg=ra0,
+                dec_deg=dec0,
+                pa_y_deg=self._roll,
+                plate_scale_arcsec=self._optics.plate_scale_arcsec,
+                width_px=self._optics.width_px,
+                height_px=self._optics.height_px,
+            )
+            radius = 0.5 * math.hypot(
+                self._optics.width_arcmin / 60.0, self._optics.height_arcmin / 60.0
+            )
+            stars = self._catalog.stars_near(ra0, dec0, radius, mag_limit=self._mag_limit)
+            x, y, mag = stars_in_frame(stars.ra_deg, stars.dec_deg, stars.mag, plane)
+            self._scene = StarField.from_stars(
+                x,
+                y,
+                mag,
+                shape=(plane.height_px, plane.width_px),
+                best_position=self._best,
+                flux_at_mag_zero=self._flux_at_mag_zero,
+            )
+            self._scene_key = key
+        return self._scene.rotated(0.0)
+
+    def capture_to(self, path) -> Path:
+        """Write a solvable frame, through the same API the real camera offers.
+
+        FITS rather than RAW: the fake has no sensor to decode, and FITS is what the rest of
+        the pipeline consumes, so the capture path is exercised end to end without a codec.
+        No WCS is written -- the solver has to find the stars itself, which is the point.
+        """
+        from pathlib import Path as _Path
+
+        from ministar.io.fits import write_fits
+
+        scene = self.scene()
+        if self._catalog is None:
+            raise RuntimeError(
+                "fake camera has no star catalogue, so its frames cannot be solved "
+                "(point MINISTAR_ASTAP at an ASTAP install with a star database)"
+            )
+        image = (
+            np.clip(scene.render(self._position, frame=self._frames + 1), 0, 255).astype(np.uint16)
+            * 257
+        )  # 8-bit dynamic range spread over 16 bits, as a real sensor would be
+        cards = {
+            "INSTRUME": "Fake EOS",
+            "EXPTIME": 2.0,
+            "IMAGETYP": "LIGHT",
+            "ORIGIN": "ministar fake camera",
+            "SWCREATE": "ministar",
+        }
+        target = _Path(path)
+        return write_fits(target, image, cards)
 
     def render_frame(self) -> np.ndarray:
         """The scene as an 8-bit frame, rolled. Separate from JPEG so tests need no codec."""
