@@ -1001,6 +1001,16 @@ def render_point(ctx: Context) -> None:
             with ui.row().classes("items-center justify-center").style("gap: 6px"):
                 ui.button("aim at the target", on_click=aim_at_target).classes("mn-action")
                 ui.button("aim for the run", on_click=aim_for_run).classes("mn-action")
+
+            def toggle_drift(event) -> None:
+                camera.set_drift(bool(event.value))
+                tick()
+
+            ui.checkbox(
+                "let the sky move",
+                value=bool(getattr(camera, "drift", True)),
+                on_change=toggle_drift,
+            ).classes("mn-body")
             aim_advice = ui.label("").classes("mn-body")
         else:
             pointing_label = None
@@ -1093,8 +1103,16 @@ def render_point(ctx: Context) -> None:
                 where = (
                     f"alt {mount[0]:.1f} deg  az {mount[1]:.1f} deg   " if mount is not None else ""
                 )
+                motion = ""
+                rate_px = getattr(mount_camera, "drift_px_per_s", lambda: None)()
+                rate_as = getattr(mount_camera, "drift_arcsec_per_s", lambda: None)()
+                if getattr(mount_camera, "drift", False) and rate_px:
+                    motion = f'   sky moving west {rate_as:.1f}"/s ({rate_px:.2f} px/s)'
+                elif rate_px is not None:
+                    motion = "   sky held still"
                 pointing_label.text = (
                     f"telescope at {where}RA {aimed[0] / 15.0:.3f} h  Dec {aimed[1]:+.3f} deg"
+                    f"{motion}"
                 )
         q, roll = state
         advice = roll_advice(psi_deg=roll, parallactic_deg=q)

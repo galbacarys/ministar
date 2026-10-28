@@ -7,6 +7,7 @@ image +y axis, north up and east left, pixels 0-based with y downward.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC
 
 import numpy as np
@@ -222,3 +223,104 @@ def test_the_preview_follows_the_mount() -> None:
     after = camera.render_frame()
 
     assert not np.array_equal(before, after), "the preview must move with the mount"
+
+
+# -- the sky moves under a fixed mount --------------------------------------
+def _drifting_camera(start_ra=160.27, start_dec=41.27, catalog=None):
+    from datetime import datetime
+
+    from ministar.rig import RigProfile
+    from ministar.site import Site
+    from ministar.ui.station import FakeCamera
+
+    now = datetime(2026, 10, 27, 22, 0, tzinfo=UTC)
+    clock = {"now": now}
+    camera = FakeCamera(
+        optics=RigProfile.fake().optics(),
+        catalog=catalog,
+        site=Site(latitude_deg=51.5, longitude_deg=-0.1),
+        pointing=(start_ra, start_dec),
+        clock=lambda: clock["now"],
+    )
+    return camera, clock, now
+
+
+def test_the_sky_drifts_under_a_fixed_mount() -> None:
+    """Ten minutes on: RA has advanced by ten minutes of sidereal time, exactly."""
+    from datetime import timedelta
+
+    from ministar import sky
+
+    camera, clock, now = _drifting_camera()
+    ra0, dec0 = camera.pointing
+    lst0 = sky.lst_deg(now, -0.1)
+
+    clock["now"] = now + timedelta(minutes=10)
+    ra1, dec1 = camera.pointing
+
+    delta_ra = ((ra1 - ra0 + 180.0) % 360.0) - 180.0
+    lst1 = sky.lst_deg(now + timedelta(minutes=10), -0.1)
+    assert delta_ra == pytest.approx(((lst1 - lst0 + 180.0) % 360.0) - 180.0), "= 10 min of LST"
+    assert abs(dec1 - dec0) < 0.01, (
+        "a fixed altitude is not a fixed declination -- the mount holds alt/az, so the sky "
+        "position it reaches traces a curve, a few arcmin over ten minutes"
+    )
+
+    # The *angle swept* carries the cos(dec): that is the rate the sensor sees.
+    swept_arcsec = delta_ra * math.cos(math.radians(dec0)) * 3600.0
+    assert swept_arcsec == pytest.approx(camera.drift_arcsec_per_s() * 600.0, rel=0.01)
+
+
+def test_holding_the_sky_still_freezes_it_where_it_is() -> None:
+    from datetime import timedelta
+
+    camera, clock, now = _drifting_camera()
+    clock["now"] = now + timedelta(minutes=5)
+    frozen = camera.pointing
+
+    camera.set_drift(False)
+    clock["now"] = now + timedelta(minutes=90)
+
+    assert camera.pointing == pytest.approx(frozen), "holding must not rewind the sky"
+
+
+def test_the_rendered_field_moves_at_the_drift_rate() -> None:
+    """Not just the number: the picture has to crawl at the rate we quote."""
+    from datetime import timedelta
+
+    from ministar.starcatalog import Stars
+
+    class StubCatalogue:
+        def stars_near(self, ra_deg, dec_deg, radius_deg, *, mag_limit=12.0):
+            return Stars(
+                np.array([160.60, 160.62, 160.64]),
+                np.array([41.27, 41.30, 41.24]),
+                np.ones(3) * 6.0,
+            )
+
+    camera, clock, now = _drifting_camera(160.62, 41.27, catalog=StubCatalogue())
+    x0 = min(star.x for star in camera.scene().stars)
+
+    seconds = 600.0
+    clock["now"] = now + timedelta(seconds=seconds)
+    x1 = min(star.x for star in camera.scene().stars)
+
+    expected_px = camera.drift_px_per_s() * seconds
+    assert abs(x1 - x0) == pytest.approx(expected_px, rel=0.05), "within a few percent"
+
+
+def test_local_time_zone_does_not_change_where_it_points() -> None:
+    """A clock is a moment, not a wall display."""
+    from datetime import datetime, timedelta, timezone
+
+    from ministar.site import Site
+    from ministar.ui.station import FakeCamera
+
+    site = Site(latitude_deg=51.5, longitude_deg=-0.1)
+    moment = datetime(2026, 10, 27, 22, 0, tzinfo=UTC)
+    elsewhere = moment.astimezone(timezone(timedelta(hours=9)))
+
+    a = FakeCamera(site=site, pointing=(160.27, 41.27), clock=lambda: moment)
+    b = FakeCamera(site=site, pointing=(160.27, 41.27), clock=lambda: elsewhere)
+
+    assert a.pointing == pytest.approx(b.pointing)

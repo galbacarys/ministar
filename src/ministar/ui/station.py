@@ -17,7 +17,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -94,6 +94,11 @@ class FakeCamera:
         flux_at_mag_zero: float = 6200.0,
         site=None,
         when=None,
+        #: Where "now" comes from. Injected so drift can be exercised in seconds rather than
+        #: waited for, which is the difference between a test and a demo.
+        clock=None,
+        #: A fixed mount on a turning sky: the sky moves under the camera unless it is held.
+        drift: bool = True,
     ) -> None:
         self._position = 0
         self._frames = 0
@@ -113,7 +118,11 @@ class FakeCamera:
         #: The mount is the honest state: a head on a tripod is set in altitude and azimuth,
         #: and the RA/Dec it points at is a consequence of where and when it is standing.
         self._site = site
-        self._stamp = when or datetime.now().astimezone()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        #: When the mount was last touched. With drift on, the *sky* it points at is then
+        #: re-derived from this mount at the current time, which is what a tripod does.
+        self._set_at = when or self._clock()
+        self._drift = bool(drift)
         self._altaz: tuple[float, float] | None = None
         if site is not None and getattr(site, "complete", False) and pointing is not None:
             self.set_pointing(*pointing)
@@ -153,7 +162,7 @@ class FakeCamera:
         """
         self._site = site
         if when is not None:
-            self._stamp = when
+            self._set_at = when
         if (
             self._altaz is None
             and self._pointing is not None
@@ -168,12 +177,48 @@ class FakeCamera:
         return self._altaz
 
     @property
+    def drift(self) -> bool:
+        return self._drift
+
+    def set_drift(self, drift: bool) -> None:
+        """Let the sky move, or hold it still.
+
+        Real sky by default: a mount holds its altitude and azimuth while the celestial sphere
+        turns underneath, so the field crawls westward at 15.04 cos(dec) arcsec/s. Held, the
+        fake is frozen for reading numbers off a screenshot -- useful, and clearly not real.
+        """
+        self._drift = bool(drift)
+        if not self._drift:
+            # Freeze where it is now, so switching off does not rewind to when it was set.
+            self._set_at = self._clock()
+
+    def drift_arcsec_per_s(self) -> float | None:
+        """How fast the field sweeps the sky, in arcsec per second of angle."""
+        aimed = self.pointing
+        if aimed is None or self._optics is None:
+            return None
+        return self._optics.drift_arcsec_per_s(aimed[1])
+
+    def drift_px_per_s(self) -> float | None:
+        """And in pixels per second on this sensor, which is what moves on the screen."""
+        rate = self.drift_arcsec_per_s()
+        if rate is None or self._optics is None:
+            return None
+        return rate / self._optics.plate_scale_arcsec
+
+    @property
     def pointing(self) -> tuple[float, float] | None:
-        """Where the camera looks in RA/Dec -- derived from the mount when it can be."""
+        """Where the camera looks in RA/Dec -- derived from the mount and the clock.
+
+        The mount is the state; the sky it points at is a consequence of the time, which is
+        why this is a property rather than a stored pair. With drift on, the same altitude and
+        azimuth point somewhere different every second, exactly as a tripod does.
+        """
         if self._altaz is not None and self._site is not None and self._site.complete:
             from ministar import sky as sky_module
 
-            lst = sky_module.lst_deg(self._stamp, self._site.longitude_deg)
+            when = self._clock() if self._drift else self._set_at
+            lst = sky_module.lst_deg(when, self._site.longitude_deg)
             ra, dec = sky_module.radec_from_altaz(
                 self._altaz[0], self._altaz[1], lst, self._site.latitude_deg
             )
@@ -189,7 +234,8 @@ class FakeCamera:
         if self._site is not None and self._site.complete:
             from ministar import sky as sky_module
 
-            lst = sky_module.lst_deg(self._stamp, self._site.longitude_deg)
+            self._set_at = self._clock()
+            lst = sky_module.lst_deg(self._set_at, self._site.longitude_deg)
             alt, az = sky_module.altaz_deg(ra_deg, dec_deg, lst, self._site.latitude_deg)
             self._altaz = (float(alt), float(az) % 360.0)
         self._pointing = (float(ra_deg) % 360.0, float(dec_deg))
@@ -208,7 +254,12 @@ class FakeCamera:
         return True
 
     def scene(self) -> StarField:
-        """The current field, rebuilt when the pointing or roll changes."""
+        """The current field, rebuilt when the pointing or roll changes.
+
+        With drift on the pointing changes every access, so this rebuilds on every frame --
+        4 ms against the 500 ms render, which is why exactness is affordable here and
+        quantising the sky into steps would buy nothing.
+        """
         aimed = self.pointing
         if self._catalog is None or self._optics is None or aimed is None:
             return self._field.rotated(-self._roll)

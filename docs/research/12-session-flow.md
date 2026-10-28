@@ -442,3 +442,35 @@ sky. The drawing stays a rectangle on purpose: stacking rejects the outer edges 
 octagon is a shape the user never has to think about -- the number is what had to be honest.
 The PARAMETERS caveat is gated on both conditions (|dec| >= 75 **and** interval >= 15 min),
 because a five-minute run at the pole turns only 1.2 deg and needs no explanation.
+
+## The fake sky moves, and the solver measures it
+
+The fake mount holds an altitude and azimuth; the sky it points at is re-derived from the
+clock on every access, so the field crawls westward at `15.04 cos(dec) arcsec/s` exactly as a
+real tripod does. A scene rebuild costs **4 ms** against the **527 ms** render that happens
+each pump tick anyway, so the drift is exact -- no interpolation, no quantising the sky into
+steps. (Measured before designing around a limit that did not exist.)
+
+Confirmed end to end, two captures ten *simulated* minutes apart, blind-solved but for the
+field of view and the second hinted from the first (`data/drift_solve.py`):
+
+```
+t0   rendered RA 10.6847 h   solved RA 10.6847 h
+t10  rendered RA 10.8518 h   solved RA 10.8519 h
+measured dRA +2.5069 deg    expected +2.5068 deg  (= 10 min of LST)
+swept 6783"                 expected 6783"       (= 15.04 cos 41.27 arcsec/s)
+scale 6.7743 -> 6.7749 arcsec/px
+```
+
+Three things fall out of that, and all three are wanted:
+
+- The clock is **injectable**, so drift can be exercised in seconds instead of waited for --
+  the difference between a test and a demo.
+- The second solve is hinted from the first at radius 3 deg while the field moved 2.5 deg, so
+  the re-solve path gets real use rather than the easy case.
+- A fixed altitude is not a fixed declination: the mount's sky position traces a curve, which
+  is the drift *direction* changing slowly. That is the same geometry the entry-point advice
+  and the frame advice already account for.
+
+The switch on the page ("let the sky move") freezes the sky where it is, for reading numbers
+off a screenshot; freezing never rewinds to when the mount was set.
