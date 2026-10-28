@@ -49,26 +49,36 @@ def test_a_mild_crop_is_a_note_not_a_warning() -> None:
     assert "centre and roll are good" in report.notes[0]
 
 
-def test_a_severe_crop_warns_and_names_the_remedy() -> None:
-    """The 100 mm case: an 8.5 deg frame solved against D80 comes back as a sub-image."""
+def test_the_middle_quarter_is_enough_to_work_from() -> None:
+    """A 100 mm frame solved at 34% is still worth having: the centre and roll are exact."""
     report = describe(FRAME_A, width_px=5184, expected_width_deg=9.76)
+
+    assert report.cropped
+    assert report.usable, "a quarter of the frame is the bar, and 34% clears it"
+    assert report.warnings == ()
+    assert "edges unverified" in report.notes[0]
+
+
+def test_below_a_quarter_solved_the_warning_names_the_remedy() -> None:
+    """The 50 mm case: an ultra-wide whose field the database can barely sample."""
+    report = describe(FRAME_A, width_px=5184, expected_width_deg=26.34)
 
     assert report.cropped
     assert not report.usable
     warning = report.warnings[0]
-    assert "34%" in warning or "33%" in warning, warning
+    assert "less than a quarter" in warning
     assert "wider star database" in warning
     assert "W08" in warning
 
 
 def test_the_usable_limit_is_a_quarter_of_the_frame() -> None:
-    """25% loss is the line: 75% solved is accepted, 74% is not."""
+    """25% solved is the bar: 26% is accepted, 24% is not."""
     accepted = 1.249 / (MIN_USEFUL_FRACTION + 0.01)
     rejected = 1.249 / (MIN_USEFUL_FRACTION - 0.01)
     inside = describe(FRAME_A, width_px=1958, expected_width_deg=accepted)
     outside = describe(FRAME_A, width_px=1958, expected_width_deg=rejected)
 
-    assert MIN_USEFUL_FRACTION == 0.75
+    assert MIN_USEFUL_FRACTION == 0.25
     assert inside.usable and not inside.warnings
     assert not outside.usable and outside.warnings
 

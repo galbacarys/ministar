@@ -17,13 +17,16 @@ from dataclasses import dataclass
 
 from ministar.solver.astap import Solution
 
-#: A solve is only worth having if it covered enough sky. Below this fraction of the frame,
-#: ask for a wider star database rather than trusting a narrow field: the centre and the roll
-#: would still be right, but too little of the frame is in the fit to be useful.
+#: How much of the frame a solve has to cover to be worth having: a quarter of it.
 #:
-#: 25% loss is the line. Against the observed 6.33 deg database ceiling that is a frame up to
-#: ~8.4 deg tall -- 135 mm and longer, but not 100 mm or 50 mm.
-MIN_USEFUL_FRACTION = 0.75
+#: A centred crop keeps the frame centre (CRVAL) and the plate scale and roll (CD matrix)
+#: exact, so a cropped solve is genuinely usable -- the only thing that shrinks is how much
+#: of the *edges* the fit saw. Hence the bar is low: if ASTAP solved the middle quarter, the
+#: numbers we take from it are trustworthy. Below that the field is so wide relative to the
+#: star database that a wider database is the real answer (against the observed 6.33 deg
+#: ceiling, a quarter of the frame is a field up to ~25 deg tall -- so 35 mm and longer are
+#: fine, and an ultra-wide wants W08).
+MIN_USEFUL_FRACTION = 0.25
 
 
 def solved_width_deg(solution: Solution, *, width_px: int) -> float:
@@ -94,7 +97,7 @@ def describe(
         )
         if factor < MIN_USEFUL_FRACTION:
             warnings.append(
-                f"{covered} -- too little of the sky to be useful; "
+                f"{covered} -- less than a quarter of the frame in the fit; "
                 "install a wider star database (G05 covers 9.5 deg, W08 the whole sky)"
             )
         else:
