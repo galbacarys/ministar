@@ -218,6 +218,34 @@ cannot survive a Unix `$?`. Do not use those modes across the WSL boundary.
 
 ---
 
+## 5.0 Wide fields solve against D80 too, with a hint ✅ measured
+
+Correcting a conclusion drawn before the hint bug (§5.1) was found. With the pointing
+hinted, ASTAP solved synthetic frames rendered from D80's *own* stars at every focal
+length on this rig, at **100% coverage** every time:
+
+| focal | field | solved | coverage | "Large FOV" warning |
+|---|---|---|---|---|
+| 50 mm | 26.3 x 17.6 deg | yes | 100% | yes |
+| 70 mm | 18.8 x 12.5 deg | yes | 100% | yes |
+| 100 mm | 13.2 x 8.8 deg | yes | 100% | yes |
+| 135 mm | 9.8 x 6.5 deg | yes | 100% | yes |
+| 200 mm | 6.6 x 4.4 deg | yes | 100% | no |
+| 300/400 mm | 4.4 / 3.3 deg | yes | 100% | no |
+
+`Large FOV, use G05 database!` is therefore **advisory**: ASTAP names the better database and
+solves anyway. The crop seen in §6 on a real 8.53 deg frame is a *fallback* behaviour, not the
+normal path -- our earlier reading of it ("wide fields cannot be solved with D80") was wrong,
+and the crop guard in `pointing.py` stays because that fallback does exist, not because it is
+expected.
+
+Caveat, and it is why the real frame cropped while ours did not: our synthetic frames are the
+best case -- round PSF, no distortion, no trailing, stars taken from the same catalogue the
+solver queries. A real 50 mm frame is undersampled and distorted, which is exactly the sort of
+image that pushed ASTAP into its crop fallback.
+
+---
+
 ## 5.1 Solving fails silently when the hint has no position ⚠️
 
 Measured 2026-10-27, and it cost a session. ASTAP searches outward from a **start position**
