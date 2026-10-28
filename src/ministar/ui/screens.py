@@ -25,7 +25,7 @@ from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, ca
 from ministar.config import Settings
 from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
-from ministar.pointing import SolveReport, solve_hints
+from ministar.pointing import SolveReport, keep_capture, solve_hints
 from ministar.reframe.roll import parallactic_angle, roll_advice
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
@@ -1112,9 +1112,13 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
             out_base=ctx.settings.paths.scratch / f"point_{stamp}",
             hints=hints,
         )
-        # Synthetic frames are not imaging: delete the capture once it has been solved.
-        # The .ini/.wcs in scratch stay, because they are the evidence.
-        if getattr(camera, "disposable_frames", False):
+        # A pointing capture is a check, not an imaging frame. The camera's own file is
+        # always deleted (a 20 MB RAW nothing will read again); the converted file survives
+        # only if the solve failed, where it is the evidence. The .ini in scratch always
+        # stays -- 254 bytes quoting the solver's verdict.
+        if converted is not raw:
+            raw.unlink(missing_ok=True)
+        if not keep_capture(solved=result.solved, converted_is_raw=converted is raw):
             converted.unlink(missing_ok=True)
     except Exception as exc:  # a failed capture must not take the page down
         return None, f"solve failed: {type(exc).__name__}: {exc}"

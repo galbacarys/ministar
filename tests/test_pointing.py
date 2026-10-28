@@ -132,3 +132,21 @@ def test_a_resolve_hints_around_the_previous_solution() -> None:
     assert hints.ra_hours == pytest.approx(160.27 / 15.0)
     assert hints.south_pole_distance_deg == pytest.approx(131.27)
     assert hints.radius_deg == HINT_RADIUS_DEG == 3.0
+
+
+def test_a_pointing_capture_never_keeps_the_camera_file() -> None:
+    """A 20 MB RAW nobody will read again; the RUN loop keeps the frames that matter."""
+    from ministar.pointing import keep_capture
+
+    assert keep_capture(solved=True, converted_is_raw=False) is False
+    assert keep_capture(solved=False, converted_is_raw=False) is True, (
+        "a failed solve keeps the converted FITS: it is the only evidence of why"
+    )
+
+
+def test_the_fake_frame_is_never_kept() -> None:
+    """It is regenerable from the catalogue, so it cannot be evidence of anything."""
+    from ministar.pointing import keep_capture
+
+    assert keep_capture(solved=True, converted_is_raw=True) is False
+    assert keep_capture(solved=False, converted_is_raw=True) is False

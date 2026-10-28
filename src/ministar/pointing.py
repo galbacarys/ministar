@@ -56,6 +56,20 @@ def solve_hints(
     )
 
 
+def keep_capture(*, solved: bool, converted_is_raw: bool) -> bool:
+    """Should the pointing frame survive the solve?
+
+    A POINT capture is a check, not an imaging frame, so the camera file never stays: it is
+    20 MB of RAW that nothing will read again, and the RUN loop keeps the frames that matter.
+    The *converted* file is kept only when the solve failed, because that frame is then the
+    only evidence of why -- and a failed solve is rare. The ``.ini`` sidecar always stays; it
+    is 254 bytes and quotes the solver's own verdict.
+    """
+    if converted_is_raw:
+        return False  # the fake: regenerable from the catalogue, never evidence
+    return not solved
+
+
 def solved_width_deg(solution: Solution, *, width_px: int) -> float:
     """Width of the solved frame, from the CD matrix: ``|CD column| * width``.
 
@@ -145,6 +159,7 @@ __all__ = [
     "SolveReport",
     "crop_factor",
     "describe",
+    "keep_capture",
     "solve_hints",
     "solved_width_deg",
 ]
