@@ -441,3 +441,43 @@ Items 1, 2, 4 and 6 need no hardware; 3, 5, 7, 8 need the camera and a clear nig
 - Should we expose the lens as an `IFocuser`-shaped abstraction internally, even though we have no
   external host to serve? Probably yes — it keeps the focus logic honest and reusable, and it is
   what made the reference implementation simple.
+
+## A quality gate in front of the solver: measured constraints
+
+Before spending a solve on a frame, ask whether the frame can be solved and, if not, *why*.
+HFD is the obvious quantity and the machinery is already there -- ``io.fits.read_fits`` was
+written for exactly this ("so the focus metric can be exercised against real frames") and
+``focus.metrics.measure_hfd`` is the same code the focus screen trusts. Two traps, both found
+by running it rather than reasoning about it:
+
+**Cost.** ``measure_hfd`` on a full 5184x3456 frame takes **0.80 s** -- the same as a hinted
+solve. On a 1200x1200 centre crop it is **0.06 s**, and 600x600 is 0.02 s. A gate that costs
+what the solve costs is not a gate, so measure the middle of the frame.
+
+**Saturation, and it bites immediately.** On fake frames exposed for the *solver* (bright star
+cores clipped at 255, which ASTAP is perfectly happy with) ``measure_hfd`` returned
+``(nan, 0)``: it rejects saturated stars, correctly, and every bright star in the frame was
+clipped. Exposed for HFD instead (a lower flux scale), the same scene gave a median HFD of
+3.12 px across 40 stars. So "cannot measure" is a legitimate outcome and must be said out loud
+("the frame is saturated"), because it is itself a diagnosis -- the exposure is too long to
+judge focus on, which is also why real focus routines use short exposures for HFD.
+
+**Same pipeline or no comparison.** The same scene at the same focus gave 3.12 px on the full
+frame, 2.64 px on a 1200^2 crop and 2.35 px on 600^2 -- the sample of "brightest 40 stars"
+changes with the crop. HFD is also threshold/SNR-dependent. So the baseline has to be measured
+by the same code on the same crop as the check, and normalised to **arcseconds** (x frame width
+in arcsec / width in pixels), or a binned live view (4.93x on the 60D) gets compared to a
+full-resolution still and the ratio is meaningless.
+
+**What the 2x gate would actually catch**, given the exposure is already capped at 2 px of
+trailing by design (``TRAIL_BUDGET_PX``): focus creep from temperature, mirror sag, a tripod
+bumped *during* the exposure, and the no-stars-at-all case (cloud, lens cap -- where
+``measure_hfd`` returning nan with 0 stars is already more informative than ASTAP's generic
+"no solution found"). It cannot separate defocus from trailing by HFD alone -- but we know the
+drift direction from the roll/PA, so comparing the second moments along and across it would
+separate an elongated PSF from a round fat one for almost no extra cost.
+
+**Simulation status**: focus shift is exerciseable today (the fake's ``_position`` drives blur:
+1.51 px at position 24, 1.73 at 32, 2.49 at 44 -- approaching a 2x gate). Motion trailing is
+*not* modelled in ``StarField`` yet; elongating stars along the drift direction would be a
+small addition and would let the "actively moving" half of the gate be tested.
