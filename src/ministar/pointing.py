@@ -17,9 +17,13 @@ from dataclasses import dataclass
 
 from ministar.solver.astap import Solution
 
-#: Above this fractional shortfall, the solution describes a different frame than the one
-#: that was shot (brief 07 §1: "treat a mismatch > 10% as solution describes a crop").
-CROP_TOLERANCE = 0.10
+#: A solve is only worth having if it covered enough sky. Below this fraction of the frame,
+#: ask for a wider star database rather than trusting a narrow field: the centre and the roll
+#: would still be right, but too little of the frame is in the fit to be useful.
+#:
+#: 25% loss is the line. Against the observed 6.33 deg database ceiling that is a frame up to
+#: ~8.4 deg tall -- 135 mm and longer, but not 100 mm or 50 mm.
+MIN_USEFUL_FRACTION = 0.75
 
 
 def solved_width_deg(solution: Solution, *, width_px: int) -> float:
@@ -43,14 +47,26 @@ def crop_factor(
 
 @dataclass(frozen=True)
 class SolveReport:
-    """What to show after a solve: the facts, and the caveats that change their meaning."""
+    """What to show after a solve: the facts, what they do not cover, and what to do about it.
+
+    ``notes`` are informational -- the solve is fine, it just did not see everything.
+    ``warnings`` mean act: change a setting, or a left/right instruction will be wrong.
+    """
 
     facts: tuple[str, ...]
-    warnings: tuple[str, ...]
+    notes: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    #: Fraction of the frame width the solution actually covered, when that is known.
+    solved_fraction: float | None = None
 
     @property
     def cropped(self) -> bool:
-        return any("crop" in warning for warning in self.warnings)
+        return self.solved_fraction is not None and self.solved_fraction < 1.0 - 1e-6
+
+    @property
+    def usable(self) -> bool:
+        """True when enough of the frame was solved to be worth acting on."""
+        return self.solved_fraction is None or self.solved_fraction >= MIN_USEFUL_FRACTION
 
 
 def describe(
@@ -67,21 +83,33 @@ def describe(
         f'scale {solution.pixel_scale_arcsec:.2f}"/px',
         f"parity {'mirrored' if solution.is_mirrored else 'normal'}",
     ]
+    notes: list[str] = []
     warnings: list[str] = []
     factor = crop_factor(solution, width_px=width_px, expected_width_deg=expected_width_deg)
-    if factor is not None and factor < 1.0 - CROP_TOLERANCE:
-        warnings.append(
-            f"solved a crop: {factor * 100:.0f}% of the frame width "
+    if factor is not None and factor < 1.0 - 1e-6:
+        covered = (
+            f"solved the centre {factor * 100:.0f}% of the frame "
             f"({solved_width_deg(solution, width_px=width_px):.2f} deg of "
-            f"{expected_width_deg:.2f} deg) -- the star database is too narrow for this field"
+            f"{expected_width_deg:.2f} deg)"
         )
+        if factor < MIN_USEFUL_FRACTION:
+            warnings.append(
+                f"{covered} -- too little of the sky to be useful; "
+                "install a wider star database (G05 covers 9.5 deg, W08 the whole sky)"
+            )
+        else:
+            # A centred crop keeps CRVAL (the centre) and the CD matrix (scale, roll) exact,
+            # so pointing and reframing still work from it. Only the edges are unverified.
+            notes.append(f"{covered} -- centre and roll are good, frame edges unverified")
     if solution.is_mirrored:
         warnings.append("mirrored solution: every left/right instruction must be flipped (07 §2.1)")
-    return SolveReport(facts=tuple(facts), warnings=tuple(warnings))
+    return SolveReport(
+        facts=tuple(facts), notes=tuple(notes), warnings=tuple(warnings), solved_fraction=factor
+    )
 
 
 __all__ = [
-    "CROP_TOLERANCE",
+    "MIN_USEFUL_FRACTION",
     "SolveReport",
     "crop_factor",
     "describe",

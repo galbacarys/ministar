@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from ministar.pointing import CROP_TOLERANCE, crop_factor, describe, solved_width_deg
+from ministar.pointing import MIN_USEFUL_FRACTION, crop_factor, describe, solved_width_deg
 from ministar.solver.astap import Solution
 
 #: Brief 07 §5, a real solve.
@@ -39,29 +39,46 @@ def test_a_full_frame_solve_produces_no_warnings() -> None:
     assert any("position angle" in fact for fact in report.facts)
 
 
-def test_a_cropped_solve_is_flagged_with_both_numbers() -> None:
+def test_a_mild_crop_is_a_note_not_a_warning() -> None:
+    """A centred crop keeps the centre and the roll exact; only the edges go unverified."""
+    report = describe(FRAME_A, width_px=1958, expected_width_deg=1.249 / 0.95)
+
+    assert report.cropped
+    assert report.usable
+    assert report.warnings == ()
+    assert "centre and roll are good" in report.notes[0]
+
+
+def test_a_severe_crop_warns_and_names_the_remedy() -> None:
     """The 100 mm case: an 8.5 deg frame solved against D80 comes back as a sub-image."""
     report = describe(FRAME_A, width_px=5184, expected_width_deg=9.76)
 
     assert report.cropped
+    assert not report.usable
     warning = report.warnings[0]
-    assert "crop" in warning
     assert "34%" in warning or "33%" in warning, warning
+    assert "wider star database" in warning
+    assert "W08" in warning
 
 
-def test_the_crop_threshold_is_the_documented_one() -> None:
-    inside = 1.249 / (1 - CROP_TOLERANCE / 2)
-    outside = 1.249 / (1 - CROP_TOLERANCE * 1.5)
-    just_inside = describe(FRAME_A, width_px=1958, expected_width_deg=inside)
-    just_outside = describe(FRAME_A, width_px=1958, expected_width_deg=outside)
+def test_the_usable_limit_is_a_quarter_of_the_frame() -> None:
+    """25% loss is the line: 75% solved is accepted, 74% is not."""
+    accepted = 1.249 / (MIN_USEFUL_FRACTION + 0.01)
+    rejected = 1.249 / (MIN_USEFUL_FRACTION - 0.01)
+    inside = describe(FRAME_A, width_px=1958, expected_width_deg=accepted)
+    outside = describe(FRAME_A, width_px=1958, expected_width_deg=rejected)
 
-    assert not just_inside.cropped
-    assert just_outside.cropped
+    assert MIN_USEFUL_FRACTION == 0.75
+    assert inside.usable and not inside.warnings
+    assert not outside.usable and outside.warnings
 
 
 def test_without_an_expected_field_there_is_nothing_to_compare() -> None:
     assert crop_factor(FRAME_A, width_px=1958, expected_width_deg=None) is None
-    assert not describe(FRAME_A, width_px=1958).cropped
+    report = describe(FRAME_A, width_px=1958)
+    assert not report.cropped
+    assert report.usable
+    assert report.solved_fraction is None
 
 
 def test_a_mirrored_solution_warns_that_instructions_flip() -> None:

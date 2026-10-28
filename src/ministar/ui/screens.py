@@ -940,6 +940,7 @@ def render_point(ctx: Context) -> None:
     with solve_stage:
         ui.label("2. solve").classes("mn-heading")
         solve_facts = ui.label("").classes("mn-metrics")
+        solve_notes = ui.label("").classes("mn-dim")
         solve_warnings = ui.label("").classes("mn-warn")
         solve_note = ui.label("").classes("mn-dim")
 
@@ -948,6 +949,7 @@ def render_point(ctx: Context) -> None:
             solve_note.text = note
             if report is not None:
                 solve_facts.text = "\n".join(report.facts)
+                solve_notes.text = "\n".join(report.notes)
                 solve_warnings.text = "\n".join(report.warnings)
 
         ui.button("capture and solve", on_click=run_solve).classes("mn-action")
