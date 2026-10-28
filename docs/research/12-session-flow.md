@@ -366,3 +366,32 @@ wizard's ordering of *prompts* rather than its ordering of *dependencies*.
   each time the better default?
 - Should PARAMETERS default to the previous session's values for the same target?
   Probably yes, with the interval re-validated against tonight's declination.
+
+## POINT: start at the entry edge, not on the target
+
+Aiming *at* the target spends half the frame before the session begins: the object then has
+only the half-width ahead of it before it drifts out. Aiming so it starts against the edge it
+entered from gives it the whole run -- for a 135 mm frame on the 60D and a target at
+RA 160.27 Dec +41.27, **25.2 min aimed at the target against 50.6 min from the entry point**,
+same lens, same exposure.
+
+`pointing.best_start()` computes that pointing, and `pointing.frame_advice()` describes the
+difference in mount terms ("move the mount 4.74 deg west and 10' north"). Two traps, both
+found by testing at other rolls rather than at roll 0:
+
+- **A great circle is not a parallel.** Parking the centre a fixed *RA* west of the target
+  leaves the target ~10 arcmin off the middle row at 5 deg, so the entry point is solved in
+  *pixels* by Newton, using the projection itself for the Jacobian.
+- **The margin is a box, not a distance.** Subtracting it from the chord length looks right
+  and is 2 px short on the axis at any diagonal roll -- which reads as "target NOT in frame"
+  at exactly the pointing the page told the user to take.
+
+The run available is the **chord** of the frame along the drift, `min(W/|ux|, H/|uy|)` -- not
+the projection `|ux|W + |uy|H`. The two agree at roll 0 and 90 deg and disagree everywhere
+else by hundreds of pixels, which is why the bug was invisible in the axis-aligned case.
+
+**Open question this raised.** The chord is longest along the frame *diagonal* (6228 px at the
+corner angle against 5183 px along the long axis, ~20% more run), not along the long axis that
+`roll_advice` targets. "Align the drift with the long side" is therefore a near-optimum, not
+the optimum -- left alone here because the diagonal case also clips the trailing star trails
+earlier, which the model does not yet describe.

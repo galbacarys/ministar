@@ -25,7 +25,13 @@ from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, ca
 from ministar.config import Settings
 from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
-from ministar.pointing import SolveReport, keep_capture, solve_hints
+from ministar.pointing import (
+    SolveReport,
+    best_start,
+    frame_advice,
+    keep_capture,
+    solve_hints,
+)
 from ministar.reframe.roll import parallactic_angle, roll_advice
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
@@ -962,9 +968,29 @@ def render_point(ctx: Context) -> None:
                 if ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None:
                     camera.set_pointing(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
 
-            ui.button("aim at the target", on_click=aim_at_target).classes("mn-action")
+            def aim_for_run() -> None:
+                """Start the target at the edge it entered from: the whole frame of drift."""
+                rig = rig_for(ctx)
+                if rig is None:
+                    return
+                if ctx.state.target_ra_deg is None or ctx.state.target_dec_deg is None:
+                    return
+                camera.set_pointing(
+                    *best_start(
+                        target_ra_deg=ctx.state.target_ra_deg,
+                        target_dec_deg=ctx.state.target_dec_deg,
+                        optics=rig.optics(),
+                        pa_y_deg=float(camera.roll_deg),
+                    )
+                )
+
+            with ui.row().classes("items-center justify-center").style("gap: 6px"):
+                ui.button("aim at the target", on_click=aim_at_target).classes("mn-action")
+                ui.button("aim for the run", on_click=aim_for_run).classes("mn-action")
+            aim_advice = ui.label("").classes("mn-body")
         else:
             pointing_label = None
+            aim_advice = None
 
         if getattr(camera, "set_roll", None) is not None:
             # Fake camera only: a real user turns the clamp, so there is no control to offer.
@@ -981,6 +1007,7 @@ def render_point(ctx: Context) -> None:
     with solve_stage:
         ui.label("2. solve").classes("mn-heading")
         solve_facts = ui.label("").classes("mn-metrics")
+        solve_advice = ui.label("").classes("mn-body")
         solve_notes = ui.label("").classes("mn-dim")
         solve_warnings = ui.label("").classes("mn-warn")
         solve_note = ui.label("").classes("mn-dim")
@@ -992,6 +1019,19 @@ def render_point(ctx: Context) -> None:
                 solve_facts.text = "\n".join(report.facts)
                 solve_notes.text = "\n".join(report.notes)
                 solve_warnings.text = "\n".join(report.warnings)
+                rig = rig_for(ctx)
+                if rig is not None and ctx.state.pointing_ra_deg is not None:
+                    solve_advice.text = "\n".join(
+                        frame_advice(
+                            ra_deg=ctx.state.pointing_ra_deg,
+                            dec_deg=ctx.state.pointing_dec_deg,
+                            target_ra_deg=ctx.state.target_ra_deg,
+                            target_dec_deg=ctx.state.target_dec_deg,
+                            optics=rig.optics(),
+                            pa_y_deg=ctx.state.pointing_pa_deg or 0.0,
+                            target_radius_arcmin=0.5 * (ctx.state.target_major_arcmin or 0.0),
+                        ).describe()
+                    )
 
         ui.button("capture and solve", on_click=run_solve).classes("mn-action")
 
@@ -1010,8 +1050,17 @@ def render_point(ctx: Context) -> None:
         setter = getattr(camera, "set_pointing", None)
         if setter is None or camera.pointing is not None:
             return
-        if ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None:
-            setter(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+        rig = rig_for(ctx)
+        if rig is None or ctx.state.target_ra_deg is None or ctx.state.target_dec_deg is None:
+            return
+        setter(
+            *best_start(
+                target_ra_deg=ctx.state.target_ra_deg,
+                target_dec_deg=ctx.state.target_dec_deg,
+                optics=rig.optics(),
+                pa_y_deg=float(getattr(camera, "roll_deg", 0.0)),
+            )
+        )
 
     def tick() -> None:
         aim_fake()
@@ -1050,6 +1099,27 @@ def render_point(ctx: Context) -> None:
         ccw_label.classes(replace="mn-heading" if advice.direction == "ccw" else "mn-dim")
         cw_label.classes(replace="mn-heading" if advice.direction == "cw" else "mn-dim")
 
+        if aim_advice is not None:
+            aimed = getattr(getattr(station, "camera", None), "pointing", None)
+            rig = rig_for(ctx)
+            if (
+                aimed is not None
+                and rig is not None
+                and ctx.state.target_ra_deg is not None
+                and ctx.state.target_dec_deg is not None
+            ):
+                aim_advice.text = "\n".join(
+                    frame_advice(
+                        ra_deg=aimed[0],
+                        dec_deg=aimed[1],
+                        target_ra_deg=ctx.state.target_ra_deg,
+                        target_dec_deg=ctx.state.target_dec_deg,
+                        optics=rig.optics(),
+                        pa_y_deg=roll,
+                        target_radius_arcmin=0.5 * (ctx.state.target_major_arcmin or 0.0),
+                    ).describe()
+                )
+
         # A completed solve fills the facts in; the tick does not re-run the solver.
         if ctx.state.solved and not solve_facts.text:
             solve_facts.text = (
@@ -1076,13 +1146,9 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     if ctx.settings.astap is None:
         return None, "astap_cli.exe not found -- run preflight"
 
-    # The fake camera is aimed here rather than on a tripod: point it where the user pointed.
-    if (
-        getattr(camera, "set_pointing", None) is not None
-        and ctx.state.target_ra_deg is not None
-        and ctx.state.target_dec_deg is not None
-    ):
-        camera.set_pointing(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+    # Note: the fake is aimed by the POINT page (buttons, or the run entry point), never
+    # here. Re-aiming on every solve would silently undo the nudge the user just made -- and
+    # the nudge is the measurement.
 
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     suffix = ".fit" if getattr(camera, "disposable_frames", False) else ".cr2"
@@ -1130,6 +1196,7 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     solution = result.solution
     ctx.state.solved = True
     ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
+    ctx.state.pointing_pa_deg = solution.position_angle_deg
     expected = None
     if profile is not None:
         expected = profile.optics().width_arcmin / 60.0

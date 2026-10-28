@@ -150,3 +150,77 @@ def test_the_fake_frame_is_never_kept() -> None:
 
     assert keep_capture(solved=True, converted_is_raw=True) is False
     assert keep_capture(solved=False, converted_is_raw=True) is False
+
+
+# -- where to aim -----------------------------------------------------------
+def _fake_optics():
+    from ministar.rig import RigProfile
+
+    return RigProfile.fake().optics()
+
+
+def _advice(ra, dec, *, pa_y_deg=0.0, target=(160.27, 41.27)):
+    from ministar.pointing import frame_advice
+
+    return frame_advice(
+        ra_deg=ra,
+        dec_deg=dec,
+        target_ra_deg=target[0],
+        target_dec_deg=target[1],
+        optics=_fake_optics(),
+        pa_y_deg=pa_y_deg,
+    )
+
+
+def test_aiming_at_the_target_throws_away_half_the_frame() -> None:
+    """The point of the entry point: the same pointing buys twice the run."""
+    from ministar.pointing import best_start
+
+    optics = _fake_optics()
+    start = best_start(target_ra_deg=160.27, target_dec_deg=41.27, optics=optics, pa_y_deg=0.0)
+    centred = _advice(160.27, 41.27)
+    entry = _advice(*start)
+
+    assert entry.inside and centred.inside
+    assert entry.minutes_now == pytest.approx(2.0 * centred.minutes_now, rel=0.10)
+    assert entry.at_best_start
+    assert not centred.at_best_start
+
+
+def test_the_best_start_is_west_of_the_target() -> None:
+    """Untracked stars move west, so the frame centre starts west of the target."""
+    from ministar.pointing import best_start
+
+    start = best_start(
+        target_ra_deg=160.27, target_dec_deg=41.27, optics=_fake_optics(), pa_y_deg=0.0
+    )
+    assert start[0] < 160.27, "centre west of target = decreasing RA"
+    assert start[1] > 41.27, "and north: a parallel sags below the tangent plane"
+
+
+def test_the_advice_says_which_way_to_move_the_mount() -> None:
+    lines = " ".join(_advice(160.27, 41.27).describe())
+    assert "move the mount" in lines
+    assert "west" in lines, "the entry point is west of a target-centred pointing"
+
+
+@pytest.mark.parametrize("roll", [0.0, 20.0, 35.0, 60.0, 90.0, 135.0])
+def test_the_entry_point_is_inside_the_frame_at_any_roll(roll: float) -> None:
+    """A diagonal drift is limited by the short side, and the margin is a box: both bit."""
+    from ministar.pointing import best_start
+
+    start = best_start(
+        target_ra_deg=160.27, target_dec_deg=41.27, optics=_fake_optics(), pa_y_deg=roll
+    )
+    advice = _advice(*start, pa_y_deg=roll)
+
+    assert advice.inside
+    assert advice.minutes_now > 1.0, 'a run needs to be worth starting'
+    assert advice.minutes_now == pytest.approx(advice.minutes_best, rel=0.05)
+
+
+def test_a_target_outside_the_frame_is_reported_not_hidden() -> None:
+    """Inform, never block: a pointing 10 deg off is said plainly."""
+    lines = " ".join(_advice(170.0, 41.27).describe())
+    assert "NOT in the frame" in lines
+    assert "min" in lines

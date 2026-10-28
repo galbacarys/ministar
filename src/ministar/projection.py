@@ -28,6 +28,24 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def gnomonic(ra0_deg: float, dec0_deg: float, ra_deg, dec_deg) -> tuple[np.ndarray, np.ndarray]:
+    """Tangent-plane offsets ``(xi, eta)`` in RADIANS, east and north.
+
+    Exact -- no small-angle approximation -- because at 50 mm the frame is 26 deg across and
+    the same formula has to serve the whole range. Both the pixel projection and the
+    pointing advice use it, so they cannot disagree about where a star is.
+    """
+    ra = np.radians(np.asarray(ra_deg, dtype=float))
+    dec = np.radians(np.asarray(dec_deg, dtype=float))
+    ra0 = math.radians(ra0_deg)
+    dec0 = math.radians(dec0_deg)
+    delta_ra = ra - ra0
+    d = math.sin(dec0) * np.sin(dec) + math.cos(dec0) * np.cos(dec) * math.cos(delta_ra)
+    xi = np.cos(dec) * np.sin(delta_ra) / d
+    eta = (np.sin(dec) * math.cos(dec0) - np.cos(dec) * math.sin(dec0) * np.cos(delta_ra)) / d
+    return xi, eta
+
+
 @dataclass(frozen=True)
 class TangentPlane:
     """A frame's geometry: where it points, how it is rolled, and its scale."""
@@ -90,4 +108,4 @@ def stars_in_frame(
     return x[keep], y[keep], np.asarray(mag, dtype=float)[keep]
 
 
-__all__ = ["TangentPlane", "stars_in_frame"]
+__all__ = ["TangentPlane", "gnomonic", "stars_in_frame"]

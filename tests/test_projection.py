@@ -142,3 +142,27 @@ def test_moving_the_fake_changes_the_field_it_shows() -> None:
     after = camera.scene().stars[0].x
 
     assert before != pytest.approx(after, abs=1e-6), "the field must shift with the mount"
+
+
+def test_the_preview_follows_the_mount() -> None:
+    """The bug that made the mount buttons look dead: the live view must show the pointing.
+
+    render_frame() rendered the *un-pointed* random field, so moving the telescope changed no
+    pixel. Roll did change it, which is why the slider worked and the arrows did not.
+    """
+    from ministar.optics import Optics
+    from ministar.starcatalog import Stars
+    from ministar.ui.station import FakeCamera
+
+    class StubCatalogue:
+        def stars_near(self, ra_deg, dec_deg, radius_deg, *, mag_limit=12.0):
+            return Stars(np.array([10.70, 10.80]), np.array([41.27, 41.20]), np.array([6.0, 7.0]))
+
+    optics = Optics.from_plate_scale(width_px=400, height_px=300, plate_scale_arcsec=60.0)
+    camera = FakeCamera(optics=optics, catalog=StubCatalogue(), pointing=(10.6847, 41.269))
+    before = camera.render_frame().copy()
+
+    camera.move_by(d_ra_deg=1.0)
+    after = camera.render_frame()
+
+    assert not np.array_equal(before, after), "the preview must move with the mount"

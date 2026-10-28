@@ -220,10 +220,14 @@ class FakeCamera:
         return write_fits(target, image, cards)
 
     def render_frame(self) -> np.ndarray:
-        """The scene as an 8-bit frame, rolled. Separate from JPEG so tests need no codec."""
+        """The scene as an 8-bit frame. Separate from JPEG so tests need no codec.
+
+        Through :meth:`scene`, not ``_field``: the live preview has to show the sky the
+        camera is *pointed at*. Rendering the un-pointed field made the mount controls look
+        dead -- the mount moved, the picture did not.
+        """
         self._frames += 1
-        turned = self._field.rotated(-self._roll)
-        return turned.render_uint8(self._position, frame=self._frames)
+        return self.scene().render_uint8(self._position, frame=self._frames)
 
     def iso_options(self) -> tuple[int, ...]:
         """The ISO values this body offers: powers of two x 100 up to 3200.

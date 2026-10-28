@@ -88,6 +88,9 @@ class SessionState:
     entry_corner: str | None = None
     pointing_ra_deg: float | None = None
     pointing_dec_deg: float | None = None
+    #: Position angle of the image +y axis from the solve (ASTAP's CD matrix). The frame
+    #: orientation, which the aiming advice needs and a real camera cannot report.
+    pointing_pa_deg: float | None = None
 
     #: Free-form notes surfaced to the user, e.g. "rotate the camera 32 degrees".
     advice: list[str] = field(default_factory=list)
