@@ -6,6 +6,9 @@ The fixture is brief 07's real solved frame (``CD`` matrix, 1958 px tall, 2.297"
 
 from __future__ import annotations
 
+import math
+from datetime import UTC
+
 import pytest
 
 from ministar.pointing import MIN_USEFUL_FRACTION, crop_factor, describe, solved_width_deg
@@ -125,13 +128,13 @@ def test_the_first_solve_is_blind_but_for_the_field() -> None:
 
 
 def test_a_resolve_hints_around_the_previous_solution() -> None:
-    from ministar.pointing import HINT_RADIUS_DEG, solve_hints
+    from ministar.pointing import HINT_FLOOR_RADIUS_DEG, solve_hints
 
     hints = solve_hints(fov_height_deg=2.19, previous=(160.27, 41.27))
 
-    assert hints.ra_hours == pytest.approx(160.27 / 15.0)
+    assert hints.ra_hours == pytest.approx(160.27 / 15.0), "no time has passed, so no shift"
     assert hints.south_pole_distance_deg == pytest.approx(131.27)
-    assert hints.radius_deg == HINT_RADIUS_DEG == 3.0
+    assert hints.radius_deg == pytest.approx(HINT_FLOOR_RADIUS_DEG)
 
 
 def test_a_pointing_capture_never_keeps_the_camera_file() -> None:
@@ -224,3 +227,85 @@ def test_a_target_outside_the_frame_is_reported_not_hidden() -> None:
     lines = " ".join(_advice(170.0, 41.27).describe())
     assert "NOT in the frame" in lines
     assert "min" in lines
+
+
+# -- the hint walks with the sky --------------------------------------------
+def test_the_hint_direction_matches_what_the_fake_sky_actually_does() -> None:
+    """The test that catches a sign error: measure the drift, then check the hint agrees.
+
+    Stars march west across the frame, but the frame's own sky position moves EAST (RA
+    increases), because a fixed mount holds the hour angle and RA = LST - HA. A hint aimed at
+    the target's motion instead of the pointing's is wrong by twice the drift.
+    """
+    from datetime import datetime, timedelta
+
+    from ministar.pointing import solve_hints
+    from ministar.rig import RigProfile
+    from ministar.site import Site
+    from ministar.ui.station import FakeCamera
+
+    now = datetime(2026, 10, 27, 22, 0, tzinfo=UTC)
+    clock = {"now": now}
+    camera = FakeCamera(
+        optics=RigProfile.fake().optics(),
+        site=Site(latitude_deg=51.5, longitude_deg=-0.1),
+        pointing=(160.27, 41.27),
+        clock=lambda: clock["now"],
+    )
+    before = camera.pointing
+    clock["now"] = now + timedelta(minutes=10)
+    after = camera.pointing
+
+    hints = solve_hints(fov_height_deg=6.5, previous=before, elapsed_s=600.0, dec_deg=before[1])
+    guess = hints.ra_hours * 15.0
+    moved = ((after[0] - before[0] + 180.0) % 360.0) - 180.0
+
+    assert moved > 0, "the pointing advances east, whatever the stars do"
+    assert guess == pytest.approx(before[0] + moved / 2.0, abs=0.01), "halfway there"
+    # ...and the radius really does contain both ends of the interval.
+    assert hints.radius_deg >= moved * math.cos(math.radians(before[1])) / 2.0
+
+
+def test_a_tight_hint_when_the_last_solve_was_seconds_ago() -> None:
+    from ministar.pointing import HINT_FLOOR_RADIUS_DEG, solve_hints
+
+    hints = solve_hints(fov_height_deg=6.5, previous=(160.27, 41.27), elapsed_s=0.0)
+
+    assert hints.ra_hours == pytest.approx(160.27 / 15.0)
+    assert hints.radius_deg == pytest.approx(HINT_FLOOR_RADIUS_DEG)
+
+
+def test_the_hint_widens_with_the_gap() -> None:
+    from ministar.pointing import BLIND_RADIUS_DEG, solve_hints
+
+    radii = [
+        solve_hints(
+            fov_height_deg=6.5, previous=(160.27, 41.27), elapsed_s=seconds, dec_deg=41.27
+        ).radius_deg
+        for seconds in (60, 600, 1800, 3600)
+    ]
+    assert radii == sorted(radii), "a longer gap cannot need a smaller circle"
+    assert all(radius < BLIND_RADIUS_DEG for radius in radii), "still a hint, not a gamble"
+
+
+def test_a_gap_of_a_day_is_just_a_blind_solve() -> None:
+    from ministar.pointing import BLIND_RADIUS_DEG, solve_hints
+
+    hints = solve_hints(fov_height_deg=6.5, previous=(160.27, 41.27), elapsed_s=86400.0)
+
+    assert hints.radius_deg == BLIND_RADIUS_DEG
+    assert hints.ra_hours is None, "no point pretending to know"
+
+
+def test_a_short_gap_near_the_pole_needs_almost_no_radius() -> None:
+    """Rotation outruns drift there, but the pointing barely moves: 15.04 cos(dec)."""
+    from ministar.pointing import solve_hints
+
+    near_pole = solve_hints(
+        fov_height_deg=6.5, previous=(160.27, 85.0), elapsed_s=1800.0, dec_deg=85.0
+    )
+    near_equator = solve_hints(
+        fov_height_deg=6.5, previous=(160.27, 0.0), elapsed_s=1800.0, dec_deg=0.0
+    )
+
+    assert near_pole.radius_deg < near_equator.radius_deg

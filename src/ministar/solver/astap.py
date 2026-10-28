@@ -194,6 +194,11 @@ def parse_ini(path: Path) -> AstapResult:
     return AstapResult(solved=True, solution=solution, warnings=warnings, cmdline=cmdline)
 
 
+#: Search the whole sky. Cheap enough to be the safety net (4-8 s, 01 §8) and the only honest
+#: choice when the pointing is genuinely unknown.
+BLIND_RADIUS_DEG = 180.0
+
+
 @dataclass(frozen=True)
 class SolveHints:
     """Search hints. Always supply these in a live loop.

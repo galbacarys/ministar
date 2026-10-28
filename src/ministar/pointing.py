@@ -18,17 +18,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from ministar.projection import TangentPlane, gnomonic
-from ministar.solver.astap import Solution, SolveHints
+from ministar.solver.astap import BLIND_RADIUS_DEG, Solution, SolveHints
 
-#: First solve of a session: blind but for the field of view. The user has aimed the rig by
-#: hand at a target, and the target is where we *intended* to point, not where we are -- so
-#: hinting RA/Dec from it would be an assumption dressed up as knowledge. A blind search with
-#: a known FOV costs a few seconds (01 §8) and cannot be wrong about position.
-BLIND_RADIUS_DEG = 180.0
-
-#: Re-solves after a reframe: hint around the previous solution, which *is* measured. Cheap
-#: and accurate, because between reframes the rig moves by arcminutes.
-HINT_RADIUS_DEG = 3.0
+#: Past this radius a hinted search is no longer buying anything: it costs what a blind solve
+#: costs and still only tells us the pointing is somewhere in a huge circle. Go blind instead.
+HINT_MAX_USEFUL_RADIUS_DEG = 20.0
 
 #: How much of the frame a solve has to cover to be worth having: a quarter of it.
 #:
@@ -42,20 +36,65 @@ HINT_RADIUS_DEG = 3.0
 MIN_USEFUL_FRACTION = 0.25
 
 
+#: The smallest hint worth giving: cheaper than blind, wide enough for a mount bumped by a
+#: hand rather than carried off the target.
+HINT_FLOOR_RADIUS_DEG = 1.0
+
+
+def drift_since_deg(elapsed_s: float, dec_deg: float) -> float:
+    """How far the sky has moved during ``elapsed_s``, as an angle on the sky."""
+    from ministar.optics import SIDEREAL_RATE_ARCSEC_PER_S
+
+    return (
+        SIDEREAL_RATE_ARCSEC_PER_S
+        / 3600.0
+        * max(0.0, float(elapsed_s))
+        * math.cos(math.radians(dec_deg))
+    )
+
+
 def solve_hints(
-    *, fov_height_deg: float, previous: tuple[float, float] | None = None
+    *,
+    fov_height_deg: float,
+    previous: tuple[float, float] | None = None,
+    elapsed_s: float = 0.0,
+    dec_deg: float | None = None,
 ) -> SolveHints:
     """Hints for one solve: always the field, and a position only if we have measured one.
 
-    ``previous`` is a *solution's* RA/Dec, never the target's. The distinction is the whole
-    point: before the first solve we do not know where the camera is looking, and a blind
-    search with an FOV hint is both correct and affordable.
+    ``previous`` is a *solution's* RA/Dec, never the target's: before the first solve we do
+    not know where the camera is looking, and a blind search with an FOV hint is both correct
+    and affordable.
+
+    Given a previous solution *and* how long ago it was, the search moves with the sky. Two
+    things can have happened since: an untracked mount has left the frame showing sky further
+    east, or a tracking mount has held it still. We cannot tell which from one solve, so the
+    circle is centred halfway between the two and is wide enough to contain both -- half the
+    drift either side, plus a margin for a mount nudged by hand.
+
+    East, not west, and the distinction is worth being careful about: the *stars* march west
+    across the frame, while the frame's own sky position advances east at the same rate --
+    ``RA = LST - HA``, and a fixed mount holds ``HA``. Aiming the hint the wrong way is a
+    silent failure of exactly the kind this function exists to prevent.
     """
+    if previous is None:
+        return SolveHints(fov_height_deg=fov_height_deg, radius_deg=BLIND_RADIUS_DEG)
+
+    dec = previous[1] if dec_deg is None else float(dec_deg)
+    drift = drift_since_deg(elapsed_s, dec)
+    radius = HINT_FLOOR_RADIUS_DEG + drift / 2.0
+    if radius > HINT_MAX_USEFUL_RADIUS_DEG:
+        # Gone far enough that the hint is the whole sky: say so plainly.
+        return SolveHints(fov_height_deg=fov_height_deg, radius_deg=BLIND_RADIUS_DEG)
+
+    # Halfway east of where it was: RA compresses by cos(dec), which is why the shift is
+    # expressed as an angle first and divided back out here.
+    shift_ra_deg = drift / 2.0 / max(0.05, math.cos(math.radians(dec)))
     return SolveHints(
         fov_height_deg=fov_height_deg,
-        ra_hours=previous[0] / 15.0 if previous is not None else None,
-        south_pole_distance_deg=previous[1] + 90.0 if previous is not None else None,
-        radius_deg=HINT_RADIUS_DEG if previous is not None else BLIND_RADIUS_DEG,
+        ra_hours=((previous[0] + shift_ra_deg) % 360.0) / 15.0,
+        south_pole_distance_deg=dec + 90.0,
+        radius_deg=radius,
     )
 
 
@@ -452,7 +491,8 @@ def describe(
 __all__ = [
     "BLIND_RADIUS_DEG",
     "EDGE_MARGIN_FRACTION",
-    "HINT_RADIUS_DEG",
+    "HINT_FLOOR_RADIUS_DEG",
+    "HINT_MAX_USEFUL_RADIUS_DEG",
     "MIN_USEFUL_FRACTION",
     "FrameAdvice",
     "SolveReport",
@@ -460,6 +500,7 @@ __all__ = [
     "crop_factor",
     "describe",
     "drift_direction_px",
+    "drift_since_deg",
     "frame_advice",
     "keep_capture",
     "solve_hints",

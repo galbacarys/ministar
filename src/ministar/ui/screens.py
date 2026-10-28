@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from nicegui import ui
 
@@ -1163,7 +1163,7 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     """
     from ministar.pointing import describe
     from ministar.raw import convert_to_fits
-    from ministar.solver import solve
+    from ministar.solver import solve_with_fallback
 
     camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
     if camera is None or getattr(camera, "capture_to", None) is None:
@@ -1194,10 +1194,22 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
             # meant to point, not where we are. Later solves hint from the last *solution*,
             # which is measured (01 §5.1).
             previous = None
+            elapsed = 0.0
             if ctx.state.solved and ctx.state.pointing_ra_deg is not None:
                 previous = (ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg)
-            hints = solve_hints(fov_height_deg=optics.height_arcmin / 60.0, previous=previous)
-        result = solve(
+                if ctx.state.pointing_solved_at is not None:
+                    gap = datetime.now(UTC) - ctx.state.pointing_solved_at
+                    elapsed = max(0.0, gap.total_seconds())
+            hints = solve_hints(
+                fov_height_deg=optics.height_arcmin / 60.0,
+                previous=previous,
+                elapsed_s=elapsed,
+                dec_deg=ctx.state.pointing_dec_deg,
+            )
+        # Hinted, because the sky has moved predictably since the last solve; blind as the
+        # net, because a bumped mount moves unpredictably and a missed hint looks just like a
+        # bad image (solve_with_fallback).
+        result, used_blind = solve_with_fallback(
             converted,
             ctx.settings.astap,
             out_base=ctx.settings.paths.scratch / f"point_{stamp}",
@@ -1222,6 +1234,7 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     ctx.state.solved = True
     ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
     ctx.state.pointing_pa_deg = solution.position_angle_deg
+    ctx.state.pointing_solved_at = datetime.now(UTC)
     expected = None
     if profile is not None:
         expected = profile.optics().width_arcmin / 60.0
@@ -1231,7 +1244,10 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
         expected_width_deg=expected,
     )
     ctx.refresh()
-    return report, f"solved from {converted.name}"
+    note = f"solved from {converted.name}"
+    if used_blind:
+        note += "  (blind: the hint missed, so the mount may have moved)"
+    return report, note
 
 
 def render_run(ctx: Context) -> None:

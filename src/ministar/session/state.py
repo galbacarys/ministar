@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
@@ -91,6 +92,9 @@ class SessionState:
     #: Position angle of the image +y axis from the solve (ASTAP's CD matrix). The frame
     #: orientation, which the aiming advice needs and a real camera cannot report.
     pointing_pa_deg: float | None = None
+    #: When that solve happened. The sky has moved since, so the next hint is widened by the
+    #: drift accumulated over this gap (pointing.solve_hints).
+    pointing_solved_at: datetime | None = None
 
     #: Free-form notes surfaced to the user, e.g. "rotate the camera 32 degrees".
     advice: list[str] = field(default_factory=list)

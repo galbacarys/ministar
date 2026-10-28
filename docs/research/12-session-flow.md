@@ -474,3 +474,38 @@ Three things fall out of that, and all three are wanted:
 
 The switch on the page ("let the sky move") freezes the sky where it is, for reading numbers
 off a screenshot; freezing never rewinds to when the mount was set.
+
+## Hints that follow the sky, with a blind net under them
+
+A tight hint is worth seconds (0.9 s against 4-8 s blind, 01 §8), and once the fake sky really
+drifts the previous solution is no longer where the camera is looking. So the hint is
+predicted, not remembered:
+
+    centre = previous + half the drift already elapsed      (east!)
+    radius = 1 deg + half the drift                         (> 20 deg: go blind instead)
+
+Halfway, because from one solve we cannot tell whether the mount is tracking (pointing
+unchanged) or not (pointing moved): the circle centred at the midpoint, of radius the half-drift
+plus a margin, contains both hypotheses and is half the size of a circle that would cover them
+from one end.
+
+**The direction is a trap worth writing down.** The *stars* march west across the frame, while
+the frame's own sky position advances **east** at the same rate -- `RA = LST - HA`, and a fixed
+mount holds the HA. Aiming the hint at the stars' motion puts it wrong by twice the drift: at
+135 mm, dec 41, half an hour apart, that is 7.5 deg instead of the right answer. Caught only by
+testing the hint against what the fake mount measurably does, which is why
+`test_the_hint_direction_matches_what_the_fake_sky_actually_does` exists.
+
+Underneath sits one blind retry (`solver.solve_with_fallback`), because a bumped mount moves
+unpredictably and a missed hint is indistinguishable from a bad image. Measured on ASTAP:
+
+| step | gap | hint | result |
+|---|---|---|---|
+| first solve | -- | blind, FOV only | solved, 3.0" from truth |
+| next solve | 30 min | RA 164.03 deg, r 3.83 | solved **without** the retry, 3.4" |
+| mount bumped 6 deg | -- | RA 167.79 deg, r 1.00 | hinted **fails**, blind retry solves |
+| bumped 15 / 30 deg | -- | same | hinted fails, blind retry solves |
+
+The bump row matters twice over: it proves the retry works, and it proves the hint is a real
+constraint on this build (radius 1 deg fails at 6 deg of separation) rather than a formality --
+so the scaled radius is load-bearing, not decoration.
