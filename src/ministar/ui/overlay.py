@@ -63,8 +63,12 @@ class Overlay:
         mx, my = self.move_px
         return self.inside and math.hypot(mx, my) <= max(_MIN_VISIBLE, self.target_radius_px * 0.3)
 
-    def svg(self) -> str:
-        """The overlay markup, in a viewBox of the frame's own pixels."""
+    def svg(self, image_uri: str = "") -> str:
+        """The overlay markup, in a viewBox of the frame's own pixels.
+
+        The live view is *inside* the SVG rather than behind it: one element, one coordinate
+        space, so the marks cannot drift from the stars however the browser sizes things.
+        """
         if self.width <= 0 or self.height <= 0:
             return ""
         w, h = self.width, self.height
@@ -73,9 +77,15 @@ class Overlay:
         r_target = max(self.target_radius_px, stroke * 6.0)
         r_goal = max(self.target_radius_px, stroke * 8.0)
         parts = [
-            f'<svg viewBox="0 0 {w} {h}" width="100%" height="100%" '
+            f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+            f'viewBox="0 0 {w} {h}" width="100%" height="100%" '
             f'preserveAspectRatio="none" style="display:block;pointer-events:none">'
         ]
+        if image_uri:
+            parts.append(
+                f'<image href="{image_uri}" xlink:href="{image_uri}" x="0" y="0"'
+                f' width="{w}" height="{h}" preserveAspectRatio="none"/>'
+            )
 
         # The run: the target's path, entry to exit, so the line *is* the interval.
         if self.inside:
@@ -193,6 +203,23 @@ def _off_frame_marker(x: float, y: float, w: int, h: int, stroke: float, head: f
     )
 
 
+def frame_svg(width: int, height: int, image_uri: str = "") -> str:
+    """Just the frame, for when the geometry is not known yet but the picture is."""
+    if width <= 0 or height <= 0:
+        return ""
+    image = (
+        f'<image href="{image_uri}" xlink:href="{image_uri}" x="0" y="0" width="{width}" '
+        f'height="{height}" preserveAspectRatio="none"/>'
+        if image_uri
+        else ""
+    )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        f'viewBox="0 0 {width} {height}" width="100%" height="100%" '
+        f'preserveAspectRatio="none" style="display:block;pointer-events:none">{image}</svg>'
+    )
+
+
 def build(
     *,
     width: int,
@@ -273,4 +300,4 @@ def _project(plane: TangentPlane, ra_deg: float, dec_deg: float) -> tuple[float,
     return float(x[0]), float(y[0])
 
 
-__all__ = ["BRIGHT", "DIM", "SOFT", "Overlay", "build"]
+__all__ = ["BRIGHT", "DIM", "SOFT", "Overlay", "build", "frame_svg"]

@@ -965,9 +965,10 @@ def render_point(ctx: Context) -> None:
     """
     ui.label("Pointing").classes("mn-heading")
     station = ctx.station
-    with ui.element("div").classes("mn-stage"):
-        preview = ui.image("").classes("mn-preview")
-        overlay_html = ui.html("").classes("mn-overlay")
+    # One element: the live view is drawn *inside* the pointing SVG, so the marks cannot drift
+    # from the stars. sanitize=False because the content is ours (a data URI and an SVG), and
+    # the default DOMPurify pass is free to strip SVG it does not recognise.
+    overlay_html = ui.html("", sanitize=False).classes("mn-overlay")
     ui.label(
         "circle = the target · reticle = where its run should start · dashed line = its path"
     ).classes("mn-dim")
@@ -1155,27 +1156,25 @@ def render_point(ctx: Context) -> None:
             )
         )
 
-    #: The live view's size, so the overlay's viewBox and the image's box cannot disagree: the
-    #: aspect ratio is pinned from the frame itself rather than inferred from the image.
-    seen_size = {"value": (0, 0)}
-
     def draw_overlay(snapshot, aimed, roll_deg, direction) -> None:
         """The same advice as the text, drawn on the live view: match the circle to the reticle."""
         rig = rig_for(ctx)
+        if snapshot is None or not snapshot.width or not snapshot.height:
+            overlay_html.set_content("")
+            return
         if (
-            snapshot is None
-            or not snapshot.width
-            or aimed is None
+            aimed is None
+            or roll_deg is None
             or rig is None
             or ctx.state.target_ra_deg is None
             or ctx.state.target_dec_deg is None
         ):
-            overlay_html.set_content("")
+            # No geometry yet (no solve, no site, no target): show the frame, draw nothing on it.
+            overlay_html.set_content(
+                overlay.frame_svg(int(snapshot.width), int(snapshot.height), snapshot.data_uri)
+            )
             return
         size = (int(snapshot.width), int(snapshot.height))
-        if size != seen_size["value"]:
-            seen_size["value"] = size
-            preview.props(f'ratio="{size[0]}/{size[1]}"')
         painting = overlay.build(
             width=size[0],
             height=size[1],
@@ -1187,19 +1186,19 @@ def render_point(ctx: Context) -> None:
             target_radius_arcmin=target_radius_arcmin(ctx),
             roll_direction=direction,
         )
-        overlay_html.set_content(painting.svg())
+        overlay_html.set_content(painting.svg(snapshot.data_uri))
 
     def tick() -> None:
         aim_fake()
         snapshot = station.snapshot() if station is not None else None
-        if snapshot is not None and snapshot.data_uri:
-            preview.source = snapshot.data_uri
-            preview.update()
         if snapshot is not None:
             stillness.observe(snapshot, time.monotonic())
             mount_label.text = stillness.describe()
         state = roll_page_state(ctx, station)
+        aimed_now = getattr(getattr(station, "camera", None), "pointing", None)
         if state is None:
+            # The picture is still worth showing without the marks.
+            draw_overlay(snapshot, None, None, None)
             advice_line.text = ""
             detail.text = ""
             ccw_label.classes(replace="mn-dim")
@@ -1238,7 +1237,6 @@ def render_point(ctx: Context) -> None:
         )
         ccw_label.classes(replace="mn-heading" if advice.direction == "ccw" else "mn-dim")
         cw_label.classes(replace="mn-heading" if advice.direction == "cw" else "mn-dim")
-        aimed_now = getattr(getattr(station, "camera", None), "pointing", None)
         draw_overlay(snapshot, aimed_now, roll, advice.direction)
 
         if aim_advice is not None:

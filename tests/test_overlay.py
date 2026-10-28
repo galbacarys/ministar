@@ -140,3 +140,22 @@ def test_the_roll_chevrons_dim_the_direction_that_is_not_the_instruction() -> No
 
     assert cw != ccw
     assert overlay.BRIGHT in cw and overlay.BRIGHT in ccw
+
+
+def test_the_live_view_is_inside_the_same_svg_as_the_marks() -> None:
+    """One element, one coordinate space: alignment cannot depend on how a box is sized."""
+    markup = _paint((RA, DEC)).svg("data:image/jpeg;base64,AAAA")
+
+    assert '<image href="data:image/jpeg;base64,AAAA"' in markup
+    assert f'width="{W}" height="{H}"' in markup
+    assert markup.index("<image") < markup.index("<line"), "the picture goes underneath"
+
+
+def test_the_frame_can_be_shown_before_any_geometry_is_known() -> None:
+    from ministar.ui.overlay import frame_svg
+
+    markup = frame_svg(W, H, "data:image/jpeg;base64,AAAA")
+    assert markup.startswith("<svg ") and "<image" in markup
+
+    # No picture yet, no geometry yet: nothing at all rather than a broken mark.
+    assert frame_svg(0, 0, "data:image/jpeg;base64,AAAA") == ""
