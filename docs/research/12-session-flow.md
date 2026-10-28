@@ -434,3 +434,11 @@ an octagon (frame intersected with its own rotation), not a rectangle. The writt
 - `|dec| < 75 deg` or interval < 30 min: straight-line model, rectangle, no caveat.
 - Otherwise: say so on PARAMETERS, because "the object barely drifts" is not "the frame is
   intact" -- near the pole it turns instead.
+
+**Implemented as `ministar/envelope.py`.** The closed form stays for intervals that turn less
+than 2 deg (it is exact for translation and says what it means); beyond that the *measured*
+intersection is used, so the megapixel count and the slider ceiling are right anywhere on the
+sky. The drawing stays a rectangle on purpose: stacking rejects the outer edges anyway, so the
+octagon is a shape the user never has to think about -- the number is what had to be honest.
+The PARAMETERS caveat is gated on both conditions (|dec| >= 75 **and** interval >= 15 min),
+because a five-minute run at the pole turns only 1.2 deg and needs no explanation.

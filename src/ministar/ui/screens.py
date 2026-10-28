@@ -824,6 +824,13 @@ def render_parameters(ctx: Context) -> None:
             f"{usable:.1f} of {full:.1f} MP usable   ({kept:.0f}% of the frame, "
             f"{drift:.0f} px of drift)"
         ).classes("mn-metrics")
+        if optics.rotation_dominates(dec_deg=dec, seconds=seconds):
+            # Not a warning: the number is measured, this explains why it is lower than a
+            # drift-only reading would suggest. Stacking trims the turning edges anyway.
+            ui.label(
+                "the sky turns here rather than drifts: the count includes field rotation, "
+                "and stacking will trim the outer edges"
+            ).classes("mn-dim")
         ctx.state.usable_mp = usable
 
     def describe(minutes: float) -> str:

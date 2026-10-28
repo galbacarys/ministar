@@ -32,7 +32,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from ministar import envelope
 from ministar.camera.base import pixel_scale_arcsec
+from ministar.envelope import POLE_DEC_DEG, POLE_NOTE_MIN_SECONDS
 
 #: Sidereal rate at the celestial equator, arcsec per second of time. The drift rate
 #: of any fixed object is this times ``cos(dec)`` (brief 10 §2.1).
@@ -228,12 +230,30 @@ class Optics:
     def retained_fraction(self, *, dec_deg: float, seconds: float) -> float:
         """Fraction of the frame covered by **every** frame in a run of that interval.
 
-        The intersection of two rectangles offset by the drift is itself a rectangle, so
-        this is exact rather than an estimate: ``(W - dx)(H - dy) / (W H)`` with the
-        drift on the long axis.
+        Translation is exact in closed form: the intersection of two rectangles offset
+        along the drift is a rectangle, ``(W - dx) / W``, with the drift on the long axis.
+
+        Rotation is not representable that way, so once the field turns more than a couple
+        of degrees the measured intersection takes over (:mod:`ministar.envelope`). Near the
+        pole the drift rate goes to zero while the frame keeps turning, and the closed form
+        would then promise an intact frame for a field rotating out of itself -- 97% against
+        a real 88% at dec 89 over an hour (brief 12).
         """
+        seconds = max(0.0, float(seconds))
+        if envelope.rotation_matters(seconds):
+            return envelope.kept_fraction(
+                width_px=self.width_px,
+                height_px=self.height_px,
+                plate_scale_arcsec=self.plate_scale_arcsec,
+                dec_deg=dec_deg,
+                seconds=seconds,
+            )
         dx = min(self.width_px, self.drift_px(dec_deg=dec_deg, seconds=seconds))
         return max(0.0, (self.width_px - dx) / self.width_px)
+
+    def rotation_dominates(self, *, dec_deg: float, seconds: float) -> bool:
+        """Should the megapixel count come with a word about field rotation?"""
+        return envelope.rotation_dominates(dec_deg=dec_deg, seconds=seconds)
 
     def usable_megapixels(self, *, dec_deg: float, seconds: float) -> float:
         """Megapixels left after the drift, which is what the user actually loses.
@@ -277,6 +297,8 @@ __all__ = [
     "DEFAULT_MIN_WINDOW_S",
     "HINT_DEC_DEG",
     "PLAUSIBLE_PITCH_UM",
+    "POLE_DEC_DEG",
+    "POLE_NOTE_MIN_SECONDS",
     "SIDEREAL_RATE_ARCSEC_PER_S",
     "TINY_PX",
     "Optics",

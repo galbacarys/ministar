@@ -46,6 +46,28 @@ def gnomonic(ra0_deg: float, dec0_deg: float, ra_deg, dec_deg) -> tuple[np.ndarr
     return xi, eta
 
 
+def deproject(ra0_deg: float, dec0_deg: float, xi, eta) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse gnomonic: tangent-plane offsets (RADIANS) back to sky positions.
+
+    Array-safe and scalar-safe, and the exact inverse of :func:`gnomonic` -- which is what
+    lets the envelope turn a frame's corners into sky coordinates and back.
+    """
+    xi = np.asarray(xi, dtype=float)
+    eta = np.asarray(eta, dtype=float)
+    rho = np.hypot(xi, eta)
+    safe = np.where(rho > 1e-15, rho, 1.0)
+    c = np.arctan(rho)
+    d0 = math.radians(dec0_deg)
+    dec = np.arcsin(
+        np.cos(c) * math.sin(d0) + np.where(rho > 1e-15, eta * np.sin(c) * math.cos(d0) / safe, 0.0)
+    )
+    ra = math.radians(ra0_deg) + np.arctan2(
+        xi * np.sin(c),
+        safe * math.cos(d0) * np.cos(c) - eta * math.sin(d0) * np.sin(c),
+    )
+    return np.degrees(ra), np.degrees(dec)
+
+
 @dataclass(frozen=True)
 class TangentPlane:
     """A frame's geometry: where it points, how it is rolled, and its scale."""
@@ -100,4 +122,4 @@ def stars_in_frame(
     return x[keep], y[keep], np.asarray(mag, dtype=float)[keep]
 
 
-__all__ = ["TangentPlane", "gnomonic", "stars_in_frame"]
+__all__ = ["TangentPlane", "deproject", "gnomonic", "stars_in_frame"]

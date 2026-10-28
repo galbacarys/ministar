@@ -215,7 +215,7 @@ def test_the_entry_point_is_inside_the_frame_at_any_roll(roll: float) -> None:
     advice = _advice(*start, pa_y_deg=roll)
 
     assert advice.inside
-    assert advice.minutes_now > 1.0, 'a run needs to be worth starting'
+    assert advice.minutes_now > 1.0, "a run needs to be worth starting"
     assert advice.minutes_now == pytest.approx(advice.minutes_best, rel=0.05)
 
 
