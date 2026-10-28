@@ -470,14 +470,41 @@ in arcsec / width in pixels), or a binned live view (4.93x on the 60D) gets comp
 full-resolution still and the ratio is meaningless.
 
 **What the 2x gate would actually catch**, given the exposure is already capped at 2 px of
-trailing by design (``TRAIL_BUDGET_PX``): focus creep from temperature, mirror sag, a tripod
-bumped *during* the exposure, and the no-stars-at-all case (cloud, lens cap -- where
-``measure_hfd`` returning nan with 0 stars is already more informative than ASTAP's generic
-"no solution found"). It cannot separate defocus from trailing by HFD alone -- but we know the
-drift direction from the roll/PA, so comparing the second moments along and across it would
-separate an elongated PSF from a round fat one for almost no extra cost.
+trailing by design (``TRAIL_BUDGET_PX``): focus creep from temperature, mirror sag, and the
+no-stars-at-all case (cloud, lens cap -- where ``measure_hfd`` returning nan with 0 stars is
+already more informative than ASTAP's generic "no solution found").
+
+**Squiggles, and why the shape test was wrong.** The obvious next thought -- compare second
+moments along and across the drift, so an elongated PSF reads as motion and a round fat one as
+defocus -- does not survive contact with a three-way head. Nobody turns a knob smoothly: the
+mount gets bumped, so a star's path during the exposure is a *squiggle* in no particular
+direction, and its second moments point nowhere useful. Motion while hand-adjusting is also not
+stationary frame to frame, so there is no consistent direction to compare against.
+
+What does separate them is **time, not shape**:
+
+- *Moving*: the frame changes between frames faster and less predictably than drift explains.
+- *Defocused*: the frame is stable and round, just fat.
+
+So the gate belongs in two parts, answering different questions:
+
+1. **Is the mount still?** Cheap and temporal, from what the station already publishes: the
+   live view's 32x32 thumbnail delta (``Snapshot.changed``, currently keyed to "since the last
+   focus pulse") or just the HFD/star count bouncing between ticks. Drift moves the field
+   predictably and slowly; a hand on a knob does not. This is the gate that matters while
+   pointing, and it can also say *when the user has stopped*, which is what a settle pause
+   needs (11 §1: settle before capture).
+2. **Is the frame sharp?** HFD at arcsecond scale, on a centre crop, against a baseline
+   measured the same way. This catches focus creep, and it is worth nothing if the mount is
+   still moving.
+
+A frame taken *while* the gate says "moving" should not be submitted to the solver at all --
+"you moved during the exposure" is a true and actionable statement, where "no solution found"
+is not.
 
 **Simulation status**: focus shift is exerciseable today (the fake's ``_position`` drives blur:
-1.51 px at position 24, 1.73 at 32, 2.49 at 44 -- approaching a 2x gate). Motion trailing is
-*not* modelled in ``StarField`` yet; elongating stars along the drift direction would be a
-small addition and would let the "actively moving" half of the gate be tested.
+1.51 px at position 24, 1.73 at 32, 2.49 at 44 -- approaching a 2x gate). The motion half
+needs no squiggle model at all, because the gate is temporal: jitter the fake's altitude and
+azimuth between frames ("a hand on the knob") and the stillness gate has something to detect.
+A true within-exposure squiggle would need a smear model, and is not needed to test the thing
+we would actually ship.
