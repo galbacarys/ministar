@@ -37,7 +37,11 @@ body, .nicegui-content { background: #000000 !important; }
 .mn-warn { color: #ff9d33; font-family: Consolas, monospace; font-size: 14px; }
 .mn-dim { color: #a33226; font-family: Consolas, monospace; font-size: 13px; }
 .mn-preview { border: 1px solid #5a1510; background: #000000; width: 100%;
-              max-width: 880px; }
+              max-width: 880px; display: block; }
+/* The live view with its pointing overlay on top: the stage holds the image's aspect ratio,
+   and the overlay's viewBox is the frame's own pixel space, so the marks land on the stars. */
+.mn-stage { position: relative; width: 100%; max-width: 880px; margin: 0 auto; }
+.mn-overlay { position: absolute; inset: 0; pointer-events: none; }
 .mn-drive { background: #24080a !important; color: #ff7a6a !important;
             border: 1px solid #6b1f1a !important; font-family: Consolas, monospace;
             font-size: 19px !important; font-weight: 700;

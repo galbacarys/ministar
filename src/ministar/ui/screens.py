@@ -47,6 +47,7 @@ from ministar.site import validate as validate_site
 from ministar.targets import Filters as TargetFilters
 from ministar.targets import Row, compute_visibility, filter_rows, top
 from ministar.ui import focus as focus_screen
+from ministar.ui import overlay
 from ministar.ui.station import Station
 
 #: Rows sent to the browser. Quasar renders client-side, so all ~13 000 would be
@@ -964,7 +965,12 @@ def render_point(ctx: Context) -> None:
     """
     ui.label("Pointing").classes("mn-heading")
     station = ctx.station
-    preview = ui.image("").classes("mn-preview")
+    with ui.element("div").classes("mn-stage"):
+        preview = ui.image("").classes("mn-preview")
+        overlay_html = ui.html("").classes("mn-overlay")
+    ui.label(
+        "circle = the target · reticle = where its run should start · dashed line = its path"
+    ).classes("mn-dim")
     # One stillness tracker for the page: the tick feeds it, the readout shows it, the settle
     # pause waits on it, and _solve refuses to spend a capture while it says "moving".
     stillness = quality.Stillness()
@@ -1149,6 +1155,40 @@ def render_point(ctx: Context) -> None:
             )
         )
 
+    #: The live view's size, so the overlay's viewBox and the image's box cannot disagree: the
+    #: aspect ratio is pinned from the frame itself rather than inferred from the image.
+    seen_size = {"value": (0, 0)}
+
+    def draw_overlay(snapshot, aimed, roll_deg, direction) -> None:
+        """The same advice as the text, drawn on the live view: match the circle to the reticle."""
+        rig = rig_for(ctx)
+        if (
+            snapshot is None
+            or not snapshot.width
+            or aimed is None
+            or rig is None
+            or ctx.state.target_ra_deg is None
+            or ctx.state.target_dec_deg is None
+        ):
+            overlay_html.set_content("")
+            return
+        size = (int(snapshot.width), int(snapshot.height))
+        if size != seen_size["value"]:
+            seen_size["value"] = size
+            preview.props(f'ratio="{size[0]}/{size[1]}"')
+        painting = overlay.build(
+            width=size[0],
+            height=size[1],
+            pointing=aimed,
+            roll_deg=float(roll_deg),
+            optics=rig.optics(),
+            target_ra_deg=ctx.state.target_ra_deg,
+            target_dec_deg=ctx.state.target_dec_deg,
+            target_radius_arcmin=target_radius_arcmin(ctx),
+            roll_direction=direction,
+        )
+        overlay_html.set_content(painting.svg())
+
     def tick() -> None:
         aim_fake()
         snapshot = station.snapshot() if station is not None else None
@@ -1198,6 +1238,8 @@ def render_point(ctx: Context) -> None:
         )
         ccw_label.classes(replace="mn-heading" if advice.direction == "ccw" else "mn-dim")
         cw_label.classes(replace="mn-heading" if advice.direction == "cw" else "mn-dim")
+        aimed_now = getattr(getattr(station, "camera", None), "pointing", None)
+        draw_overlay(snapshot, aimed_now, roll, advice.direction)
 
         if aim_advice is not None:
             aimed = getattr(getattr(station, "camera", None), "pointing", None)

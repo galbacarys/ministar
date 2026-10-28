@@ -532,3 +532,35 @@ Three deliberate details:
 The rule itself is one line in `quality.should_hold_off`, next to the other "should we spend a
 solve on this?" answers, so the threshold is argued with in a test rather than tuned in a click
 handler.
+
+## POINT as a picture (`ui/overlay.py`)
+
+The page already states everything in words -- "target 3.9 deg east", "move the mount 50' east",
+"drift ahead 34 min" -- and words are precise but slow to read in the dark. The overlay draws the
+same geometry onto the live view, in the frame's own pixel space:
+
+| mark | meaning |
+|---|---|
+| dashed line, edge to edge | the run available: entry boundary to exit boundary, along the drift |
+| soft circle + dot | the target where it is now, sized to the object |
+| bright reticle | where the target must sit to start that run (the best start) |
+| arrow between them | the correction, as a direction rather than a sentence |
+| chevrons bottom-left/right | roll: the instructed direction bright, the other dimmed |
+
+**The one thing that can seriously mislead is the arrow's frame of reference.** Moving the mount
+east makes the sky appear to move west, so an on-screen arrow drawn in *mount* terms points
+opposite to how the target circle actually travels -- the user turns the knob the arrow suggests
+and the circle moves away. The arrow therefore shows where the **target must appear**, the legend
+says "align the circle with the reticle", and the *text* keeps saying which way to move the mount.
+Both are correct; they are just different frames, and the picture's frame is the one the user is
+looking at. (In the fake rig the projection puts east to the left, so "goal x < target x" means the
+circle must move east -- worth remembering when reading the tests.)
+
+Scale is derived from the **live view's own width** (`width_arcsec / width_px`), never the still's
+plate scale: a binned live view would otherwise draw every circle at the wrong size, and the
+radius in pixels would be 4.93x out. Pinned by a test that halves the frame width and expects the
+circle to shrink by the same factor.
+
+Verified numerically before shipping (135 mm, Pleiades, 5184x3456): aimed at the target the
+reticle lands at x=514 px, i.e. the entry margin plus the object's 443 px radius; aimed for the run
+the circle and reticle are the same mark (0 px apart), which is the whole point of the picture.

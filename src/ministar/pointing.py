@@ -159,7 +159,7 @@ def _chord_px(ux: float, uy: float, width_px: int, height_px: int) -> float:
     return min(lengths) if lengths else 0.0
 
 
-def _edge_travel_px(
+def edge_travel_px(
     px: float, py: float, ux: float, uy: float, width_px: int, height_px: int
 ) -> float:
     """Distance from a point inside the frame to the edge the drift leads to."""
@@ -368,7 +368,7 @@ def frame_advice(
     arcmin_per_px = optics.plate_scale_arcsec / 60.0
     travel_px = max(
         0.0,
-        (_edge_travel_px(px, py, ux, uy, optics.width_px, optics.height_px) if inside else 0.0)
+        (edge_travel_px(px, py, ux, uy, optics.width_px, optics.height_px) if inside else 0.0)
         - margin_px
         - radius_px,
     )
@@ -394,7 +394,7 @@ def frame_advice(
     )
     best_px = max(
         0.0,
-        _edge_travel_px(entry_x, entry_y, ux, uy, optics.width_px, optics.height_px)
+        edge_travel_px(entry_x, entry_y, ux, uy, optics.width_px, optics.height_px)
         - margin_px
         - radius_px,
     )
@@ -514,6 +514,7 @@ __all__ = [
     "describe",
     "drift_direction_px",
     "drift_since_deg",
+    "edge_travel_px",
     "frame_advice",
     "keep_capture",
     "solve_hints",
