@@ -110,3 +110,25 @@ def test_the_position_angle_uses_cd_not_crota() -> None:
     report = describe(FRAME_A, width_px=1958)
 
     assert "178.05" in report.facts[1]
+
+
+# -- what to tell the solver ------------------------------------------------
+def test_the_first_solve_is_blind_but_for_the_field() -> None:
+    """We aimed by hand at a target; that is not where the camera is. Do not fake a position."""
+    from ministar.pointing import BLIND_RADIUS_DEG, solve_hints
+
+    hints = solve_hints(fov_height_deg=2.19)
+
+    assert hints.fov_height_deg == 2.19, "the lens is known"
+    assert hints.ra_hours is None and hints.south_pole_distance_deg is None
+    assert hints.radius_deg == BLIND_RADIUS_DEG == 180.0
+
+
+def test_a_resolve_hints_around_the_previous_solution() -> None:
+    from ministar.pointing import HINT_RADIUS_DEG, solve_hints
+
+    hints = solve_hints(fov_height_deg=2.19, previous=(160.27, 41.27))
+
+    assert hints.ra_hours == pytest.approx(160.27 / 15.0)
+    assert hints.south_pole_distance_deg == pytest.approx(131.27)
+    assert hints.radius_deg == HINT_RADIUS_DEG == 3.0

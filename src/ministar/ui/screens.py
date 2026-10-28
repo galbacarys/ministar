@@ -25,7 +25,7 @@ from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, ca
 from ministar.config import Settings
 from ministar.exposure import choose_exposure
 from ministar.io.tiff import TiffError, read_frame_exif
-from ministar.pointing import SolveReport
+from ministar.pointing import SolveReport, solve_hints
 from ministar.reframe.roll import parallactic_angle, roll_advice
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
@@ -887,9 +887,16 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
     roll = getattr(camera, "roll_deg", None)
     if roll is None:
         return None
+    # Use where the camera *is* when the camera can say, not where we meant to point: the
+    # parallactic angle depends on hour angle, so a mount that has been nudged has a
+    # different roll advice than the target implies.
+    aimed = getattr(camera, "pointing", None)
+    ra_deg, dec_deg = (
+        aimed if aimed is not None else (ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+    )
     lst = sky_module.lst_deg(datetime.now().astimezone(), site.longitude_deg)
-    hour_angle = (lst - ctx.state.target_ra_deg + 180.0) % 360.0 - 180.0
-    q = parallactic_angle(site.latitude_deg, ctx.state.target_dec_deg, hour_angle)
+    hour_angle = (lst - ra_deg + 180.0) % 360.0 - 180.0
+    q = parallactic_angle(site.latitude_deg, dec_deg, hour_angle)
     return float(q), float(roll)
 
 
@@ -925,6 +932,40 @@ def render_point(ctx: Context) -> None:
             cw_label = ui.label("CW >>").classes("mn-metrics")
 
         camera = getattr(station, "camera", None) if station is not None else None
+        if getattr(camera, "move_by", None) is not None:
+            # Fake mount only: a real rig is moved by the user, and the arrow keys would be
+            # a lie about hardware we cannot command.
+            ui.label("aim the fake telescope").classes("mn-dim")
+            pointing_label = ui.label("").classes("mn-body")
+            step = (
+                ui.select(
+                    {"0.0833": "5'", "0.5": "30'", "2.0": "2 deg"},
+                    value="0.0833",
+                    label="step",
+                )
+                .classes("mn-body")
+                .style("width: 120px")
+            )
+
+            def move(d_ra: float, d_dec: float) -> None:
+                camera.move_by(
+                    float(step.value or "0.0833") * d_ra, float(step.value or "0.0833") * d_dec
+                )
+
+            with ui.row().classes("items-center justify-center").style("gap: 6px"):
+                ui.button("RA -", on_click=lambda: move(-1, 0)).classes("mn-drive")
+                ui.button("Dec +", on_click=lambda: move(0, 1)).classes("mn-drive")
+                ui.button("Dec -", on_click=lambda: move(0, -1)).classes("mn-drive")
+                ui.button("RA +", on_click=lambda: move(1, 0)).classes("mn-drive")
+
+            def aim_at_target() -> None:
+                if ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None:
+                    camera.set_pointing(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+
+            ui.button("aim at the target", on_click=aim_at_target).classes("mn-action")
+        else:
+            pointing_label = None
+
         if getattr(camera, "set_roll", None) is not None:
             # Fake camera only: a real user turns the clamp, so there is no control to offer.
             ui.label("fake camera roll").classes("mn-dim")
@@ -993,6 +1034,12 @@ def render_point(ctx: Context) -> None:
             )
             return
         missing.text = ""
+        if pointing_label is not None:
+            aimed = getattr(getattr(station, "camera", None), "pointing", None)
+            if aimed is not None:
+                pointing_label.text = (
+                    f"telescope at RA {aimed[0] / 15.0:.3f} h  Dec {aimed[1]:+.3f} deg"
+                )
         q, roll = state
         advice = roll_advice(psi_deg=roll, parallactic_deg=q)
         advice_line.text = advice.describe().upper()
@@ -1021,7 +1068,7 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     """
     from ministar.pointing import describe
     from ministar.raw import convert_to_fits
-    from ministar.solver import SolveHints, solve
+    from ministar.solver import solve
 
     camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
     if camera is None or getattr(camera, "capture_to", None) is None:
@@ -1052,22 +1099,13 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
         hints = None
         if profile is not None:
             optics = profile.optics()
-            # Hint from where we are pointed, exactly as NINA does from the mount. Without
-            # an RA/Dec hint ASTAP starts at 0h/0deg and searches only `radius_deg` outward,
-            # so a field on the other side of the sky is never examined -- the failure looks
-            # like "no solution found" with plenty of stars detected. With no target to hint
-            # from, go blind instead of guessing a small radius.
-            aimed = ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None
-            hints = SolveHints(
-                fov_height_deg=optics.height_arcmin / 60.0,
-                ra_hours=ctx.state.target_ra_deg / 15.0 if aimed else None,
-                south_pole_distance_deg=(
-                    ctx.state.target_dec_deg + 90.0
-                    if ctx.state.target_dec_deg is not None
-                    else None
-                ),
-                radius_deg=3.0 if aimed else 180.0,
-            )
+            # The first solve is blind but for the field of view: the target is where we
+            # meant to point, not where we are. Later solves hint from the last *solution*,
+            # which is measured (01 §5.1).
+            previous = None
+            if ctx.state.solved and ctx.state.pointing_ra_deg is not None:
+                previous = (ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg)
+            hints = solve_hints(fov_height_deg=optics.height_arcmin / 60.0, previous=previous)
         result = solve(
             converted,
             ctx.settings.astap,

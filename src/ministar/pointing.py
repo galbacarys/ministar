@@ -15,7 +15,17 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from ministar.solver.astap import Solution
+from ministar.solver.astap import Solution, SolveHints
+
+#: First solve of a session: blind but for the field of view. The user has aimed the rig by
+#: hand at a target, and the target is where we *intended* to point, not where we are -- so
+#: hinting RA/Dec from it would be an assumption dressed up as knowledge. A blind search with
+#: a known FOV costs a few seconds (01 §8) and cannot be wrong about position.
+BLIND_RADIUS_DEG = 180.0
+
+#: Re-solves after a reframe: hint around the previous solution, which *is* measured. Cheap
+#: and accurate, because between reframes the rig moves by arcminutes.
+HINT_RADIUS_DEG = 3.0
 
 #: How much of the frame a solve has to cover to be worth having: a quarter of it.
 #:
@@ -27,6 +37,23 @@ from ministar.solver.astap import Solution
 #: ceiling, a quarter of the frame is a field up to ~25 deg tall -- so 35 mm and longer are
 #: fine, and an ultra-wide wants W08).
 MIN_USEFUL_FRACTION = 0.25
+
+
+def solve_hints(
+    *, fov_height_deg: float, previous: tuple[float, float] | None = None
+) -> SolveHints:
+    """Hints for one solve: always the field, and a position only if we have measured one.
+
+    ``previous`` is a *solution's* RA/Dec, never the target's. The distinction is the whole
+    point: before the first solve we do not know where the camera is looking, and a blind
+    search with an FOV hint is both correct and affordable.
+    """
+    return SolveHints(
+        fov_height_deg=fov_height_deg,
+        ra_hours=previous[0] / 15.0 if previous is not None else None,
+        south_pole_distance_deg=previous[1] + 90.0 if previous is not None else None,
+        radius_deg=HINT_RADIUS_DEG if previous is not None else BLIND_RADIUS_DEG,
+    )
 
 
 def solved_width_deg(solution: Solution, *, width_px: int) -> float:
@@ -112,9 +139,12 @@ def describe(
 
 
 __all__ = [
+    "BLIND_RADIUS_DEG",
+    "HINT_RADIUS_DEG",
     "MIN_USEFUL_FRACTION",
     "SolveReport",
     "crop_factor",
     "describe",
+    "solve_hints",
     "solved_width_deg",
 ]

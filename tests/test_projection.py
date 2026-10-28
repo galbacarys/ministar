@@ -102,3 +102,38 @@ def test_offsets_map_to_distinct_pixels() -> None:
     assert len(set(np.round(y, 3))) == len(offsets)
     # The projection is not exactly linear, but over 3 deg it should not be far off.
     assert abs(y[1] - y[0]) == pytest.approx(0.5 * 3600 / SCALE, rel=0.02)
+
+
+def test_the_fake_mount_can_be_nudged() -> None:
+    """Aim roughly, then let the solver say how far off we are -- that is the loop."""
+    from ministar.rig import RigProfile
+    from ministar.ui.station import FakeCamera
+
+    camera = FakeCamera(optics=RigProfile.fake().optics(), pointing=(10.0, 41.0))
+
+    camera.move_by(d_ra_deg=0.5, d_dec_deg=-0.25)
+    assert camera.pointing == pytest.approx((10.5, 40.75))
+
+    camera.move_by(d_ra_deg=-20.0)  # RA wraps
+    assert camera.pointing[0] == pytest.approx(350.5)
+
+    camera.move_by(d_dec_deg=100.0)  # Dec clamps at the pole
+    assert camera.pointing[1] == pytest.approx(90.0)
+
+
+def test_moving_the_fake_changes_the_field_it_shows() -> None:
+    """Otherwise the controls would be decoration: the scene must follow the pointing."""
+    from ministar.rig import RigProfile
+    from ministar.starcatalog import StarCatalog
+    from ministar.ui.station import FakeCamera
+
+    catalog = StarCatalog.load("/mnt/c/Program Files/astap")
+    camera = FakeCamera(
+        optics=RigProfile.fake().optics(), catalog=catalog, pointing=(10.6847, 41.269)
+    )
+    before = camera.scene().stars[0].x
+
+    camera.move_by(d_ra_deg=1.0)
+    after = camera.scene().stars[0].x
+
+    assert before != pytest.approx(after, abs=1e-6), "the field must shift with the mount"

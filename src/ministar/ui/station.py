@@ -138,6 +138,19 @@ class FakeCamera:
         """Aim the fake camera. A real one is aimed by the user on the tripod."""
         self._pointing = (float(ra_deg), float(dec_deg))
 
+    def move_by(self, d_ra_deg: float = 0.0, d_dec_deg: float = 0.0) -> None:
+        """Nudge the fake mount, as a hand on the head would.
+
+        Exponential in the fake's coordinates: RA wraps, Dec clamps at the poles. A real
+        nudge is imprecise -- 2-5 arcmin on a geared head, 20-60 on a ball head (04 §2.1) --
+        and the point of these controls is to reproduce *that*: aim roughly, then let the
+        solver tell you how far off you are.
+        """
+        if self._pointing is None:
+            return
+        ra, dec = self._pointing
+        self._pointing = ((ra + d_ra_deg) % 360.0, max(-90.0, min(90.0, dec + d_dec_deg)))
+
     @property
     def pointing(self) -> tuple[float, float] | None:
         return self._pointing
