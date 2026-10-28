@@ -13,6 +13,8 @@ without touching the shell.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +22,7 @@ from datetime import UTC, datetime
 from nicegui import ui
 
 from ministar import preflight as preflight_checks
+from ministar import quality
 from ministar import sky as sky_module
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
 from ministar.config import Settings
@@ -868,13 +871,27 @@ def render_focus(ctx: Context) -> None:
     def accept(snapshot) -> None:
         ctx.state.focus_position = snapshot.position
         ctx.state.focus_hfd = snapshot.hfd if snapshot.stars else None
+        # Also in arcseconds, measured from the live view's own pixel width: later, a frame is
+        # compared against this one, and a binned live view's pixels are not a still's
+        # (quality.hfd_arcsec).
+        rig = rig_for(ctx)
+        ctx.state.focus_hfd_arcsec = None
+        if ctx.state.focus_hfd is not None and rig is not None and snapshot.width:
+            optics = rig.optics()
+            ctx.state.focus_hfd_arcsec = quality.hfd_arcsec(
+                ctx.state.focus_hfd,
+                width_px=snapshot.width,
+                width_arcsec=optics.width_arcsec,
+            )
         ctx.refresh()
 
     focus_screen.render_focus(ctx.station, on_accept=accept)
     if ctx.state.focus_hfd is not None:
+        arcsec = ctx.state.focus_hfd_arcsec
         ui.label(
             f"recorded focus: position {ctx.state.focus_position:+d}, "
             f"HFD {ctx.state.focus_hfd:.2f} px"
+            + (f' ({arcsec:.1f}")' if arcsec is not None else "")
         ).classes("mn-body")
     else:
         ui.label("no focus recorded yet").classes("mn-dim")
@@ -882,6 +899,11 @@ def render_focus(ctx: Context) -> None:
 
 def render_calibrate(ctx: Context) -> None:
     _not_implemented("Head calibration", "13-head-calibration.md")
+
+
+#: How long to wait for a moving mount to settle before a capture. Long enough for a hand to
+#: come off a knob, short enough that a bump does not look like a hang.
+SETTLE_TIMEOUT_S = 4.0
 
 
 def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
@@ -932,6 +954,10 @@ def render_point(ctx: Context) -> None:
     ui.label("Pointing").classes("mn-heading")
     station = ctx.station
     preview = ui.image("").classes("mn-preview")
+    # One stillness tracker for the page: the tick feeds it, the readout shows it, the settle
+    # pause waits on it, and _solve refuses to spend a capture while it says "moving".
+    stillness = quality.Stillness()
+    mount_label = ui.label("").classes("mn-dim")
 
     # -- roll ---------------------------------------------------------------
     with ui.column().classes("w-full items-center"):
@@ -1035,9 +1061,18 @@ def render_point(ctx: Context) -> None:
         solve_notes = ui.label("").classes("mn-dim")
         solve_warnings = ui.label("").classes("mn-warn")
         solve_note = ui.label("").classes("mn-dim")
+        settle_label = ui.label("").classes("mn-warn")
 
-        def run_solve() -> None:
-            report, note = _solve(ctx)
+        async def run_solve() -> None:
+            # A hand on the mount produces smeared frames that solve badly or not at all, so
+            # wait for it to be still before spending one. Bounded: if it never settles, say so
+            # rather than hang.
+            deadline = time.monotonic() + SETTLE_TIMEOUT_S
+            while stillness.moving and time.monotonic() < deadline:
+                settle_label.text = f"{stillness.describe()} -- waiting for it to settle"
+                await asyncio.sleep(0.2)
+            settle_label.text = ""
+            report, note = _solve(ctx, stillness)
             solve_note.text = note
             if report is not None:
                 solve_facts.text = "\n".join(report.facts)
@@ -1083,6 +1118,9 @@ def render_point(ctx: Context) -> None:
         if snapshot is not None and snapshot.data_uri:
             preview.source = snapshot.data_uri
             preview.update()
+        if snapshot is not None:
+            stillness.observe(snapshot, time.monotonic())
+            mount_label.text = stillness.describe()
         state = roll_page_state(ctx, station)
         if state is None:
             advice_line.text = ""
@@ -1155,12 +1193,15 @@ def render_point(ctx: Context) -> None:
     ui.timer(0.25, tick)
 
 
-def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
+def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     """Capture, convert to FITS, solve, and record the result in the session.
 
     ASTAP cannot read RAW (01 §9), so the capture is converted on the way through -- the same
     path the run loop will use for every frame.
     """
+    from ministar import quality
+    from ministar.focus.metrics import measure_hfd
+    from ministar.io.fits import read_fits
     from ministar.pointing import describe
     from ministar.raw import convert_to_fits
     from ministar.solver import solve_with_fallback
@@ -1168,6 +1209,8 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
     if camera is None or getattr(camera, "capture_to", None) is None:
         return None, "this camera cannot capture in this session (the fake one cannot)"
+    if stillness is not None and stillness.moving:
+        return None, f"{stillness.describe()} -- wait for it to settle, then solve again"
     if ctx.settings.astap is None:
         return None, "astap_cli.exe not found -- run preflight"
 
@@ -1175,6 +1218,8 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     # here. Re-aiming on every solve would silently undo the nudge the user just made -- and
     # the nudge is the measurement.
 
+    station = ctx.station
+    opened_at = time.monotonic()
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     suffix = ".fit" if getattr(camera, "disposable_frames", False) else ".cr2"
     raw = ctx.settings.paths.frames / f"point_{stamp}{suffix}"
@@ -1187,6 +1232,25 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
         else:
             converted = raw
         profile = rig_for(ctx)
+
+        # Judge the frame before spending a solve on it. Measured on a centre crop because the
+        # whole frame costs 0.80 s -- as much as a hinted solve (11 §"quality gate").
+        focus_note = None
+        if profile is not None and converted.suffix.lower() in {".fit", ".fits"}:
+            try:
+                image, _ = read_fits(converted)
+                hfd_px, _stars = measure_hfd(quality.centre_crop(image))
+                optics = profile.optics()
+                width = int(image.shape[1])
+                focus_note = quality.focus_verdict(
+                    quality.hfd_arcsec(
+                        hfd_px, width_px=width, width_arcsec=width * optics.plate_scale_arcsec
+                    ),
+                    ctx.state.focus_hfd_arcsec,
+                )
+            except Exception as exc:  # a diagnostic must never take the solve down
+                focus_note = f"could not measure focus: {type(exc).__name__}: {exc}"
+
         hints = None
         if profile is not None:
             optics = profile.optics()
@@ -1230,6 +1294,18 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
         reason = result.error or result.error_meaning or "unknown"
         return None, f"not solved: {reason}"
 
+    # Was the mount moving while the shutter was open? The pump's own history answers this
+    # even though the UI thread was blocked: a smeared frame is not worth a solver's time, and
+    # "you moved" is a better sentence than "no solution found".
+    if station is not None and hasattr(station, "motion_since"):
+        worst = station.motion_since(opened_at)
+        moved = quality.motion_verdict(worst)
+        if moved is not None:
+            if converted is not raw:
+                raw.unlink(missing_ok=True)
+            converted.unlink(missing_ok=True)
+            return None, f"nothing solved: {moved}"
+
     solution = result.solution
     ctx.state.solved = True
     ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
@@ -1247,6 +1323,8 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
     note = f"solved from {converted.name}"
     if used_blind:
         note += "  (blind: the hint missed, so the mount may have moved)"
+    if focus_note is not None:
+        note += f"\n{focus_note}"
     return report, note
 
 

@@ -118,3 +118,18 @@ def test_an_infinite_hfd_is_never_accepted() -> None:
     sample = a_driver(FakeStation(snap=Snap(stars=20, hfd=math.inf))).measure()
 
     assert not sample.accepted
+
+
+def test_motion_history_answers_whether_the_mount_moved_during_a_capture() -> None:
+    """The pump samples while the UI thread is blocked, which is exactly when it matters."""
+    from ministar.ui.station import FakeCamera, Station
+
+    station = Station(FakeCamera())
+    assert station.motion_since(0.0) == -1.0, "silence is not stillness"
+
+    with station._lock:  # the pump's own bookkeeping
+        station._motion.extend([(100.0, 2.4), (101.0, 9.5), (102.0, 2.6)])
+
+    assert station.motion_since(100.5) == 9.5
+    assert station.motion_since(101.5) == 2.6
+    assert station.motion_since(103.0) == -1.0

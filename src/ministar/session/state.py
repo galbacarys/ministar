@@ -82,7 +82,11 @@ class SessionState:
 
     # Focus (11, 12 §3)
     focus_position: int | None = None
+    #: HFD in the *live view's* pixels -- what the focus screen displays.
     focus_hfd: float | None = None
+    #: The same measurement in arcseconds, which is what a later frame can be compared against:
+    #: a binned live view and a full-resolution still do not share a pixel scale (quality.py).
+    focus_hfd_arcsec: float | None = None
 
     # Pointing (10 §5)
     solved: bool = False

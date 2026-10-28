@@ -508,3 +508,47 @@ needs no squiggle model at all, because the gate is temporal: jitter the fake's 
 azimuth between frames ("a hand on the knob") and the stillness gate has something to detect.
 A true within-exposure squiggle would need a smear model, and is not needed to test the thing
 we would actually ship.
+
+### Built: `ministar/quality.py`, and what calibrating it taught
+
+Shipped as: `hfd_arcsec()`, `focus_verdict()`, `motion_verdict()`, `centre_crop()`, and a
+`Stillness` tracker fed one snapshot per tick. The POINT page shows its verdict live, waits up
+to 4 s for it to say "still" before capturing, and refuses to spend a capture or a solve while
+it says "moving".
+
+**The motion threshold was guessed wrong by 250x, then measured.** The estimate was ~0.01 grey
+levels/s (a drifting sky moves one 32x32 thumbnail cell per 96 s). Measured on the fake: noise
+floor **2.6**, drifting **2.4**, a 2' nudge **2.4** -- drift and noise are *indistinguishable*,
+because frame-to-frame noise dominates the thumbnail delta. A hand moving the head 5' between
+frames gives **4.0-8.5**, and 20' gives 4.3-8.4. So `MOVING_LEVELS_PER_S = 5.0`, which sits
+above the noise and below a real hand -- and means **a bump under a few arcminutes is
+invisible**, which is acceptable because such a bump usually still solves.
+
+**Phase correlation was the obvious better metric and it is useless here.** It would ignore noise
+by looking only for *coherent* shift, but at 32x32 one cell is 162 px = **18 arcmin**, so 2', 5'
+and even 20' nudges all reported a shift of exactly 0.00 cells. A finer thumbnail would be
+needed, and that is a different measurement, not a free improvement.
+
+**What made the gate work is HFD stability, not the picture delta.** A defocused frame is
+*stably* soft; a frame taken while the mount moves is *erratically* soft. Measured: four samples
+of a defocused frame swing 5% around their median, while a hand on the knob swings 100%+. So
+`Stillness` needs both signals: the delta catches the loud cases, the swing catches the quiet
+ones, and a stably-soft frame is correctly attributed to focus.
+
+**Verified on ASTAP, fake frames, 135 mm** (flux as shipped, real star database):
+
+| focus position | HFD (centre crop) | verdict |
+|---|---|---|
+| 24 (best focus) | 1.45 px = 9.9" , 24 stars | none -- and the frame **solved** |
+| 40 | 2.27 px = 15.4" | none, under 2x |
+| 60 | 3.15 px = 21.3" | **fires**: "focus has drifted, or the frame is smeared" |
+
+A tempting change was to lower the fake's capture flux so its stills stop clipping (clipping is
+what makes `measure_hfd` return nan on some frames). Measured first: at flux 1200 the best-focus
+frame has 10 measurable stars but **ASTAP stops solving it**. So the flux stays at 6200 -- the
+fake must be solvable first and measurable second, which is also the order of importance on real
+hardware.
+
+**Still needs real hardware**: the 5.0 levels/s threshold is calibrated against the fake's
+synthetic noise. A real live view has JPEG artefacts, sensor noise and auto-exposure changes, so
+the number will move; it is a named constant so it can be re-measured in one place.

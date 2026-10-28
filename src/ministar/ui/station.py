@@ -53,15 +53,28 @@ class Analysis:
     stars: int
     contrast: float
     thumb: np.ndarray
+    #: The frame's own size, because HFD is in pixels and a binned live view's pixels are not
+    #: the sensor's: without this an HFD cannot be converted to arcseconds, which is the only
+    #: scale on which two measurements are comparable (11 §"quality gate").
+    width: int = 0
+    height: int = 0
 
 
 def analyse(jpeg: bytes) -> Analysis:
     image = decode_jpeg(jpeg)
+    height, width = image.shape[:2]
     gray = to_gray(image)
     # Pass the INTEGER image: saturation_level returns None for float, which would
     # silently disable saturated-star rejection and fabricate star counts.
     hfd, stars = measure_hfd(image)
-    return Analysis(hfd=hfd, stars=stars, contrast=tenengrad(gray), thumb=thumbnail(gray))
+    return Analysis(
+        hfd=hfd,
+        stars=stars,
+        contrast=tenengrad(gray),
+        thumb=thumbnail(gray),
+        width=int(width),
+        height=int(height),
+    )
 
 
 class FakeCamera:
@@ -378,6 +391,13 @@ class Snapshot:
     pending: int = 0
     #: Max thumbnail delta since the last pulse; -1 means "nothing to compare".
     changed: float = -1.0
+    #: How fast the picture is changing, in grey levels per second on the 32x32 thumbnail.
+    #: Drift is slow and steady and a hand on the mount is neither, so this is what separates
+    #: "the sky is moving" from "the user is still adjusting" (11 §"quality gate"). -1 = unknown.
+    motion: float = -1.0
+    #: The live view's pixel dimensions, for converting HFD to arcseconds.
+    width: int = 0
+    height: int = 0
 
 
 class Station:
@@ -390,6 +410,10 @@ class Station:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_thumb: np.ndarray | None = None
+        self._last_thumb_at: float | None = None
+        #: (monotonic time, levels per second) for the last few seconds, so a capture can ask
+        #: afterwards whether the mount was moving *while* the shutter was open.
+        self._motion: deque[tuple[float, float]] = deque(maxlen=240)
         self._mark: np.ndarray | None = None
         self._snap = Snapshot(name=getattr(camera, "name", "camera"), error=initial_error)
 
@@ -416,6 +440,16 @@ class Station:
     def snapshot(self) -> Snapshot:
         with self._lock:
             return self._snap
+
+    def motion_since(self, since: float) -> float:
+        """The largest frame-to-frame motion seen since ``since`` (monotonic seconds).
+
+        -1 when nothing was sampled in that window, which a caller must treat as "unknown"
+        rather than "still": silence is not stillness.
+        """
+        with self._lock:
+            seen = [rate for when, rate in self._motion if when >= since]
+        return max(seen) if seen else -1.0
 
     def request(self, direction: Direction, count: int = 1) -> int:
         """Queue pulses. Never touches the camera, so the click returns instantly."""
@@ -454,11 +488,19 @@ class Station:
                 self._send_batch()
                 jpeg = self._camera.grab_live_jpeg()
                 analysis = analyse(jpeg)
+                now = time.monotonic()
                 with self._lock:
                     mark, self._mark = self._mark, None
-                    self._last_thumb = analysis.thumb
                     previous = self._snap
                     changed = -1.0 if mark is None else float(np.abs(analysis.thumb - mark).max())
+                    motion = -1.0
+                    if self._last_thumb is not None and self._last_thumb_at is not None:
+                        gap = max(1e-3, now - self._last_thumb_at)
+                        delta = float(np.abs(analysis.thumb - self._last_thumb).max())
+                        motion = delta / gap
+                        self._motion.append((now, motion))
+                    self._last_thumb = analysis.thumb
+                    self._last_thumb_at = now
                     self._snap = Snapshot(
                         data_uri="data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
                         hfd=analysis.hfd,
@@ -470,6 +512,9 @@ class Station:
                         frames=previous.frames + 1,
                         pending=len(self._pulses),
                         changed=changed,
+                        motion=motion,
+                        width=analysis.width,
+                        height=analysis.height,
                     )
             except Exception as exc:
                 self._publish(error=f"{type(exc).__name__}: {exc}")
