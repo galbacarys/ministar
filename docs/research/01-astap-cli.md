@@ -218,6 +218,41 @@ cannot survive a Unix `$?`. Do not use those modes across the WSL boundary.
 
 ---
 
+## 5.1 Solving fails silently when the hint has no position ⚠️
+
+Measured 2026-10-27, and it cost a session. ASTAP searches outward from a **start position**
+by the radius you give it. Pass `-fov` and `-r` but no `-ra`/`-spd`, and the start position is
+0h/0deg -- so a field at 10h is never examined, while the log still says "42 stars, 145 quads
+selected in the image", which reads like a star-detection problem:
+
+```
+Start position: 00: 00  00.0, +00d 00  00      <- no hint
+2d,5d,8d,No solution found!  :(
+```
+
+Pass the pointing and the same frame solves in a second:
+
+```
+Start position: 06: 30  49.0, +29d 39  49
+24 of 24 quads selected matching within 0.007 tolerance.
+Solution found: ...
+```
+
+So *always* hint from where we think we are pointed (`SolveHints.ra_hours` /
+`south_pole_distance_deg`), and use `radius_deg=180` only when there is genuinely nothing to
+hint from. A small radius combined with a default start position is the worst of both.
+
+## 5.2 FITS is bottom-up, and getting it wrong looks like a rotation ⚠️
+
+Our writer originally stored row 0 of the numpy array as the first data row. FITS stores the
+**bottom** row first, so every file we produced was upside down. The failure mode is not "file
+unreadable" -- ASTAP solved it happily and reported **position angle 180, parity mirrored**
+instead of 0 and normal. Fixed in `io/fits.py` (writer flips, reader flips back), with a test
+that reads the raw bytes rather than round-tripping through our own code, since a round trip
+through the same convention hides exactly this bug.
+
+---
+
 ## 6.0 The .1476 tile format, decoded ✅
 
 Read out of the installed D80 tiles and the manual's appendix 3, 2026-10-27. Our reader

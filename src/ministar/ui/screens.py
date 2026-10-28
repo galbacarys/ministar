@@ -1052,7 +1052,22 @@ def _solve(ctx: Context) -> tuple[SolveReport | None, str]:
         hints = None
         if profile is not None:
             optics = profile.optics()
-            hints = SolveHints(fov_height_deg=optics.height_arcmin / 60.0)
+            # Hint from where we are pointed, exactly as NINA does from the mount. Without
+            # an RA/Dec hint ASTAP starts at 0h/0deg and searches only `radius_deg` outward,
+            # so a field on the other side of the sky is never examined -- the failure looks
+            # like "no solution found" with plenty of stars detected. With no target to hint
+            # from, go blind instead of guessing a small radius.
+            aimed = ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None
+            hints = SolveHints(
+                fov_height_deg=optics.height_arcmin / 60.0,
+                ra_hours=ctx.state.target_ra_deg / 15.0 if aimed else None,
+                south_pole_distance_deg=(
+                    ctx.state.target_dec_deg + 90.0
+                    if ctx.state.target_dec_deg is not None
+                    else None
+                ),
+                radius_deg=3.0 if aimed else 180.0,
+            )
         result = solve(
             converted,
             ctx.settings.astap,

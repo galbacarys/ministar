@@ -82,7 +82,7 @@ def describe(
     ra_deg, dec_deg = solution.crval
     facts = [
         f"RA {ra_deg / 15.0:.4f} h   Dec {dec_deg:+.4f} deg",
-        f"position angle {solution.position_angle_deg:.2f} deg   "
+        f"position angle {solution.position_angle_deg % 360.0:.2f} deg   "
         f'scale {solution.pixel_scale_arcsec:.2f}"/px',
         f"parity {'mirrored' if solution.is_mirrored else 'normal'}",
     ]

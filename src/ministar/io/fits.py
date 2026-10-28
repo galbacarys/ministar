@@ -106,6 +106,8 @@ def read_fits(path: Path | str) -> tuple[np.ndarray, FitsHeader]:
         if bitpix == 16 and bzero == 32768.0:
             array = np.clip(array, 0, 65535).astype(np.uint16)
 
+    # The file is bottom-up; numpy arrays are top-down.
+    array = np.flip(array, axis=-2)
     if planes > 1:
         return np.moveaxis(array, 0, -1), header
     return array[0], header
@@ -137,10 +139,11 @@ def write_fits(
     becoming float or losing the top half. ``int16``/``float32``/``float64``/``uint8``
     are written directly.
 
-    Rows are written in the array's own order: row 0 of the numpy array is the first
-    data row in the file. That keeps a write/read round trip exact, which matters more
-    here than matching another tool's convention -- and ASTAP solves either way round
-    (its WCS records the orientation it found).
+    Rows are written **bottom-up**, as FITS requires: row 0 of the numpy array is the
+    *last* data row in the file. Getting this wrong is invisible in a round trip through
+    this module and very visible everywhere else -- an array written top-down reads as a
+    vertical mirror to ASTAP, which reports position angle 180 with parity "mirrored"
+    instead of the truth. Measured on a synthetic frame, 2026-10-27.
     """
     if array.ndim not in (2, 3):
         raise FitsError(f"only 2-D or 3-D arrays can be written, got {array.ndim}-D")
@@ -188,7 +191,8 @@ def write_fits(
     header = "".join(line.ljust(80) for line in lines) + "END".ljust(80)
     raw_header = header.encode("ascii", "replace")
     raw_header += b" " * (-len(raw_header) % _BLOCK)
-    body = data.tobytes()
+    # FITS is bottom-up; numpy is top-down.
+    body = np.flip(data, axis=0).tobytes()
     body += b"\0" * (-len(body) % _BLOCK)
 
     target = Path(path)

@@ -236,3 +236,23 @@ def test_exif_survives_a_tiff_that_has_none(tmp_path: Path) -> None:
     exif = read_frame_exif(path)
     assert exif.model == ""
     assert exif.pixel_size_um is None
+
+
+def test_fits_files_are_written_bottom_up(tmp_path: Path) -> None:
+    """FITS stores the bottom row first; a top-down file reads as a vertical mirror.
+
+    This cost a real debugging session: a synthetic frame written top-down solved with
+    position angle 180 and parity "mirrored" instead of 0 and normal, and every FITS we
+    produce would have been upside down to ASTAP, NINA and any stacker.
+    """
+    from ministar.io.fits import read_fits, write_fits
+
+    image = np.array([[1, 1], [2, 2], [3, 3]], dtype=np.uint16)  # row 0 at the TOP
+    path = write_fits(tmp_path / "orientation.fit", image)
+
+    raw = path.read_bytes()
+    offset = 2880 * (raw.index(b"END") // 2880 + 1)
+    body = np.frombuffer(raw, dtype=">i2", offset=offset)[:6]
+    # uint16 is stored as int16 with BZERO=32768, so value 3 is -32765: the bottom row.
+    assert body[:2].tolist() == [-32765, -32765], "the file must start with the bottom row"
+    assert np.array_equal(read_fits(path)[0], image), "and round-trip unchanged"

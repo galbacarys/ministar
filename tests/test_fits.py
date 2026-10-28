@@ -41,7 +41,8 @@ def write_fits(
     header = "".join(cards).encode("ascii")
     header += b" " * ((2880 - len(header) % 2880) % 2880)
 
-    raw = data.astype({16: ">i2", 32: ">i4", -32: ">f4"}[bitpix]).tobytes()
+    # FITS is bottom-up; numpy is top-down.
+    raw = np.flip(data, axis=0).astype({16: ">i2", 32: ">i4", -32: ">f4"}[bitpix]).tobytes()
     if truncate:
         raw = raw[: len(raw) // 2]
     path.write_bytes(header + raw)
