@@ -7,6 +7,8 @@ image +y axis, north up and east left, pixels 0-based with y downward.
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import numpy as np
 import pytest
 
@@ -104,26 +106,66 @@ def test_offsets_map_to_distinct_pixels() -> None:
     assert abs(y[1] - y[0]) == pytest.approx(0.5 * 3600 / SCALE, rel=0.02)
 
 
-def test_the_fake_mount_can_be_nudged() -> None:
-    """Aim roughly, then let the solver say how far off we are -- that is the loop."""
+def test_the_fake_mount_is_an_alt_az_head() -> None:
+    """A tripod head is adjusted in altitude and azimuth; RA/Dec is a consequence."""
+    from datetime import datetime
+
     from ministar.rig import RigProfile
+    from ministar.site import Site
     from ministar.ui.station import FakeCamera
 
-    camera = FakeCamera(optics=RigProfile.fake().optics(), pointing=(10.0, 41.0))
+    site = Site(latitude_deg=51.5, longitude_deg=-0.1)
+    camera = FakeCamera(
+        optics=RigProfile.fake().optics(),
+        site=site,
+        when=datetime.now(UTC),
+        pointing=(160.27, 41.27),
+    )
+    alt0, az0 = camera.altaz
 
-    camera.move_by(d_ra_deg=0.5, d_dec_deg=-0.25)
-    assert camera.pointing == pytest.approx((10.5, 40.75))
+    assert camera.nudge_altaz(d_az_deg=1.0)
+    assert camera.altaz[1] == pytest.approx((az0 + 1.0) % 360.0)
+    assert camera.altaz[0] == pytest.approx(alt0), "azimuth must not change altitude"
 
-    camera.move_by(d_ra_deg=-20.0)  # RA wraps
-    assert camera.pointing[0] == pytest.approx(350.5)
+    camera.nudge_altaz(d_alt_deg=100.0)  # the zenith is a stop, not a suggestion
+    assert camera.altaz[0] == pytest.approx(89.9)
+    camera.nudge_altaz(d_alt_deg=-200.0)
+    assert camera.altaz[0] >= -5.0
 
-    camera.move_by(d_dec_deg=100.0)  # Dec clamps at the pole
-    assert camera.pointing[1] == pytest.approx(90.0)
+
+def test_a_degree_of_azimuth_is_not_a_degree_of_sky() -> None:
+    """The realism the alt-az controls exist for: azimuth lines converge at the zenith, so
+    a degree of azimuth buys less sky the higher you point -- the same 5' click is coarse
+    near the horizon and fine overhead."""
+    from datetime import datetime
+
+    from ministar import sky
+    from ministar.site import Site
+
+    site = Site(latitude_deg=51.5, longitude_deg=-0.1)
+    lst = sky.lst_deg(datetime.now(UTC), site.longitude_deg)
+
+    def sky_step(alt_deg: float) -> float:
+        ra1, dec1 = sky.radec_from_altaz(alt_deg, 180.0, lst, site.latitude_deg)
+        ra2, dec2 = sky.radec_from_altaz(alt_deg, 181.0, lst, site.latitude_deg)
+        return float(abs(dec2 - dec1) + abs((float(ra2) - float(ra1)) * 0.75))
+
+    assert sky_step(20.0) > 4.0 * sky_step(80.0), "overhead, 1 deg of az is not 1 deg of sky"
+
+
+def test_the_fake_cannot_be_nudged_without_a_site() -> None:
+    """No latitude and longitude means an altitude is a number without a sky."""
+    from ministar.ui.station import FakeCamera
+
+    assert FakeCamera().nudge_altaz(d_az_deg=1.0) is False
 
 
 def test_moving_the_fake_changes_the_field_it_shows() -> None:
-    """Otherwise the controls would be decoration: the scene must follow the pointing."""
+    """Otherwise the controls would be decoration: the scene must follow the mount."""
+    from datetime import datetime
+
     from ministar.rig import RigProfile
+    from ministar.site import Site
     from ministar.starcatalog import Stars
     from ministar.ui.station import FakeCamera
 
@@ -134,11 +176,15 @@ def test_moving_the_fake_changes_the_field_it_shows() -> None:
             return Stars(np.array([10.70, 10.80]), np.array([41.27, 41.20]), np.array([6.0, 7.0]))
 
     camera = FakeCamera(
-        optics=RigProfile.fake().optics(), catalog=StubCatalogue(), pointing=(10.6847, 41.269)
+        optics=RigProfile.fake().optics(),
+        catalog=StubCatalogue(),
+        site=Site(latitude_deg=51.5, longitude_deg=-0.1),
+        when=datetime.now(UTC),
+        pointing=(10.6847, 41.269),
     )
     before = camera.scene().stars[0].x
 
-    camera.move_by(d_ra_deg=1.0)
+    camera.nudge_altaz(d_az_deg=1.0)
     after = camera.scene().stars[0].x
 
     assert before != pytest.approx(after, abs=1e-6), "the field must shift with the mount"
@@ -158,11 +204,21 @@ def test_the_preview_follows_the_mount() -> None:
         def stars_near(self, ra_deg, dec_deg, radius_deg, *, mag_limit=12.0):
             return Stars(np.array([10.70, 10.80]), np.array([41.27, 41.20]), np.array([6.0, 7.0]))
 
+    from datetime import datetime
+
+    from ministar.site import Site
+
     optics = Optics.from_plate_scale(width_px=400, height_px=300, plate_scale_arcsec=60.0)
-    camera = FakeCamera(optics=optics, catalog=StubCatalogue(), pointing=(10.6847, 41.269))
+    camera = FakeCamera(
+        optics=optics,
+        catalog=StubCatalogue(),
+        site=Site(latitude_deg=51.5, longitude_deg=-0.1),
+        when=datetime.now(UTC),
+        pointing=(10.6847, 41.269),
+    )
     before = camera.render_frame().copy()
 
-    camera.move_by(d_ra_deg=1.0)
+    camera.nudge_altaz(d_az_deg=1.0)
     after = camera.render_frame()
 
     assert not np.array_equal(before, after), "the preview must move with the mount"

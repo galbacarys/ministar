@@ -914,28 +914,27 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
 
 
 def render_point(ctx: Context) -> None:
-    """POINT, in two stages.
+    """POINT: the roll advice, the solving, and the readout that ties them together.
 
-    **1. Roll.** An untracked rig drags the sky along the celestial parallel, and whether that
-    runs along the frame's long side decides how much of the frame survives a run -- worth up
-    to 1.5x the time between reframes for a five-second action (brief 10 §2.1c). The eye does
-    this, guided by a CW/CCW indicator, because it is a physical knob.
+    **Roll** comes first because it is a physical knob and worth up to 1.5x between reframes
+    (brief 10 §2.1c): the parallactic drift should run along the frame's long side, and a
+    CW/CCW indicator is how the eye does that.
 
-    **2. Solve.** A captured frame is converted to FITS and solved, which anchors the WCS that
-    everything downstream needs: the envelope, the reframe arrows, and the roll readout itself
-    on a real camera (which cannot report its clamp angle). A solve that describes a *crop* is
-    flagged rather than trusted (brief 07 §1).
+    **Solve** then anchors the WCS everything downstream needs -- the envelope, the reframe
+    arrows, and the roll readout itself on a real camera, which cannot report its clamp angle.
+    A solve that describes a *crop* is flagged rather than trusted (brief 07 §1).
+
+    Both were once separate stages behind a "roll is aligned, solve" button. That button was
+    friction without information: the page has no way to tell whether the roll looks aligned,
+    so it was asking the user to assert something they could only have learned from the solve
+    it was gating. Everything is visible at once now.
     """
     ui.label("Pointing").classes("mn-heading")
     station = ctx.station
     preview = ui.image("").classes("mn-preview")
 
-    roll_stage = ui.column().classes("w-full items-center")
-    solve_stage = ui.column().classes("w-full items-center")
-    solve_stage.set_visibility(False)
-
-    # -- stage 1: roll ------------------------------------------------------
-    with roll_stage:
+    # -- roll ---------------------------------------------------------------
+    with ui.column().classes("w-full items-center"):
         ui.label("1. camera roll").classes("mn-heading")
         advice_line = ui.label("").classes("mn-heading")
         detail = ui.label("").classes("mn-body")
@@ -945,9 +944,15 @@ def render_point(ctx: Context) -> None:
             cw_label = ui.label("CW >>").classes("mn-metrics")
 
         camera = getattr(station, "camera", None) if station is not None else None
-        if getattr(camera, "move_by", None) is not None:
-            # Fake mount only: a real rig is moved by the user, and the arrow keys would be
-            # a lie about hardware we cannot command.
+        site = load_site(site_path(ctx.settings.paths.data))
+        if getattr(camera, "use_site", None) is not None and site.complete:
+            # An altitude is a number without a sky until the fake knows where it stands.
+            camera.use_site(site)
+        if getattr(camera, "nudge_altaz", None) is not None:
+            # Fake mount only: a real rig is moved by the user's hands, and buttons that
+            # command nothing would be a lie about hardware. Altitude and azimuth, because
+            # that is what a head on a tripod is adjusted in -- and because a degree of
+            # azimuth is a different amount of sky depending on how high you are pointing.
             ui.label("aim the fake telescope").classes("mn-dim")
             pointing_label = ui.label("").classes("mn-body")
             step = (
@@ -960,20 +965,21 @@ def render_point(ctx: Context) -> None:
                 .style("width: 120px")
             )
 
-            def move(d_ra: float, d_dec: float) -> None:
-                camera.move_by(
-                    float(step.value or "0.0833") * d_ra, float(step.value or "0.0833") * d_dec
-                )
+            def nudge(d_alt: float, d_az: float) -> None:
+                step_deg = float(step.value or "0.0833")
+                camera.nudge_altaz(d_alt_deg=step_deg * d_alt, d_az_deg=step_deg * d_az)
+                tick()  # a click must never look dead
 
             with ui.row().classes("items-center justify-center").style("gap: 6px"):
-                ui.button("RA -", on_click=lambda: move(-1, 0)).classes("mn-drive")
-                ui.button("Dec +", on_click=lambda: move(0, 1)).classes("mn-drive")
-                ui.button("Dec -", on_click=lambda: move(0, -1)).classes("mn-drive")
-                ui.button("RA +", on_click=lambda: move(1, 0)).classes("mn-drive")
+                ui.button("Alt -", on_click=lambda: nudge(-1, 0)).classes("mn-drive")
+                ui.button("Alt +", on_click=lambda: nudge(1, 0)).classes("mn-drive")
+                ui.button("Az -", on_click=lambda: nudge(0, -1)).classes("mn-drive")
+                ui.button("Az +", on_click=lambda: nudge(0, 1)).classes("mn-drive")
 
             def aim_at_target() -> None:
                 if ctx.state.target_ra_deg is not None and ctx.state.target_dec_deg is not None:
                     camera.set_pointing(ctx.state.target_ra_deg, ctx.state.target_dec_deg)
+                    tick()
 
             def aim_for_run() -> None:
                 """Start the target at the edge it entered from: the whole frame of drift."""
@@ -990,6 +996,7 @@ def render_point(ctx: Context) -> None:
                         pa_y_deg=float(camera.roll_deg),
                     )
                 )
+                tick()
 
             with ui.row().classes("items-center justify-center").style("gap: 6px"):
                 ui.button("aim at the target", on_click=aim_at_target).classes("mn-action")
@@ -1010,8 +1017,8 @@ def render_point(ctx: Context) -> None:
             )
             roll_slider.on_value_change(lambda event: camera.set_roll(float(event.value)))
 
-    # -- stage 2: solve -----------------------------------------------------
-    with solve_stage:
+    # -- solve --------------------------------------------------------------
+    with ui.column().classes("w-full items-center"):
         ui.label("2. solve").classes("mn-heading")
         solve_facts = ui.label("").classes("mn-metrics")
         solve_advice = ui.label("").classes("mn-body")
@@ -1042,15 +1049,6 @@ def render_point(ctx: Context) -> None:
 
         ui.button("capture and solve", on_click=run_solve).classes("mn-action")
 
-    showing = {"roll": True}
-
-    def goto_solve() -> None:
-        showing["roll"] = False
-        roll_stage.set_visibility(False)
-        solve_stage.set_visibility(True)
-
-    ui.button("roll is aligned, solve", on_click=goto_solve).classes("mn-action")
-
     def aim_fake() -> None:
         """Point the fake telescope where the session is pointed, so the view is the target."""
         camera = getattr(station, "camera", None) if station is not None else None
@@ -1075,9 +1073,6 @@ def render_point(ctx: Context) -> None:
         if snapshot is not None and snapshot.data_uri:
             preview.source = snapshot.data_uri
             preview.update()
-        if not showing["roll"]:
-            return
-
         state = roll_page_state(ctx, station)
         if state is None:
             advice_line.text = ""
@@ -1091,10 +1086,15 @@ def render_point(ctx: Context) -> None:
             return
         missing.text = ""
         if pointing_label is not None:
-            aimed = getattr(getattr(station, "camera", None), "pointing", None)
+            mount_camera = getattr(station, "camera", None)
+            aimed = getattr(mount_camera, "pointing", None)
+            mount = getattr(mount_camera, "altaz", None)
             if aimed is not None:
+                where = (
+                    f"alt {mount[0]:.1f} deg  az {mount[1]:.1f} deg   " if mount is not None else ""
+                )
                 pointing_label.text = (
-                    f"telescope at RA {aimed[0] / 15.0:.3f} h  Dec {aimed[1]:+.3f} deg"
+                    f"telescope at {where}RA {aimed[0] / 15.0:.3f} h  Dec {aimed[1]:+.3f} deg"
                 )
         q, roll = state
         advice = roll_advice(psi_deg=roll, parallactic_deg=q)

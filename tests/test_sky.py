@@ -195,3 +195,52 @@ def test_no_astronomical_night_at_high_latitude_in_midsummer() -> None:
         )
         is None
     )
+
+
+# -- the mount's own coordinates --------------------------------------------
+def test_altitude_and_azimuth_on_the_meridian() -> None:
+    """Two cases with answers you can check on a paper napkin."""
+    from ministar import sky
+
+    lst, latitude = 100.0, 51.5
+
+    alt, az = sky.altaz_deg(lst, 20.0, lst, latitude)  # south of the zenith
+    assert float(alt) == pytest.approx(90.0 - (latitude - 20.0))
+    assert float(az) == pytest.approx(180.0)
+
+    alt, az = sky.altaz_deg((lst + 180.0) % 360.0, 70.0, lst, latitude)  # below the pole
+    assert float(alt) == pytest.approx(70.0 + latitude - 90.0)
+    assert float(az) == pytest.approx(0.0) or float(az) == pytest.approx(360.0)
+
+
+def test_radec_from_altaz_inverts_altaz_deg() -> None:
+    """The round trip the fake mount rests on, over most of the sky."""
+    import numpy as np
+
+    from ministar import sky
+
+    lst, latitude = 212.5, 51.5
+    for ra in range(0, 360, 29):
+        for dec in (-75.0, -41.27, 0.0, 41.27, 75.0):
+            alt, az = sky.altaz_deg(ra, dec, lst, latitude)
+            back_ra, back_dec = sky.radec_from_altaz(alt, az, lst, latitude)
+            assert float(back_dec) == pytest.approx(dec, abs=1e-9)
+            assert float(back_ra) == pytest.approx(ra, abs=1e-9) or np.isclose(
+                abs(float(back_ra) - ra) % 360.0, 0.0, atol=1e-9
+            )
+
+
+def test_azimuth_runs_from_north_through_east() -> None:
+    """Which way the number increases decides which way the button turns."""
+    from ministar import sky
+
+    lst, latitude = 90.0, 0.0  # on the equator: the circle through the zenith
+
+    # East of the meridian (hour angle -90) is rising, so azimuth 90.
+    alt, az = sky.altaz_deg((lst + 90.0) % 360.0, 0.0, lst, latitude)
+    assert float(alt) == pytest.approx(0.0, abs=1e-9)
+    assert float(az) == pytest.approx(90.0, abs=1e-9)
+
+    # West of it (hour angle +90) is setting: azimuth 270, half a turn round.
+    alt, az = sky.altaz_deg((lst - 90.0) % 360.0, 0.0, lst, latitude)
+    assert float(az) == pytest.approx(270.0, abs=1e-9)

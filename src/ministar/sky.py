@@ -79,6 +79,60 @@ def altitude_deg(
     return np.degrees(np.arcsin(np.clip(sin_alt, -1.0, 1.0)))
 
 
+def altaz_deg(
+    ra_deg: np.ndarray | float,
+    dec_deg: np.ndarray | float,
+    lst: np.ndarray | float,
+    latitude_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Where a sky position sits for a fixed mount: ``(altitude, azimuth)`` in degrees.
+
+    Azimuth runs from north through east, which is the way a person turns an alt-az head and
+    the way these controls are labelled. Geometric -- no refraction, no parallax -- the same
+    approximation as :func:`altitude_deg`.
+
+    Derived in a *frame*, not from a remembered formula: with ``H = LST - RA``,
+    ``south = sin(lat) cos(dec) cos(H) - cos(lat) sin(dec)``, ``east = -cos(dec) sin(H)``,
+    ``up = sin(alt)``, and ``az = atan2(east, -south)``.
+    """
+    hour_angle = np.radians(np.subtract(lst, ra_deg))
+    phi = math.radians(latitude_deg)
+    dec = np.radians(dec_deg)
+    south = math.sin(phi) * np.cos(dec) * np.cos(hour_angle) - math.cos(phi) * np.sin(dec)
+    east = -np.cos(dec) * np.sin(hour_angle)
+    up = math.sin(phi) * np.sin(dec) + math.cos(phi) * np.cos(dec) * np.cos(hour_angle)
+    altitude = np.degrees(np.arcsin(np.clip(up, -1.0, 1.0)))
+    azimuth = np.degrees(np.arctan2(east, -south)) % 360.0
+    return altitude, azimuth
+
+
+def radec_from_altaz(
+    alt_deg: np.ndarray | float,
+    az_deg: np.ndarray | float,
+    lst: np.ndarray | float,
+    latitude_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The inverse of :func:`altaz_deg`: where a fixed mount is actually pointing.
+
+    A head on a tripod is set in altitude and azimuth, so that is the honest state for it to
+    hold -- the RA/Dec it implies is a consequence, and moves with the clock rather than with
+    the mount.
+    """
+    alt = np.radians(alt_deg)
+    az = np.radians(az_deg)
+    phi = math.radians(latitude_deg)
+    south = -np.cos(alt) * np.cos(az)
+    east = np.cos(alt) * np.sin(az)
+    up = np.sin(alt)
+
+    dec = np.arcsin(np.clip(-math.cos(phi) * south + math.sin(phi) * up, -1.0, 1.0))
+    cos_dec_cos_h = math.sin(phi) * south + math.cos(phi) * up
+    cos_dec_sin_h = -east
+    hour_angle = np.arctan2(cos_dec_sin_h, cos_dec_cos_h)
+    ra = np.radians(lst) - hour_angle
+    return np.degrees(ra) % 360.0, np.degrees(dec)
+
+
 def max_altitude_deg(dec_deg: np.ndarray | float, latitude_deg: float) -> np.ndarray | float:
     """Culmination altitude: ``90 - |lat - dec|``. Depends on no clock."""
     return 90.0 - np.abs(latitude_deg - np.asarray(dec_deg, dtype=float))
@@ -265,6 +319,7 @@ def astronomical_night(
 
 
 __all__ = [
+    "altaz_deg",
     "altitude_deg",
     "astronomical_night",
     "gmst_deg",
@@ -273,6 +328,7 @@ __all__ = [
     "lst_deg",
     "max_altitude_deg",
     "night_window",
+    "radec_from_altaz",
     "sun_altitude_deg",
     "visible_minutes",
 ]

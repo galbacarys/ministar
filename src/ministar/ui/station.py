@@ -17,6 +17,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +92,8 @@ class FakeCamera:
         #: read noise in a 2 s frame: fainter than that and the solver correctly reports "not
         #: enough stars", which is a fake-frame artefact rather than a pipeline problem.
         flux_at_mag_zero: float = 6200.0,
+        site=None,
+        when=None,
     ) -> None:
         self._position = 0
         self._frames = 0
@@ -107,6 +110,13 @@ class FakeCamera:
         self._scene: StarField | None = None
         self._scene_key: tuple | None = None
         self._field = StarField.random(count=count, seed=seed, shape=shape, best_position=best)
+        #: The mount is the honest state: a head on a tripod is set in altitude and azimuth,
+        #: and the RA/Dec it points at is a consequence of where and when it is standing.
+        self._site = site
+        self._stamp = when or datetime.now().astimezone()
+        self._altaz: tuple[float, float] | None = None
+        if site is not None and getattr(site, "complete", False) and pointing is not None:
+            self.set_pointing(*pointing)
         self.name = "Fake EOS (synthetic)"
 
     #: Frames this camera writes are synthetic and worthless once solved.
@@ -134,36 +144,79 @@ class FakeCamera:
         """
         self._roll = float(degrees) % 360.0
 
-    def set_pointing(self, ra_deg: float, dec_deg: float) -> None:
-        """Aim the fake camera. A real one is aimed by the user on the tripod."""
-        self._pointing = (float(ra_deg), float(dec_deg))
+    def use_site(self, site, when=None) -> None:
+        """Tell the fake where it is standing, so an altitude means something.
 
-    def move_by(self, d_ra_deg: float = 0.0, d_dec_deg: float = 0.0) -> None:
-        """Nudge the fake mount, as a hand on the head would.
-
-        Exponential in the fake's coordinates: RA wraps, Dec clamps at the poles. A real
-        nudge is imprecise -- 2-5 arcmin on a geared head, 20-60 on a ball head (04 §2.1) --
-        and the point of these controls is to reproduce *that*: aim roughly, then let the
-        solver tell you how far off you are.
+        The *time* is deliberately not refreshed on later calls: a mount set to an altitude
+        and azimuth holds it, and the sky it points at is the same sky until a hand moves it.
+        The sky drifting under a fixed mount is real, and a separate behaviour to model.
         """
-        if self._pointing is None:
-            return
-        ra, dec = self._pointing
-        self._pointing = ((ra + d_ra_deg) % 360.0, max(-90.0, min(90.0, dec + d_dec_deg)))
+        self._site = site
+        if when is not None:
+            self._stamp = when
+        if (
+            self._altaz is None
+            and self._pointing is not None
+            and site is not None
+            and getattr(site, "complete", False)
+        ):
+            self.set_pointing(*self._pointing)
+
+    @property
+    def altaz(self) -> tuple[float, float] | None:
+        """Where the mount is set, in degrees: altitude, azimuth from north through east."""
+        return self._altaz
 
     @property
     def pointing(self) -> tuple[float, float] | None:
+        """Where the camera looks in RA/Dec -- derived from the mount when it can be."""
+        if self._altaz is not None and self._site is not None and self._site.complete:
+            from ministar import sky as sky_module
+
+            lst = sky_module.lst_deg(self._stamp, self._site.longitude_deg)
+            ra, dec = sky_module.radec_from_altaz(
+                self._altaz[0], self._altaz[1], lst, self._site.latitude_deg
+            )
+            return float(ra) % 360.0, float(dec)
         return self._pointing
+
+    def set_pointing(self, ra_deg: float, dec_deg: float) -> None:
+        """Aim the fake camera at a sky position.
+
+        A real user aims at an altitude and azimuth, so the conversion happens here and the
+        RA/Dec kept alongside is only for the no-site case.
+        """
+        if self._site is not None and self._site.complete:
+            from ministar import sky as sky_module
+
+            lst = sky_module.lst_deg(self._stamp, self._site.longitude_deg)
+            alt, az = sky_module.altaz_deg(ra_deg, dec_deg, lst, self._site.latitude_deg)
+            self._altaz = (float(alt), float(az) % 360.0)
+        self._pointing = (float(ra_deg) % 360.0, float(dec_deg))
+
+    def nudge_altaz(self, d_alt_deg: float = 0.0, d_az_deg: float = 0.0) -> bool:
+        """Turn the altitude and azimuth knobs, as a hand on an alt-az head would.
+
+        Altitude stops just short of the zenith (and a little below the horizon); azimuth
+        wraps. Returns False when the fake does not know where it is standing, because
+        without a latitude and a longitude an altitude is a number without a sky.
+        """
+        if self._altaz is None:
+            return False
+        alt, az = self._altaz
+        self._altaz = (max(-5.0, min(89.9, alt + d_alt_deg)), (az + d_az_deg) % 360.0)
+        return True
 
     def scene(self) -> StarField:
         """The current field, rebuilt when the pointing or roll changes."""
-        if self._catalog is None or self._optics is None or self._pointing is None:
+        aimed = self.pointing
+        if self._catalog is None or self._optics is None or aimed is None:
             return self._field.rotated(-self._roll)
-        key = (self._pointing, round(self._roll, 3))
+        key = (aimed, round(self._roll, 3))
         if self._scene is None or self._scene_key != key:
             from ministar.projection import TangentPlane, stars_in_frame
 
-            ra0, dec0 = self._pointing
+            ra0, dec0 = aimed
             plane = TangentPlane(
                 ra_deg=ra0,
                 dec_deg=dec0,
