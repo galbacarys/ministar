@@ -124,12 +124,17 @@ def test_the_fake_mount_can_be_nudged() -> None:
 def test_moving_the_fake_changes_the_field_it_shows() -> None:
     """Otherwise the controls would be decoration: the scene must follow the pointing."""
     from ministar.rig import RigProfile
-    from ministar.starcatalog import StarCatalog
+    from ministar.starcatalog import Stars
     from ministar.ui.station import FakeCamera
 
-    catalog = StarCatalog.load("/mnt/c/Program Files/astap")
+    class StubCatalogue:
+        """Two stars near the centre: the test must not walk the 1.3 GB database."""
+
+        def stars_near(self, ra_deg, dec_deg, radius_deg, *, mag_limit=12.0):
+            return Stars(np.array([10.70, 10.80]), np.array([41.27, 41.20]), np.array([6.0, 7.0]))
+
     camera = FakeCamera(
-        optics=RigProfile.fake().optics(), catalog=catalog, pointing=(10.6847, 41.269)
+        optics=RigProfile.fake().optics(), catalog=StubCatalogue(), pointing=(10.6847, 41.269)
     )
     before = camera.scene().stars[0].x
 
