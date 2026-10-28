@@ -309,3 +309,92 @@ def test_a_short_gap_near_the_pole_needs_almost_no_radius() -> None:
     )
 
     assert near_pole.radius_deg < near_equator.radius_deg
+
+
+# -- aiming must know how big the target is -------------------------------
+def test_an_extended_target_is_aimed_whole_and_the_advice_agrees() -> None:
+    """The bug this replaced: a 1.7 deg object aimed by its centre is half off the sensor.
+
+    "aim for the run" placed the target's *centre* on the frame edge, while the advice required
+    the whole object to fit -- so the page said "NOT in the frame" and then told the user to
+    move 50', which was the size of the object, not the error.
+    """
+    from ministar.pointing import best_start, frame_advice
+
+    optics = _fake_optics()
+    ra, dec, radius_arcmin = 56.87, 24.12, 50.0  # the Pleiades
+
+    start = best_start(
+        target_ra_deg=ra,
+        target_dec_deg=dec,
+        optics=optics,
+        pa_y_deg=0.0,
+        target_radius_arcmin=radius_arcmin,
+    )
+    advice = frame_advice(
+        ra_deg=start[0],
+        dec_deg=start[1],
+        target_ra_deg=ra,
+        target_dec_deg=dec,
+        optics=optics,
+        pa_y_deg=0.0,
+        target_radius_arcmin=radius_arcmin,
+    )
+
+    assert advice.inside, "the whole object has to fit, not just its centre"
+    assert advice.at_best_start
+    assert optics.width_arcmin / 2 - advice.east_arcmin >= radius_arcmin, "clearance for its edge"
+
+
+def test_an_extended_target_gets_a_shorter_run_than_a_point_source() -> None:
+    """Its own width is part of the budget: 34 min against 51 for a star at the same place."""
+    from ministar.pointing import best_start, frame_advice
+
+    optics = _fake_optics()
+    ra, dec = 56.87, 24.12
+    runs = {}
+    for radius_arcmin in (0.0, 50.0):
+        start = best_start(
+            target_ra_deg=ra,
+            target_dec_deg=dec,
+            optics=optics,
+            pa_y_deg=0.0,
+            target_radius_arcmin=radius_arcmin,
+        )
+        runs[radius_arcmin] = frame_advice(
+            ra_deg=start[0],
+            dec_deg=start[1],
+            target_ra_deg=ra,
+            target_dec_deg=dec,
+            optics=optics,
+            pa_y_deg=0.0,
+            target_radius_arcmin=radius_arcmin,
+        ).minutes_now
+
+    # The reduction is not arbitrary: it is exactly the time the sky needs to cross the
+    # object's own width (2 x 50' here). 34.2 against 41.5 min measured, 7.3 min predicted.
+    arcmin_per_min = optics.drift_arcsec_per_s(dec) / 60.0 * 60.0
+    expected_reduction = 2.0 * 50.0 / arcmin_per_min
+    assert runs[0.0] - runs[50.0] == pytest.approx(expected_reduction, rel=0.10)
+
+
+def test_the_contradiction_is_what_the_shared_radius_prevents() -> None:
+    """Aim without the size and report with it: the page argues with itself."""
+    from ministar.pointing import best_start, frame_advice
+
+    optics = _fake_optics()
+    ra, dec = 56.87, 24.12
+    start = best_start(target_ra_deg=ra, target_dec_deg=dec, optics=optics, pa_y_deg=0.0)
+    advice = frame_advice(
+        ra_deg=start[0],
+        dec_deg=start[1],
+        target_ra_deg=ra,
+        target_dec_deg=dec,
+        optics=optics,
+        pa_y_deg=0.0,
+        target_radius_arcmin=50.0,
+    )
+
+    assert not advice.inside
+    assert "NOT fully in the frame" in " ".join(advice.describe())
+    assert "across" in " ".join(advice.describe()), "say why, not just that"

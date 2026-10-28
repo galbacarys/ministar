@@ -698,6 +698,17 @@ def render_target(ctx: Context) -> None:
     refresh_rows()
 
 
+def target_radius_arcmin(ctx: Context) -> float:
+    """Half the target's long axis: how far its edge reaches from its centre.
+
+    Shared by the "aim for the run" button *and* the advice, because a mismatch here is both
+    invisible and self-contradictory: aiming without it parks the object's centre on the frame
+    edge, and the advice then correctly reports that the object -- half of it -- is outside.
+    """
+    major = ctx.state.target_major_arcmin
+    return 0.5 * float(major) if major else 0.0
+
+
 def rig_for(ctx: Context) -> RigProfile | None:
     """This session's rig: the override if one was supplied, else what was measured."""
     return ctx.rig if ctx.rig is not None else load_rig(rig_path(ctx.settings.paths.data))
@@ -1020,6 +1031,7 @@ def render_point(ctx: Context) -> None:
                         target_dec_deg=ctx.state.target_dec_deg,
                         optics=rig.optics(),
                         pa_y_deg=float(camera.roll_deg),
+                        target_radius_arcmin=target_radius_arcmin(ctx),
                     )
                 )
                 tick()
@@ -1103,7 +1115,7 @@ def render_point(ctx: Context) -> None:
                             target_dec_deg=ctx.state.target_dec_deg,
                             optics=rig.optics(),
                             pa_y_deg=ctx.state.pointing_pa_deg or 0.0,
-                            target_radius_arcmin=0.5 * (ctx.state.target_major_arcmin or 0.0),
+                            target_radius_arcmin=target_radius_arcmin(ctx),
                         ).describe()
                     )
 
@@ -1133,6 +1145,7 @@ def render_point(ctx: Context) -> None:
                 target_dec_deg=ctx.state.target_dec_deg,
                 optics=rig.optics(),
                 pa_y_deg=float(getattr(camera, "roll_deg", 0.0)),
+                target_radius_arcmin=target_radius_arcmin(ctx),
             )
         )
 
@@ -1203,7 +1216,7 @@ def render_point(ctx: Context) -> None:
                         target_dec_deg=ctx.state.target_dec_deg,
                         optics=rig.optics(),
                         pa_y_deg=roll,
-                        target_radius_arcmin=0.5 * (ctx.state.target_major_arcmin or 0.0),
+                        target_radius_arcmin=target_radius_arcmin(ctx),
                     ).describe()
                 )
 

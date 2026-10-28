@@ -291,6 +291,9 @@ class FrameAdvice:
     move_north_arcmin: float
     minutes_now: float
     minutes_best: float
+    #: Half the object's long axis. Zero for a point source. When it is non-zero, "in frame"
+    #: means the whole object, which is why aiming and reporting must both know it.
+    radius_arcmin: float = 0.0
 
     @property
     def at_best_start(self) -> bool:
@@ -305,7 +308,16 @@ class FrameAdvice:
         if self.inside:
             lines.append(f"target {_amount(self.separation_arcmin)} from the centre ({where})")
         else:
-            lines.append(f"target NOT in the frame: {where} of centre")
+            extent = (
+                f" -- it is {2.0 * self.radius_arcmin / 60:.1f} deg across, so all of it needs "
+                f"{_amount(self.radius_arcmin)} of clearance"
+                if self.radius_arcmin > 0
+                else ""
+            )
+            lines.append(
+                f"target {'NOT fully' if self.radius_arcmin > 0 else 'NOT'} in the frame: "
+                f"{where} of centre{extent}"
+            )
         lines.append(
             f"drift ahead {self.minutes_now:.1f} min "
             f"-- the best start gives {self.minutes_best:.1f} min"
@@ -403,6 +415,7 @@ def frame_advice(
         move_north_arcmin=move_north,
         minutes_now=travel_px * arcmin_per_px / per_min if per_min else 0.0,
         minutes_best=best_px * arcmin_per_px / per_min if per_min else 0.0,
+        radius_arcmin=float(target_radius_arcmin),
     )
 
 
