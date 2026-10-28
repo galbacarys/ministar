@@ -42,6 +42,17 @@ HFD_UNSTABLE_FRACTION = 0.5
 #: How much history the stillness test looks at.
 STILLNESS_WINDOW_S = 5.0
 
+#: Two failed solves in a row is a pattern, not bad luck. The attempt already contains a hinted
+#: solve and a blind retry, so a second failure means six or more seconds have gone into
+#: nothing and the third press will usually do the same. Stopping is kinder than continuing.
+GIVE_UP_AFTER = 2
+
+
+def should_hold_off(failures: int, *, after: int = GIVE_UP_AFTER) -> bool:
+    """Has the solver been tried enough times that the user should have to ask again?"""
+    return failures >= after
+
+
 #: A centre crop this wide costs 0.06 s to measure, against 0.80 s for the whole frame -- a gate
 #: that costs what the solve costs is not a gate.
 CROP_PX = 1200
@@ -164,6 +175,7 @@ def centre_crop(image, *, size: int = CROP_PX):
 
 __all__ = [
     "CROP_PX",
+    "GIVE_UP_AFTER",
     "HFD_FACTOR",
     "HFD_UNSTABLE_FRACTION",
     "MOVING_LEVELS_PER_S",
@@ -173,4 +185,5 @@ __all__ = [
     "focus_verdict",
     "hfd_arcsec",
     "motion_verdict",
+    "should_hold_off",
 ]

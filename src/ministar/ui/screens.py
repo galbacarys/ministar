@@ -1063,6 +1063,20 @@ def render_point(ctx: Context) -> None:
         solve_note = ui.label("").classes("mn-dim")
         settle_label = ui.label("").classes("mn-warn")
 
+        def held_off() -> bool:
+            return quality.should_hold_off(ctx.state.solve_failures)
+
+        def show_buttons() -> None:
+            """One decision at a time: solve, or retry once the solver has clearly given up."""
+            solve_button.set_visibility(not held_off())
+            retry_button.set_visibility(held_off())
+            hold_label.text = (
+                "two solves in a row found nothing: nothing more goes to the solver until "
+                "you ask it to retry"
+                if held_off()
+                else ""
+            )
+
         async def run_solve() -> None:
             # A hand on the mount produces smeared frames that solve badly or not at all, so
             # wait for it to be still before spending one. Bounded: if it never settles, say so
@@ -1074,6 +1088,7 @@ def render_point(ctx: Context) -> None:
             settle_label.text = ""
             report, note = _solve(ctx, stillness)
             solve_note.text = note
+            show_buttons()
             if report is not None:
                 solve_facts.text = "\n".join(report.facts)
                 solve_notes.text = "\n".join(report.notes)
@@ -1092,7 +1107,16 @@ def render_point(ctx: Context) -> None:
                         ).describe()
                     )
 
-        ui.button("capture and solve", on_click=run_solve).classes("mn-action")
+        async def retry_solve() -> None:
+            ctx.state.solve_failures = 0
+            await run_solve()
+
+        with ui.row().classes("items-center justify-center").style("gap: 8px"):
+            solve_button = ui.button("capture and solve", on_click=run_solve).classes("mn-action")
+            retry_button = ui.button("retry", on_click=retry_solve).classes("mn-retry")
+            retry_button.set_visibility(False)
+        hold_label = ui.label("").classes("mn-warn")
+        show_buttons()
 
     def aim_fake() -> None:
         """Point the fake telescope where the session is pointed, so the view is the target."""
@@ -1288,9 +1312,11 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
         if not keep_capture(solved=result.solved, converted_is_raw=converted is raw):
             converted.unlink(missing_ok=True)
     except Exception as exc:  # a failed capture must not take the page down
+        ctx.state.solve_failures += 1
         return None, f"solve failed: {type(exc).__name__}: {exc}"
 
     if not result.solved or result.solution is None:
+        ctx.state.solve_failures += 1
         reason = result.error or result.error_meaning or "unknown"
         return None, f"not solved: {reason}"
 
@@ -1307,6 +1333,7 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
             return None, f"nothing solved: {moved}"
 
     solution = result.solution
+    ctx.state.solve_failures = 0
     ctx.state.solved = True
     ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
     ctx.state.pointing_pa_deg = solution.position_angle_deg

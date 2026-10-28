@@ -139,3 +139,13 @@ def test_samples_older_than_the_window_are_forgotten() -> None:
 
 def test_before_any_live_view_it_admits_it_knows_nothing() -> None:
     assert quality.Stillness().describe() == "no live view yet"
+
+
+# -- when to stop spending solves -------------------------------------------
+def test_one_failure_is_bad_luck_and_two_are_a_pattern() -> None:
+    """Each attempt already contains a hinted solve and a blind retry, so two is four tries."""
+    assert quality.GIVE_UP_AFTER == 2
+    assert not quality.should_hold_off(0)
+    assert not quality.should_hold_off(1)
+    assert quality.should_hold_off(2)
+    assert quality.should_hold_off(3)

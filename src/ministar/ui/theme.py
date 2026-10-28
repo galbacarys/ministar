@@ -48,6 +48,20 @@ body, .nicegui-content { background: #000000 !important; }
              font-size: 17px !important; font-weight: 700;
              min-width: 130px; min-height: 58px; }
 .mn-action:hover { background: #401216 !important; }
+/* A retry is a decision, not a routine press. The glow is slow and dim on purpose: the screen
+   is being read in the dark, so it has to be findable without being an event (14 §6). */
+.mn-retry { background: #3d0b0e !important; color: #ffb3a8 !important;
+            border: 1px solid #ff5a4d !important; font-family: Consolas, monospace;
+            font-size: 19px !important; font-weight: 700;
+            min-width: 170px; min-height: 66px;
+            animation: mn-pulse 2.4s ease-in-out infinite; }
+@keyframes mn-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 90, 77, 0.40); }
+  50%      { box-shadow: 0 0 0 10px rgba(255, 90, 77, 0.0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mn-retry { animation: none; border-width: 2px !important; }
+}
 .mn-step { color: #7a2a22; font-family: Consolas, monospace; font-size: 13px;
            letter-spacing: 1px; }
 .mn-step-now { color: #ff5a4d !important; font-weight: 700;

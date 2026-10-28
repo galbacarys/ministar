@@ -96,6 +96,9 @@ class SessionState:
     #: Position angle of the image +y axis from the solve (ASTAP's CD matrix). The frame
     #: orientation, which the aiming advice needs and a real camera cannot report.
     pointing_pa_deg: float | None = None
+    #: Consecutive failed solves. Two is a pattern: the page stops offering the solve and
+    #: offers a retry instead (quality.should_hold_off). Reset by success or by asking.
+    solve_failures: int = 0
     #: When that solve happened. The sky has moved since, so the next hint is widened by the
     #: drift accumulated over this gap (pointing.solve_hints).
     pointing_solved_at: datetime | None = None

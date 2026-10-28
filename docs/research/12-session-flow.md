@@ -509,3 +509,26 @@ unpredictably and a missed hint is indistinguishable from a bad image. Measured 
 The bump row matters twice over: it proves the retry works, and it proves the hint is a real
 constraint on this build (radius 1 deg fails at 6 deg of separation) rather than a formality --
 so the scaled radius is load-bearing, not decoration.
+
+## Two failures stop the page offering a third
+
+Each solve attempt already spends a hinted solve *and* a blind retry, so two failed presses are
+four failed searches and a minute of the night. After the second, the page stops offering
+"capture and solve" and offers a pulsing **retry** instead: the solver is not silent about its
+limits, and continuing to press a button that has failed twice mostly teaches the user to press
+it a third time.
+
+Three deliberate details:
+
+- **Only real solve failures count.** A refusal ("you moved during the exposure", "wait for it to
+  settle", "no star database") is not the solver's fault and does not push the user towards a
+  retry prompt -- otherwise fumbling in the dark would be scored against them.
+- **The count survives a restart**, because a session resumed at midnight should not pretend the
+  solver has not already given up twice. It is cleared by a success or by pressing retry.
+- **The pulse is slow and dim** (2.4 s, low alpha, and disabled under
+  `prefers-reduced-motion`): this screen is read in the dark, so a retry must be findable
+  without being an event (14 §6).
+
+The rule itself is one line in `quality.should_hold_off`, next to the other "should we spend a
+solve on this?" answers, so the threshold is argued with in a test rather than tuned in a click
+handler.
