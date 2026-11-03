@@ -187,6 +187,14 @@ and at 0.06 the field is black. 0.15 puts the sky at 38/255 — still dark-adapt
 known trade: it makes stars easy to find and *less* informative about shape, which is why HFD is
 measured on the raw frame and never on the display path.
 
+**A session can be closed and reopened in one process.** Which is not something to assume:
+some bodies refuse a second `EdsOpenSession` until the port is released by the OS. Measured on
+the 60D, twice in a row within one process, while live view was running: `reconnect` returns in
+**1.0 s / 0.9 s**, and the preview resumes at the same rate afterwards (15 frames in 2 s, 7.5 fps,
+matching the pre-reconnect measurement). So the reconnect button is a real repair rather than a
+polite suggestion to restart the console -- which is the difference between a night that continues
+and one that ends.
+
 **Leaving live view drops the mirror.** `Evf_OutputDevice = 0` ends the stream and a DSLR returns
 its mirror; measured round trip, `want_live_view(False)` → **0 frames** while stopped, then
 `want_live_view(True)` → 8.0 fps and frames again, in the same session. This matters beyond

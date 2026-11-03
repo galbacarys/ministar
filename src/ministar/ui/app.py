@@ -25,7 +25,7 @@ from nicegui import ui
 from ministar.config import Settings
 from ministar.rig import RigProfile
 from ministar.session import ORDER, Phase, SessionState
-from ministar.ui import screens
+from ministar.ui import screens, statusbar
 from ministar.ui.station import FakeCamera, Station
 from ministar.ui.theme import install
 
@@ -129,6 +129,8 @@ def wizard_page() -> None:
         update_nav()
 
     content()
+    # Beneath the wizard, on every phase: the camera going away is not a phase.
+    statusbar.footer(app, on_reconnected=lambda: apply_live_view(app))
 
 
 def apply_live_view(app: App) -> None:

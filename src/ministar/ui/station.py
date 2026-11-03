@@ -45,6 +45,10 @@ STOP_TIMEOUT_S = 3.0
 #: exposure is not a hang -- but finite, because a stuck SDK call must become an error.
 CAPTURE_WAIT_S = 180.0
 
+#: How long a reconnect may take. Opening a session is fast (0.1 s on a healthy body); this
+#: allowance covers a body that has to wake up, and still refuses to hang the button.
+RECONNECT_WAIT_S = 20.0
+
 #: Pulses per pump tick, so a long sweep keeps the preview moving.
 PULSES_PER_TICK = 4
 
@@ -629,11 +633,25 @@ class Station:
 
     def apply(self, settings) -> None:
         """Set ISO and shutter speed, on the pump thread (the run loop calls this)."""
-        self._run_job(_Job("apply", (settings,)), what="camera settings")
+        self._run_job(_Job("apply", (settings,)), wait_s=RECONNECT_WAIT_S, what="camera settings")
 
     def get_settings(self):
         """What the dials say, read on the pump thread."""
-        return self._run_job(_Job("settings"), what="reading the camera settings")
+        return self._run_job(_Job("settings"), wait_s=RECONNECT_WAIT_S, what="camera settings")
+
+    def reconnect(self, *, wait_s: float = RECONNECT_WAIT_S) -> bool:
+        """Close the session and open a new one. Returns whether it opened.
+
+        The answer to "the camera went away": unplugged, powered off to save battery, or a
+        session left in a state EDSDK will not come back from. Everything happens on the pump
+        thread -- closing a session from another thread is the same wrong-thread call that
+        hangs the rest (see the class note), and a reconnect that hangs would be worse than the
+        failure it is meant to fix.
+
+        The live-view *wish* is left alone: on FOCUS or POINT the pump starts previewing again
+        as soon as the session is back, which is what the operator is waiting for.
+        """
+        return bool(self._run_job(_Job("reconnect"), wait_s=wait_s, what="reconnect"))
 
     @property
     def disposable_frames(self) -> bool:
@@ -752,6 +770,14 @@ class Station:
             self._close()
             self._fail_pending("the camera station stopped")
 
+    def _reconnect(self) -> bool:
+        """Leave live view, drop the old session, open a new one -- all on this thread."""
+        self._stand_down()
+        self._close()
+        self._live_started = False
+        self._open()
+        return self._connected
+
     def _open(self) -> None:
         """Open the session -- on this thread, which is the whole point of the class."""
         # Consume any pending "someone asked again" here: the ask that *preceded* this attempt
@@ -791,6 +817,8 @@ class Station:
                 job.result = self._camera.apply(*job.args, **job.kwargs)
             elif job.kind == "settings":
                 job.result = self._camera.get_settings()
+            elif job.kind == "reconnect":
+                job.result = self._reconnect()
             else:  # pragma: no cover - a typo in a kind is a programming error
                 raise RuntimeError(f"unknown job kind {job.kind!r}")
         except BaseException as exc:
