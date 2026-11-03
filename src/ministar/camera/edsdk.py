@@ -224,6 +224,17 @@ class EdsdkCamera:
         """One live-view frame, decoded. Prefer :meth:`grab_live_jpeg` in a loop."""
         return Frame(pixels=decode_jpeg(self.grab_live_jpeg()), is_preview=True)
 
+    def stop_live_view(self) -> None:
+        """Leave live view: the body drops its mirror and stops streaming.
+
+        Live view is not this instrument's imaging state -- the shutter is -- so nothing should
+        hold the mirror up once a screen stops showing a preview. Safe to call when live view
+        was never started, which is what lets the station call it on every stand-down.
+        """
+        ffi = self._ffi
+        if ffi is not None:
+            ffi.stop_live_view()
+
     def keep_alive(self) -> None:
         """Push back the auto-power-off timer (08 §7.4)."""
         self._require().keep_alive()

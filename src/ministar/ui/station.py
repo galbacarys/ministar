@@ -36,6 +36,7 @@ from ministar.camera import decode_jpeg
 from ministar.focus.driver import Direction, PulseResult
 from ministar.focus.metrics import measure_hfd, tenengrad, to_gray
 from ministar.focus.synth import DEFAULT_SHAPE, StarField
+from ministar.ui.livestretch import LiveStretch
 
 #: How long ``stop()`` waits for the pump to close the session before saying it cannot.
 STOP_TIMEOUT_S = 3.0
@@ -70,6 +71,10 @@ class Analysis:
     stars: int
     contrast: float
     thumb: np.ndarray
+    #: The decoded frame, kept so the display path does not decode the JPEG a second time.
+    #: Measurement above is deliberately done on this *raw* array: a stretched frame would
+    #: clip star cores to white and change the HFD it is being used to judge.
+    pixels: np.ndarray | None = None
     #: The frame's own size, because HFD is in pixels and a binned live view's pixels are not
     #: the sensor's: without this an HFD cannot be converted to arcseconds, which is the only
     #: scale on which two measurements are comparable (11 §"quality gate").
@@ -89,6 +94,7 @@ def analyse(jpeg: bytes) -> Analysis:
         stars=stars,
         contrast=tenengrad(gray),
         thumb=thumbnail(gray),
+        pixels=image,
         width=int(width),
         height=int(height),
     )
@@ -154,6 +160,8 @@ class FakeCamera:
         self._set_at = when or self._clock()
         self._drift = bool(drift)
         self._altaz: tuple[float, float] | None = None
+        #: How many times the station has taken this camera out of live view.
+        self.live_view_stopped = 0
         if site is not None and getattr(site, "complete", False) and pointing is not None:
             self.set_pointing(*pointing)
         self.name = "Fake EOS (synthetic)"
@@ -387,6 +395,14 @@ class FakeCamera:
     def connect(self) -> None:
         return None
 
+    def stop_live_view(self) -> None:
+        """Nothing to route: the synthetic frames cost no mirror and no battery.
+
+        Present anyway, because "leaving live view" is part of the camera contract the station
+        relies on, and a fake that cannot express it hides the call site.
+        """
+        self.live_view_stopped += 1
+
     def disconnect(self) -> None:
         return None
 
@@ -497,6 +513,14 @@ class Station:
         #: Clear until a screen asks for a preview. A DSLR's live view raises the mirror and
         #: cycles the shutter, so the pump must not start it merely because the app launched.
         self._live = threading.Event()
+        #: Whether the *camera* is currently in live view. Distinct from ``_live`` (what a
+        #: screen asked for): this is the body's actual state, and it is what gets stood down.
+        self._live_started = False
+        #: Whether the session is open. A failed connect is not retried in a loop: the reason
+        #: is the useful output, and a retry every 300 ms would overwrite it with the generic
+        #: "not connected" from the next grab attempt (which is what used to happen).
+        self._connected = connect is None
+        self._retry = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_thumb: np.ndarray | None = None
         self._last_thumb_at: float | None = None
@@ -504,6 +528,8 @@ class Station:
         #: afterwards whether the mount was moving *while* the shutter was open.
         self._motion: deque[tuple[float, float]] = deque(maxlen=240)
         self._mark: np.ndarray | None = None
+        #: The display stretch for the preview. Frozen between frames (livestretch.py).
+        self._stretch = LiveStretch()
         self._snap = Snapshot(name=getattr(camera, "name", "camera"), error=initial_error)
 
     # -- lifecycle ----------------------------------------------------------
@@ -538,9 +564,20 @@ class Station:
 
     # -- the screens' whole API --------------------------------------------
     def want_live_view(self, enabled: bool = True) -> None:
-        """Enable or stop previews. Screens that show the live view call this on render."""
+        """Ask for previews, or stand the camera down.
+
+        Asking again is also the retry: a screen that shows a preview after a failed connect
+        re-opens the session, which is what makes "turn the camera on, go back to FOCUS" work
+        without restarting the console.
+
+        ``False`` is not merely "stop showing frames": the pump leaves live view on the body
+        as well, which drops a DSLR's mirror and stops the EVF stream. That is the difference
+        between a warm sensor and a cold one -- live view is not this instrument's imaging
+        state, it is a focusing aid, and it costs battery and dark current while it runs.
+        """
         if enabled:
             self._live.set()
+            self._retry.set()
         else:
             self._live.clear()
 
@@ -549,7 +586,11 @@ class Station:
         return self._live.is_set()
 
     def suspend(self) -> None:
-        """Hand the camera to a run loop: live view stops, captures may proceed."""
+        """Hand the camera to a run loop: live view stops, captures may proceed.
+
+        The pump stands the body down as well as pausing itself (see :meth:`_stand_down`), so a
+        run images with the mirror where the shutter wants it.
+        """
         self._suspended.set()
         self._forget_motion()
 
@@ -653,6 +694,10 @@ class Station:
         with self._lock:
             return self._snap
 
+    def restretch(self) -> None:
+        """Re-measure the display stretch on the next frame."""
+        self._stretch.restretch()
+
     def motion_since(self, since: float) -> float:
         """The largest frame-to-frame motion seen since ``since`` (monotonic seconds).
 
@@ -681,15 +726,25 @@ class Station:
         try:
             self._open()
             while not self._stop.is_set():
+                if self._connect is not None and not self._connected:
+                    # Nothing can work without a session. Hold the error that says why, and wait
+                    # to be asked again -- a screen re-rendering is the retry.
+                    self._retry.wait(0.2)
+                    if self._retry.is_set():
+                        self._retry.clear()
+                        self._open()
+                    continue
                 if self._serve_job():
                     continue
                 if self._suspended.is_set():
                     # A run owns the camera: no live view through a shutter release.
+                    self._stand_down()
                     time.sleep(0.02)
                     continue
                 if not self._live.is_set():
-                    # Nobody is showing a preview yet (PREFLIGHT/SETUP/TARGET/PARAMETERS).
-                    # Waiting here is what keeps the mirror down at startup.
+                    # Nobody is showing a preview (PREFLIGHT/SETUP/TARGET/PARAMETERS/DONE).
+                    # Waiting here keeps the mirror down when nothing needs a picture.
+                    self._stand_down()
                     self._live.wait(0.05)
                     continue
                 self._grab_and_publish()
@@ -699,14 +754,20 @@ class Station:
 
     def _open(self) -> None:
         """Open the session -- on this thread, which is the whole point of the class."""
+        # Consume any pending "someone asked again" here: the ask that *preceded* this attempt
+        # is what triggered it, and leaving the flag set would make the next park retry instantly.
+        self._retry.clear()
         if self._connect is None:
+            self._connected = True
             self._publish(name=getattr(self._camera, "name", "camera"))
             return
         try:
             info = self._connect()
         except Exception as exc:
+            self._connected = False
             self._publish(error=f"{type(exc).__name__}: {exc}")
             return
+        self._connected = True
         name = getattr(info, "name", "") or getattr(self._camera, "name", "camera")
         self._publish(name=name, error="")
 
@@ -760,11 +821,46 @@ class Station:
                 return
             time.sleep(PULSE_SETTLE_S)
 
+    def _stand_down(self) -> None:
+        """Leave live view on the body, once, when nothing is showing a preview.
+
+        Called from the pump loop rather than from :meth:`want_live_view` because the SDK call
+        belongs on this thread (see the class note) -- a caller on another thread asking for
+        the mirror to drop must not be the one who drops it.
+        """
+        if not self._live_started:
+            return
+        self._live_started = False
+        stop = getattr(self._camera, "stop_live_view", None)
+        if stop is None:
+            return
+        try:
+            stop()
+        except Exception as exc:
+            self._publish(error=f"could not leave live view: {type(exc).__name__}: {exc}")
+
+    @property
+    def connected(self) -> bool:
+        """Whether the session is open (always true for a camera with no connect step)."""
+        return self._connected
+
+    @property
+    def live_view_on(self) -> bool:
+        """Whether the *body* is in live view (not merely whether a screen asked for it)."""
+        return self._live_started
+
     def _grab_and_publish(self) -> None:
         try:
             self._send_batch()
+            # Set before the grab: asking for a frame is what puts the body in EVF mode, and a
+            # start that fails halfway still has to be undone by the stand-down path.
+            self._live_started = True
             jpeg = self._camera.grab_live_jpeg()
             analysis = analyse(jpeg)
+            # What the screens show is the stretched frame, never the camera's own JPEG: on a
+            # dark field the raw one is a black rectangle with a few dots in it, and the
+            # screen exists to let a human judge star shape.
+            shown = jpeg if analysis.pixels is None else self._stretch.encode(analysis.pixels)
             now = time.monotonic()
             with self._lock:
                 mark, self._mark = self._mark, None
@@ -779,7 +875,7 @@ class Station:
                 self._last_thumb = analysis.thumb
                 self._last_thumb_at = now
                 self._snap = Snapshot(
-                    data_uri="data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
+                    data_uri="data:image/jpeg;base64," + base64.b64encode(shown).decode("ascii"),
                     hfd=analysis.hfd,
                     stars=analysis.stars,
                     contrast=analysis.contrast,

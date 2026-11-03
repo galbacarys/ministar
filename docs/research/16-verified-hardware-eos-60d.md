@@ -161,6 +161,40 @@ stack has plenty of headroom.
 
 At 1 fps this is ~1–2 Mbit/s, comfortably inside brief 14 §5's hotspot budget.
 
+### 5.1 Live view as the app actually shows it (measured 2026-10-28)
+
+Live view is a **focusing aid, not the imaging state**. Two consequences the app now enforces:
+the frame on screen is stretched for the eye, and the body leaves live view whenever no screen is
+showing a preview.
+
+**Stretched, and cheaper for it.** Raw camera JPEG versus the STF-stretched preview the screens
+display, same stationary scene, same session:
+
+| | raw JPEG | stretched (STF, sky at 0.15) |
+|---|---|---|
+| frame size | 274 KB | **71 KB** |
+| rate | 11.4 fps | **8.6 fps** |
+
+So the stretch costs about a quarter of the frame rate (decode + `Stf` + re-encode: the decode
+was already happening for HFD) and pays it back nearly 4× in bandwidth — the stretched frame is
+almost all dark sky, which is cheap in JPEG. 8.6 fps is ample for focusing: the frame that
+arrives is legible, where the raw one was a black rectangle with a few dots.
+
+**Sky target 0.15, not the stack's 0.06.** The stack preview is watched for noise *falling* over
+minutes, so its background sits at 15/255. The live view is watched for stars *existing at all*,
+and at 0.06 the field is black. 0.15 puts the sky at 38/255 — still dark-adapted on the red theme
+— and lifts the faint stars Canon's tone curve buries. Aggressive clipping of star cores is the
+known trade: it makes stars easy to find and *less* informative about shape, which is why HFD is
+measured on the raw frame and never on the display path.
+
+**Leaving live view drops the mirror.** `Evf_OutputDevice = 0` ends the stream and a DSLR returns
+its mirror; measured round trip, `want_live_view(False)` → **0 frames** while stopped, then
+`want_live_view(True)` → 8.0 fps and frames again, in the same session. This matters beyond
+tidiness: live view heats the sensor and drains the battery, and the shutter wants the mirror
+down. The app therefore asks for it only on FOCUS and POINT, and during a reframe inside RUN;
+every other phase stands the body down. The station performs the SDK call on the pump thread,
+because that is the only thread that may (see `Station` and §4).
+
 ---
 
 ## 6. Constants and property IDs, now confirmed

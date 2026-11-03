@@ -546,11 +546,20 @@ class RecordingLib:
 
     def __init__(self) -> None:
         self.writes: list[int] = []
+        self.values: list[int] = []
         self.streams = 0
         self.refs = 0
+        self.releases = 0
 
     def EdsSetPropertyData(self, camera, prop, param, size, ptr):
+        import ctypes
+
         self.writes.append(prop)
+        self.values.append(ctypes.cast(ptr, ctypes.POINTER(ctypes.c_uint32)).contents.value)
+        return 0
+
+    def EdsRelease(self, ref):
+        self.releases += 1
         return 0
 
     def EdsCreateMemoryStream(self, size, out):
@@ -574,6 +583,7 @@ def a_bare_ffi(lib: RecordingLib) -> edsdk_ffi.Edsdk:
     ffi.EdsSetPropertyData = lib.EdsSetPropertyData
     ffi.EdsCreateMemoryStream = lib.EdsCreateMemoryStream
     ffi.EdsCreateEvfImageRef = lib.EdsCreateEvfImageRef
+    ffi.EdsRelease = lib.EdsRelease
     return ffi
 
 
@@ -604,3 +614,39 @@ def test_starting_live_view_is_idempotent_and_allocates_once() -> None:
     assert lib.writes == [edsdk_ffi.PROP_EVF_OUTPUT_DEVICE], "second start wrote again"
     assert (lib.streams, lib.refs) == (1, 1), "the EVF stream was allocated twice"
     assert ffi._live is True
+
+
+def test_stopping_live_view_routes_the_evf_away_and_frees_the_stream() -> None:
+    """Leaving live view must reach the body, and must not leak EDSDK objects doing it.
+
+    Stand-down now happens on every screen change and every run, so a stream and an EvfImageRef
+    left behind each time is an object leaked per visit. ``Evf_OutputDevice = 0`` is what puts a
+    DSLR's mirror back down -- the point of stopping at all.
+    """
+    lib = RecordingLib()
+    ffi = a_bare_ffi(lib)
+    ffi.start_live_view()
+
+    ffi.stop_live_view()
+
+    assert lib.writes == [edsdk_ffi.PROP_EVF_OUTPUT_DEVICE] * 2
+    assert lib.values == [edsdk_ffi.EVF_OUTPUT_PC, edsdk_ffi.EVF_OUTPUT_OFF]
+    assert lib.releases == 2, "the EVF stream and image ref were not released"
+    assert ffi._live is False
+    assert ffi._stream is None and ffi._evf_image is None
+
+    # And it must be able to come back: a screen change is not a one-way trip.
+    ffi.start_live_view()
+    assert lib.values[-1] == edsdk_ffi.EVF_OUTPUT_PC
+    assert (lib.streams, lib.refs) == (2, 2)
+
+
+def test_stopping_live_view_that_was_never_started_does_nothing() -> None:
+    """The station calls this on every stand-down, including runs where nobody previewed."""
+    lib = RecordingLib()
+    ffi = a_bare_ffi(lib)
+
+    ffi.stop_live_view()
+
+    assert lib.writes == []
+    assert lib.releases == 0

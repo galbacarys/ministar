@@ -16,6 +16,7 @@ Constants transcribed from Canon's ``EdsTypes.h`` and cross-checked against
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import time
@@ -87,6 +88,9 @@ FAR_1, FAR_2, FAR_3 = 0x00008001, 0x00008002, 0x00008003
 NEAR_STEPS = (NEAR_1, NEAR_2, NEAR_3)
 FAR_STEPS = (FAR_1, FAR_2, FAR_3)
 
+#: ``kEdsEvfOutputDevice``. 0 means "nobody": the stream stops and a DSLR drops its mirror,
+#: which is the real imaging state. PC alone is enough to start live view (16 §4).
+EVF_OUTPUT_OFF = 0x00000000
 EVF_OUTPUT_PC = 0x00000002
 
 #: Codes that mean "not ready yet" rather than "failed".
@@ -512,12 +516,26 @@ class Edsdk:
         return ctypes.string_at(ptr, length.value)
 
     def stop_live_view(self) -> None:
+        """Route the EVF away from the PC and free the stream.
+
+        Called on every stand-down, which is now frequent -- leaving a screen that shows a
+        preview, and every run. The release matters for that reason: each ``start_live_view``
+        allocates a memory stream and an ``EdsEvfImageRef``, so leaking them costs an EDSDK
+        object per visit. A failure here is swallowed by the caller: a body we cannot reach is
+        already reported by whatever failed first.
+        """
         if not self._live:
             return
-        value = c_uint32(0)
+        value = c_uint32(EVF_OUTPUT_OFF)
         self.EdsSetPropertyData(
             self.camera, PROP_EVF_OUTPUT_DEVICE, 0, ctypes.sizeof(value), byref(value)
         )
+        for ref in (self._evf_image, self._stream):
+            if ref is not None:
+                with contextlib.suppress(Exception):
+                    self.EdsRelease(ref)
+        self._evf_image = None
+        self._stream = None
         self._live = False
 
     # -- focus --------------------------------------------------------------

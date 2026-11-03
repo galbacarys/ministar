@@ -39,6 +39,17 @@ def wait_until(predicate, *, timeout: float = 5.0, interval: float = 0.005) -> N
     raise AssertionError("condition never became true")
 
 
+def synthetic_frame(settings: dict | None = None) -> np.ndarray:
+    """A dark noisy frame with a handful of stars: what the preview has to make visible."""
+    values = {"sky": 12.0, "noise": 3.0, "stars": 6}
+    values.update(settings or {})
+    rng = np.random.default_rng(1)
+    frame = rng.normal(values["sky"], values["noise"], (48, 64, 3))
+    for i in range(int(values["stars"])):
+        frame[(i * 7 + 5) % 48, (i * 11 + 9) % 64] = 200.0
+    return frame.clip(0, 255).astype(np.uint8)
+
+
 class GuardedCamera:
     """A camera that records *which threads* call it, and whether two are ever inside at once.
 
@@ -63,6 +74,7 @@ class GuardedCamera:
         self.captures: list[Path] = []
         self.pulses: list[Direction] = []
         self.settings: list = []
+        self.live_view_stopped = 0
         self.frame_s = frame_s
         self.capture_s = capture_s
         #: Set by a test to hold a capture open while it inspects the station.
@@ -106,6 +118,10 @@ class GuardedCamera:
             time.sleep(0.001)
             self.pulses.append(direction)
 
+    def stop_live_view(self) -> None:
+        with self._enter("stop-live"):
+            self.live_view_stopped += 1
+
     def connect(self):
         with self._enter("connect"):
             return SimpleNamespace(name=self.name, port="fake")
@@ -124,7 +140,13 @@ class GuardedCamera:
 
 @pytest.fixture
 def analysed(monkeypatch) -> None:
-    """Stub the JPEG analysis: these tests are about serialisation, not star measurement."""
+    """Stub the JPEG analysis: these tests are about serialisation, not star measurement.
+
+    The stub returns a *realistic* frame -- noisy sky plus a few stars -- rather than zeros,
+    because the display stretch runs on it: a uniform array has zero MAD, which is the one
+    degenerate case the stretch deliberately leaves black.
+    """
+    from ministar.focus.synth import StarField  # noqa: F401  (documents where frames come from)
 
     def fake_analyse(jpeg: bytes) -> Analysis:
         return Analysis(
@@ -132,6 +154,7 @@ def analysed(monkeypatch) -> None:
             stars=12,
             contrast=3.0,
             thumb=np.zeros((32, 32), dtype=np.float32),
+            pixels=synthetic_frame(),
             width=1056,
             height=704,
         )
@@ -403,3 +426,121 @@ def test_stopping_releases_a_caller_and_says_the_pump_is_stuck(analysed) -> None
     assert errors and isinstance(errors[0], StationStopped), f"caller got {errors}"
     assert "did not shut down" in station.snapshot().error
     camera.block_capture.set()  # let the leaked pump thread finish
+
+
+# -- leaving live view -------------------------------------------------------
+def test_leaving_live_view_stands_the_camera_down(live_station) -> None:
+    """Live view is a focusing aid, not the imaging state: the body must leave it.
+
+    On a DSLR "leaving live view" is a real state change -- the mirror comes back and the EVF
+    stream stops -- so it is the camera that has to be told, not just the pump that has to stop
+    asking. Leaving it up costs battery, heats the sensor, and is not what the shutter wants.
+    """
+    station, camera = live_station
+    station.want_live_view(True)
+    wait_until(lambda: camera.frames >= 2)
+
+    station.want_live_view(False)
+    wait_until(lambda: camera.live_view_stopped == 1)
+
+    frames = camera.frames
+    time.sleep(0.1)
+    assert camera.frames == frames, "the pump kept grabbing after live view was given up"
+    assert not station.live_view_on
+
+
+def test_only_one_stand_down_per_visit(live_station) -> None:
+    """The pump idles in a loop; the camera must be told once, not eleven times a second."""
+    station, camera = live_station
+    station.want_live_view(True)
+    wait_until(lambda: camera.frames >= 2)
+    station.want_live_view(False)
+
+    wait_until(lambda: camera.live_view_stopped >= 1)
+    time.sleep(0.25)
+    assert camera.live_view_stopped == 1, "the stand-down is being repeated every tick"
+
+
+def test_coming_back_to_live_view_restarts_it(live_station) -> None:
+    station, camera = live_station
+    station.want_live_view(True)
+    wait_until(lambda: camera.frames >= 2)
+    station.want_live_view(False)
+    wait_until(lambda: camera.live_view_stopped == 1)
+
+    station.want_live_view(True)
+    before = camera.frames
+    wait_until(lambda: camera.frames > before)
+    assert station.live_view_on
+
+
+def test_a_run_stands_the_camera_down_too(live_station) -> None:
+    """A run images with the mirror down: suspend() has to reach the camera, not just the pump."""
+    station, camera = live_station
+    station.want_live_view(True)
+    wait_until(lambda: camera.frames >= 2)
+
+    station.suspend()
+    wait_until(lambda: camera.live_view_stopped == 1)
+    frames = camera.frames
+    time.sleep(0.1)
+    assert camera.frames == frames
+
+
+# -- when the session will not open -----------------------------------------
+class RefusingCamera(GuardedCamera):
+    """A body that is not there: connect fails, and it says why."""
+
+    def __init__(self, *, fail_until: int = 99) -> None:
+        super().__init__()
+        self.attempts = 0
+        self.fail_until = fail_until
+
+    def connect(self):
+        self.attempts += 1
+        if self.attempts <= self.fail_until:
+            raise RuntimeError("no camera visible to EDSDK")
+        return SimpleNamespace(name=self.name, port="fake")
+
+
+def test_a_failed_connect_keeps_its_reason(analysed) -> None:
+    """The useful error must survive; a retry loop would replace it with "not connected".
+
+    Reported by a probe on the real body: the connect error (``0xC0``, the port was held by the
+    running console) was visible for under a second and then became the generic
+    ``CameraNotConnected: connect() the camera first`` from the next grab attempt -- which says
+    nothing about why.
+    """
+    camera = RefusingCamera()
+    station = Station(camera, connect=camera.connect)
+    station.start()
+    try:
+        # No ask: the connect is attempted when the pump starts, and a *later* ask is a
+        # deliberate retry (the next test). This one is about the message surviving.
+        wait_until(lambda: "no camera visible" in station.snapshot().error)
+        time.sleep(0.4)
+        assert "no camera visible" in station.snapshot().error, (
+            f"the connect reason was overwritten: {station.snapshot().error!r}"
+        )
+        assert station.snapshot().frames == 0
+        assert not station.connected
+        assert camera.attempts == 1, "a failed connect was retried on a timer"
+    finally:
+        station.stop()
+
+
+def test_asking_for_a_preview_retries_a_failed_connect(analysed) -> None:
+    """Turn the camera on and revisit the screen: no console restart required."""
+    camera = RefusingCamera(fail_until=1)
+    station = Station(camera, connect=camera.connect)
+    station.start()
+    try:
+        station.want_live_view(True)
+        wait_until(lambda: "no camera visible" in station.snapshot().error)
+
+        station.want_live_view(True)  # the screen re-rendering
+        wait_until(lambda: station.connected)
+        wait_until(lambda: camera.frames >= 1)
+        assert station.snapshot().name == "guarded"
+    finally:
+        station.stop()

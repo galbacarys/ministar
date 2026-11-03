@@ -58,6 +58,7 @@ def wizard_page() -> None:
         if index > 0:
             end_run_if_leaving(app)
             app.session.phase = ORDER[index - 1]
+            apply_live_view(app)
             content.refresh()
 
     def go_next() -> None:
@@ -66,6 +67,7 @@ def wizard_page() -> None:
             return
         end_run_if_leaving(app)
         app.session.advance()
+        apply_live_view(app)
         content.refresh()
 
     @ui.refreshable
@@ -127,6 +129,21 @@ def wizard_page() -> None:
         update_nav()
 
     content()
+
+
+def apply_live_view(app: App) -> None:
+    """State whether the camera should be in live view for the phase now on screen.
+
+    Only the phases that show a preview ask for it (``screens.LIVE_VIEW_PHASES``). Everything
+    else stands the body down, which on a DSLR means the mirror comes back and the EVF stream
+    stops: live view is a focusing aid, not the imaging state, and leaving it running while the
+    operator reads a table costs battery, heats the sensor and risks the camera sleeping with
+    its mirror already up.
+
+    The station does the SDK work on the pump thread; this only records the wish.
+    """
+    if app.station is not None:
+        app.station.want_live_view(screens.wants_live_view(app.session.phase))
 
 
 def end_run_if_leaving(app: App) -> None:

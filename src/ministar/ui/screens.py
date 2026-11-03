@@ -333,6 +333,29 @@ class Context:
     rig: RigProfile | None = None
 
 
+#: Phases whose screen shows the camera's live view.
+#:
+#: Short on purpose. Live view is a *focusing aid*, not the imaging state: while it runs a DSLR
+#: holds its mirror up, cycles the shutter, heats the sensor and drains the battery. So a phase
+#: appears here only if it puts a preview in front of the operator, and the wizard stands the
+#: body down on the way out of every other one.
+#:
+#: RUN is absent for the same reason: the loop owns the camera there, and the run itself images
+#: with live view off. The reframe sub-cycle is the exception and turns it back on for its own
+#: duration, because the operator has to aim by eye -- that is handled on the RUN page, where
+#: the state is actually known.
+LIVE_VIEW_PHASES: frozenset[Phase] = frozenset({Phase.FOCUS, Phase.POINT})
+
+
+def wants_live_view(phase: Phase) -> bool:
+    """Whether the screen for ``phase`` shows live view.
+
+    A pure function so the shell can ask without a station, and so a test can assert that no
+    other phase quietly leaves the mirror up.
+    """
+    return phase in LIVE_VIEW_PHASES
+
+
 def _not_implemented(what: str, brief: str) -> None:
     ui.label(f"{what} is not implemented yet.").classes("mn-warn")
     ui.label(f"Design: docs/research/{brief}").classes("mn-dim")
@@ -1664,6 +1687,11 @@ def render_run(ctx: Context) -> None:
         runner = run_loop.active()
         if runner is None:
             return
+        if station is not None:
+            # Suspend *before* the loop resumes: the pump must not be grabbing previews between
+            # frames of a run, and a frame grabbed through a shutter release is 02 §1.7's warning.
+            station.suspend()
+            station.want_live_view(False)
         aim = reframe_aim()
         if aim is None:
             runner.resume()
@@ -1810,7 +1838,15 @@ def render_run(ctx: Context) -> None:
         paused = snapshot.state == "paused"
         reframing = snapshot.state == "reframe"
         reframe_box.set_visibility(reframing)
+        if station is not None:
+            # A run images with live view off; the reframe is a pause in which the operator aims
+            # by eye, so it is the one part of RUN that wants a picture (and the mirror up).
+            station.want_live_view(reframing)
         if reframing:
+            if station is not None and station.suspended:
+                # The loop paused instead of stopping, so the camera is free: resume the pump or
+                # the POINT renderer below would draw a preview that never arrives.
+                station.resume()
             build_point()
             aim = reframe_aim()
             error = aim_error(aim)

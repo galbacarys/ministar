@@ -431,3 +431,22 @@ def test_no_screen_takes_a_picture_behind_the_station() -> None:
     assert ".camera.capture_to(" not in source, (
         "a screen captures the camera directly; call station.capture_to from a worker thread"
     )
+
+
+def test_only_the_preview_screens_hold_the_mirror_up() -> None:
+    """Live view is a focusing aid, not the imaging state.
+
+    While it runs a DSLR holds its mirror up, cycles the shutter, heats the sensor and drains
+    the battery, so the wizard stands the body down on the way out of any phase that does not
+    show a preview. This test is the list of places allowed to keep it up; adding a phase here
+    should be a deliberate act, not a side effect of rendering a screen.
+    """
+    previews = {phase for phase in ORDER if screens.wants_live_view(phase)}
+    assert previews == {Phase.FOCUS, Phase.POINT}, (
+        f"live view is requested by {sorted(p.name for p in previews)}"
+    )
+
+
+def test_every_preview_phase_has_a_screen() -> None:
+    missing = [phase.name for phase in screens.LIVE_VIEW_PHASES if phase not in screens.RENDERERS]
+    assert not missing, f"live view is wanted for phases with no screen: {missing}"

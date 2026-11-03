@@ -217,7 +217,7 @@ it is still one mono plane, not three CFA planes of independent sensor noise.
 |---|---|
 | ASTAP driver | complete; hinted solve measured at **0.74 s** |
 | Focus: HFD metric, V-curve fit, motion planner, routine | complete, validated on real frames |
-| Canon backend (EDSDK) | enumerate, session, live view, still capture to file, ISO/Tv/Av write + read-back: **verified on the 60D**. `capture()` (a decoded array) is deliberately absent -- the loop reads the file the body produced |
+| Canon backend (EDSDK) | enumerate, session, live view, still capture to file, ISO/Tv/Av write + read-back: **verified on the 60D**. The preview is STF-stretched (8.6 fps, 71 KB/frame) and live view is stood down -- mirror down -- whenever no screen is showing it. `capture()` (a decoded array) is deliberately absent: the loop reads the file the body produced |
 | Live stacking | complete and measured on the fake rig: **~0.59 s/frame** at 4.5 MP, projective transform, sigma gate, frozen STF (15) |
 | RUN loop + reframe sub-cycle | complete: start/pause/stop, measured pacing, bump -> re-solve -> rebase, auto-resume after the aim holds 15 s |
 | POINT: roll advice, entry point, nudges | complete (10 §2.1c, §5) |
