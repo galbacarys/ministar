@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from nicegui import ui
+from nicegui.run import io_bound
 
 from ministar import preflight as preflight_checks
 from ministar import quality
@@ -490,33 +491,58 @@ def render_setup(ctx: Context) -> None:
 
     rig_message = ui.label("").classes("mn-warn")
 
-    def read_rig() -> None:
-        camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
-        if camera is None or not hasattr(camera, "capture_to"):
+    async def read_rig() -> None:
+        """Take one test frame and learn the rig from its EXIF.
+
+        Async, and the camera work in a worker thread, because a capture is seconds long and
+        this runs on the event loop that also feeds every other client. A blocking call here
+        froze the whole console -- the page stopped answering while the shutter was open.
+
+        The capture goes through ``station.capture_to`` so the pump is not downloading a
+        live-view frame at the same time: two threads in one Canon session wedged both of
+        them inside the SDK, and the visible symptom was that the focus screen never got a
+        preview -- the event loop that would have rendered it was parked in EDSDK.
+        """
+        station = ctx.station
+        camera = getattr(station, "camera", None) if station is not None else None
+        if station is None or camera is None or not hasattr(camera, "capture_to"):
             rig_message.text = "camera capture is not available in this session"
             return
+
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         frame = ctx.settings.paths.frames / f"rigtest_{stamp}.cr2"
-        try:
-            camera.capture_to(frame)
+
+        def work() -> tuple[str, bool]:
+            """Capture and read it, off the event loop. Returns (message, saved)."""
+            station.capture_to(frame)
             exif = read_frame_exif(frame)
             candidate = RigProfile.from_frame_exif(exif, recorded=datetime.now().date().isoformat())
+            current = load_rig(rig_store)
+            if not better_than(candidate, current):
+                return f"kept the {current.source} profile: {current.describe()}", False
+            save_rig(rig_store, candidate)
+            return f"saved: {candidate.describe()}", True
+
+        # One shutter release per press: the button is disabled for the duration rather than
+        # letting a second click queue a second exposure behind the first.
+        rig_button.disable()
+        rig_message.text = "taking a test frame..."
+        try:
+            message, saved = await io_bound(work)
         except (TiffError, RuntimeError, TimeoutError, OSError) as exc:
             rig_message.text = f"could not read the frame: {type(exc).__name__}: {exc}"
             return
         except ValueError as exc:
             rig_message.text = f"frame cannot define the rig: {exc}"
             return
-        current = load_rig(rig_store)
-        if not better_than(candidate, current):
-            rig_message.text = f"kept the {current.source} profile: {current.describe()}"
-            return
-        save_rig(rig_store, candidate)
-        rig_message.text = f"saved: {candidate.describe()}"
-        ctx.refresh()
+        finally:
+            rig_button.enable()
+        rig_message.text = message
+        if saved:
+            ctx.refresh()
 
     with ui.row().classes("items-center").style("gap: 10px"):
-        ui.button("read from a test frame", on_click=read_rig).classes("mn-action")
+        rig_button = ui.button("read from a test frame", on_click=read_rig).classes("mn-action")
 
     ui.label("Tripod head").classes("mn-heading")
     _not_implemented("Head calibration profiles", "13-head-calibration.md")
@@ -1131,7 +1157,10 @@ def render_point(ctx: Context) -> None:
                 settle_label.text = f"{stillness.describe()} -- waiting for it to settle"
                 await asyncio.sleep(0.2)
             settle_label.text = ""
-            report, note = _solve(ctx, stillness)
+            # Off the event loop: a capture plus a blind solve is up to nine seconds, and the
+            # page would be frozen for all of it -- including the live view it is showing.
+            solved = await io_bound(_solve, ctx, stillness)
+            report, note = solved if solved is not None else (None, "solve was cancelled")
             solve_note.text = note
             show_buttons()
             if report is not None:
@@ -1313,8 +1342,9 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     from ministar.raw import convert_to_fits
     from ministar.solver import solve_with_fallback
 
-    camera = getattr(ctx.station, "camera", None) if ctx.station is not None else None
-    if camera is None or getattr(camera, "capture_to", None) is None:
+    station = ctx.station
+    camera = getattr(station, "camera", None) if station is not None else None
+    if station is None or camera is None or getattr(camera, "capture_to", None) is None:
         return None, "this camera cannot capture in this session (the fake one cannot)"
     if stillness is not None and stillness.moving:
         return None, f"{stillness.describe()} -- wait for it to settle, then solve again"
@@ -1325,13 +1355,12 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     # here. Re-aiming on every solve would silently undo the nudge the user just made -- and
     # the nudge is the measurement.
 
-    station = ctx.station
     opened_at = time.monotonic()
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     suffix = ".fit" if getattr(camera, "disposable_frames", False) else ".cr2"
     raw = ctx.settings.paths.frames / f"point_{stamp}{suffix}"
     try:
-        camera.capture_to(raw)
+        station.capture_to(raw)
         if raw.suffix.lower() in {".fit", ".fits"}:
             converted = raw  # the fake writes what ASTAP reads directly
         elif ctx.settings.dcraw is not None:
@@ -1715,14 +1744,16 @@ def render_run(ctx: Context) -> None:
         station.suspend()
         run_loop.start(
             capture=station.capture_to,
-            camera=station.camera,
+            # The station, not the camera: the runner sets ISO/Tv from its own thread, and an
+            # SDK call from a thread that does not own the session never returns (station.py).
+            camera=station,
             model=model,
             config=RunConfig(
                 exposure_s=float(ctx.state.exposure_s),
                 iso=int(ctx.state.iso or 800),
                 reframe_interval_s=ctx.state.reframe_interval_s,
                 bin_factor=int(ctx.state.stack_bin),
-                keep_frames=not bool(getattr(station.camera, "disposable_frames", False)),
+                keep_frames=not station.disposable_frames,
                 target_name=ctx.state.target_name or "",
                 target_ra_deg=ctx.state.target_ra_deg,
                 target_dec_deg=ctx.state.target_dec_deg,

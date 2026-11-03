@@ -112,6 +112,14 @@ These came out of the research and are load-bearing:
 - **`EDSDK.dll` is on this machine already** (13.19.0.6400, x64, inside Lightroom), and
   N.I.N.A. ships it inside its own installer. It may be redistributed *as part of an app* —
   just never committed to git. See 08.
+- **EDSDK belongs to the thread that opened the session, not to a lock.** A blocking SDK call
+  from any other thread does not return until the owning thread pumps `EdsGetEvent`. Measured on
+  the 60D: the same call took 0.06 s on the owner thread and never returned on a worker. So live
+  view had never worked in the app, and a capture taken from the event loop wedged the console.
+  One thread now opens, uses and closes the session; every other thread queues a job. See 16 §4.
+- **`Evf_Mode` must not be written.** `Evf_OutputDevice = PC` alone starts live view in 0.06 s;
+  the legacy mode write has been observed both returning and never returning on this body. It is
+  gone. See 16 §4.
 - **A resident daemon is mandatory, not a preference.** Bare `python -c pass` is ~60 ms and
   `import numpy` ~235 ms, against a ~43 ms process-spawn budget. See 05.
 - **Siril is the right tool for the end-of-session restack and the wrong one for the live

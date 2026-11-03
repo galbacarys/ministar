@@ -8,6 +8,7 @@ with no glyph. None of them need a browser, and all of them are cheap.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -414,3 +415,19 @@ def test_the_clock_reads_in_minutes_not_seconds_past_an_hour() -> None:
     assert screens.clock_text(0) == "0m 00s"
     assert screens.clock_text(65) == "1m 05s"
     assert screens.clock_text(3661) == "1h 01m"
+
+
+def test_no_screen_takes_a_picture_behind_the_station() -> None:
+    """The station is the only door to the shutter.
+
+    SETUP's "read from a test frame" used to call ``station.camera.capture_to`` directly --
+    outside the camera lock, without suspending the pump, and, worst of all, on the NiceGUI
+    event loop. One click wedged two threads inside EDSDK (``set_save_to_host`` and
+    ``start_live_view``) and froze the whole console, which surfaced as "the focus screen
+    shows no preview". The bug was a single call site, so the guard is too: any new screen
+    that reaches for the camera directly fails here instead of in the dark.
+    """
+    source = Path(screens.__file__).read_text(encoding="utf-8")
+    assert ".camera.capture_to(" not in source, (
+        "a screen captures the camera directly; call station.capture_to from a worker thread"
+    )

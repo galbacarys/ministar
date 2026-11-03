@@ -110,6 +110,34 @@ All of these produced frames, so the exact enable ritual is not critical:
 | `Evf_OutputDevice=3` (PC\|TFT) | OK |
 | `Evf_OutputDevice=2` then sleep 1.5 s | OK |
 
+⚠️ **Correction 2026-10-28: `Evf_Mode` is not safe to write, and is not needed.** Through
+`src/ministar/camera/edsdk_ffi.py` — the binding the app actually uses —
+`EdsSetPropertyData(kEdsPropID_Evf_Mode, 1)` **did not return** in two independent sessions
+(the camera pump, and a standalone probe). No error, no `DEVICE_BUSY`: the thread stayed
+inside the DLL. It also blocks `EdsCloseSession`, so the app could not even shut down, and
+because the pump was the blocked thread the visible symptom was a permanently blank preview
+with nothing to report.
+
+The row above ("`Evf_Mode=1` then `Evf_OutputDevice=2` → OK") came from `tools/edsdk_lite.py`,
+a separate targeted binding, on 2026-10-26. So the same write has been observed both
+returning and never returning on this body: **the discrepancy is real and unexplained**
+(an event pump — `EdsGetEvent` — runs in some harnesses and not others; body state and mode
+dial may also matter). Re-measured today, output-route-only is sufficient and fast:
+
+| sequence | result |
+|---|---|
+| `Evf_OutputDevice=2`, no mode write | `0x0` in **0.06 s** |
+| `Evf_Mode=1` first, as before | **does not return** |
+| download after output-only | `0xA102` ×10 (~1.0 s), then **180 059 bytes** |
+
+Decision: **never write `Evf_Mode`.** It is the legacy switch, the output route alone starts
+live view on this body, and a call that can hang without a code is not something a caller can
+defend against. `PROP_EVF_MODE` remains in the FFI only as the name of the trap.
+
+A second, related lesson: live view had never been exercised through the shipping binding at
+all. The verification used a script beside it, so a defect in the app's own path could not
+show up in that verification. Verify the code the product runs.
+
 **Retryable codes** observed so far: `0x0000A102`, `0x000000A0`, and `0x00000081`
 (`DEVICE_BUSY`) when pulses are sent faster than the body consumes them.
 

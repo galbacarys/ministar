@@ -220,18 +220,19 @@ def run(
 
     if fake:
         camera = FakeCamera()
+        connect = None
         initial_error = ""
     else:
         from ministar.camera import EdsdkCamera
 
         camera = EdsdkCamera()
+        # The pump thread opens the session, not this one: EDSDK calls belong to the thread
+        # that opened it (see Station). Errors arrive on the snapshot, where the screen shows
+        # them, rather than as a startup dialog that would have to block to get them.
+        connect = camera.connect
         initial_error = ""
-        try:
-            camera.connect()
-        except Exception as exc:
-            initial_error = f"{type(exc).__name__}: {exc}"
 
-    _STATION = Station(camera, initial_error=initial_error)
+    _STATION = Station(camera, connect=connect, initial_error=initial_error)
     _STATION.start()
     try:
         ui.run(

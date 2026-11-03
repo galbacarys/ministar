@@ -65,6 +65,13 @@ PROP_TV = 0x00000406
 PROP_AVAILABLE_SHOTS = 0x0000040A
 PROP_LENS_NAME = 0x0000040D
 PROP_EVF_OUTPUT_DEVICE = 0x00000500
+#: ⚠️ **Never write this one.** ``Evf_Mode`` is the legacy "turn live view on" switch. On the
+#: EOS 60D ``EdsSetPropertyData(kEdsPropID_Evf_Mode, 1)`` has been observed to **never
+#: return** -- not ``DEVICE_BUSY``, no code at all, both the pump and ``EdsCloseSession``
+#: parked inside the DLL (2026-10-28, two sessions). Brief 16 §4 also records the same write
+#: *succeeding* a day earlier through a different binding, so it is intermittent rather than
+#: always fatal; either way it is not needed. ``Evf_OutputDevice = PC`` alone starts live
+#: view on this body in 0.06 s. The constant stays as the name of a trap.
 PROP_EVF_MODE = 0x00000501
 
 # -- commands ----------------------------------------------------------------
@@ -453,13 +460,18 @@ class Edsdk:
         Idempotent: the camera layer calls it lazily on the first preview request rather
         than at connect time, because on a DSLR starting live view flips the mirror and
         cycles the shutter -- which must not happen just because the app was launched.
+
+        **Only the output route is set.** An earlier version also wrote ``Evf_Mode = 1``
+        first, on the theory that "some bodies require it". On this body that call has been
+        observed to never return, so the first pump iteration sat inside the SDK: the preview
+        stayed blank with no error anywhere to report it, and even shutdown hung. Live view
+        had in fact never been exercised through *this* binding -- the verification in brief
+        16 used a separate targeted script, which is how the gap survived. Measured
+        2026-10-28 on the 60D: output-route-only answers in 0.06 s, then ``0xA102`` for ~1.0 s
+        and a 180 KB JPEG -- the warm-up :meth:`grab_jpeg` already retries through.
         """
         if self._live:
             return
-        mode = c_uint32(1)
-        # Some bodies require Evf_Mode first; failure here is not fatal.
-        self.EdsSetPropertyData(self.camera, PROP_EVF_MODE, 0, ctypes.sizeof(mode), byref(mode))
-
         value = c_uint32(EVF_OUTPUT_PC)
         _check(
             "EdsSetPropertyData(Evf_OutputDevice)",

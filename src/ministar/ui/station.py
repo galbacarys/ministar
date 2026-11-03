@@ -1,24 +1,34 @@
 """The camera pump, shared by every screen.
 
-Owns the camera in exactly one thread and publishes immutable snapshots, so no
-screen can block on EDSDK. This is the same shape that fixed the harness: an
-earlier version called the camera on the GUI thread while holding its lock, and a
-burst of clicks froze the window.
+Owns the camera *session* in exactly one thread and publishes immutable snapshots, so no
+screen can block on EDSDK. Kept separate from any screen so several screens can share one
+camera (brief 12 has FOCUS reading HFD and RUN reading frames).
 
-Kept separate from any screen so that several screens can share one camera
-(``brief 12`` has FOCUS reading HFD and RUN reading frames).
+Two rounds of failure shaped this, and the second explains why the first was not enough:
+
+1. An earlier version called the camera on the GUI thread while holding a lock, and a burst
+   of clicks froze the window. The answer was a pump thread plus a camera lock.
+2. The lock did not help, because EDSDK does not care about *overlap*, it cares about
+   *threads*: a blocking call made off the session-owning thread never returns until that
+   owner pumps ``EdsGetEvent`` (measured, see :class:`Station`). Live view had never once
+   worked in the app, and a capture from the event loop wedged both threads at once.
+
+So the rule is now structural rather than disciplinary: the pump thread opens the session,
+performs every SDK call, and closes it. Everything else queues a job and waits.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import math
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -26,6 +36,13 @@ from ministar.camera import decode_jpeg
 from ministar.focus.driver import Direction, PulseResult
 from ministar.focus.metrics import measure_hfd, tenengrad, to_gray
 from ministar.focus.synth import DEFAULT_SHAPE, StarField
+
+#: How long ``stop()`` waits for the pump to close the session before saying it cannot.
+STOP_TIMEOUT_S = 3.0
+
+#: How long a queued capture may wait for the pump to run it. Generous on purpose -- a 30 s
+#: exposure is not a hang -- but finite, because a stuck SDK call must become an error.
+CAPTURE_WAIT_S = 180.0
 
 #: Pulses per pump tick, so a long sweep keeps the preview moving.
 PULSES_PER_TICK = 4
@@ -412,20 +429,70 @@ class Snapshot:
     height: int = 0
 
 
-class Station:
-    """Owns the camera in exactly one thread. Screens only read snapshots."""
+class StationStopped(RuntimeError):
+    """The station is not running, so nothing queued can be executed."""
 
-    def __init__(self, camera, initial_error: str = "") -> None:
+
+class StationTimeout(RuntimeError):
+    """The pump did not answer in time -- almost certainly a wedged SDK call."""
+
+
+@dataclass
+class _Job:
+    """One unit of work for the pump thread.
+
+    Screens and the run loop never touch the camera directly; they hand the pump a job and
+    wait for it. That is not ceremony -- see :class:`Station`.
+    """
+
+    kind: str
+    args: tuple = ()
+    kwargs: dict = field(default_factory=dict)
+    done: threading.Event = field(default_factory=threading.Event)
+    result: Any = None
+    error: BaseException | None = None
+
+
+class Station:
+    """Owns the camera session in exactly one thread; everything else queues.
+
+    **Why one thread, and why that thread opens the session.** EDSDK on Windows is bound to
+    the thread that called ``EdsInitializeSDK``/``EdsOpenSession``: a blocking call made from
+    any *other* thread does not return until the owning thread pumps ``EdsGetEvent``. Measured
+    on an EOS 60D (2026-10-28), same call, same body:
+
+    | session opened on | call made from | owner pumps events | result |
+    |---|---|---|---|
+    | main | main | no | returns, 0.06 s |
+    | main | worker | no | **never returns** |
+    | main | worker | yes | returns, 0.13 s, frame after 0.7 s |
+
+    The app used to open the session at startup and then drive live view from this pump
+    thread, so *every* live-view call hung: the preview stayed blank, no exception was raised,
+    and because the *event loop* also captured the shutter once, the whole console froze.
+    Serialising with a lock was never going to fix that -- the calls were on the wrong thread,
+    not overlapping.
+
+    So the pump thread here opens the session (``connect=``), performs every SDK call itself
+    (live view, focus pulses, captures, settings) and closes it on the way out. Other threads
+    submit :class:`_Job`\\ s and wait, with a timeout, so a wedged SDK call is reported as an
+    error instead of hanging a screen.
+    """
+
+    def __init__(self, camera, *, connect=None, initial_error: str = "") -> None:
         self._camera = camera
+        #: Called on the pump thread, once, before anything else touches the camera.
+        self._connect = connect
         self._lock = threading.Lock()
-        #: Guards every call into the camera. The pump holds it for live view; RUN holds it
-        #: for a capture. The two never overlap because RUN also suspends the pump, but the
-        #: lock is what makes that true even during the handoff.
-        self._camera_lock = threading.Lock()
         #: Set while a run owns the camera. EDSDK dislikes live view running through a
-        #: shutter release (02 §1.7), so the pump stops rather than queues.
+        #: shutter release (02 §1.7), so the pump stops grabbing rather than queueing.
         self._suspended = threading.Event()
         self._pulses: deque[Direction] = deque()
+        self._jobs: deque[_Job] = deque()
+        #: The job the pump is running right now, if any. Tracked separately from the queue
+        #: because ``stop()`` has to release a caller whose job was already picked up --
+        #: otherwise a wedged SDK call leaves that thread waiting on a station that is gone.
+        self._in_flight: _Job | None = None
         self._stop = threading.Event()
         #: Clear until a screen asks for a preview. A DSLR's live view raises the mirror and
         #: cycles the shutter, so the pump must not start it merely because the app launched.
@@ -444,14 +511,30 @@ class Station:
         self._thread = threading.Thread(target=self._run, name="camera-pump", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
-        import contextlib
+    @property
+    def thread_id(self) -> int | None:
+        """The one thread allowed to touch the camera, or ``None`` before :meth:`start`.
 
+        Exposed because it is the property that has to hold: EDSDK only progresses on the
+        thread that opened the session, so tests assert that every camera call was made from
+        exactly this thread.
+        """
+        return None if self._thread is None else self._thread.ident
+
+    def stop(self) -> None:
+        """Ask the pump to stop, and say so if it cannot.
+
+        The session is closed *on the pump thread*, because closing it from here is the same
+        wrong-thread call that hangs everything else. If the pump is stuck inside the SDK the
+        join times out and the failure is published rather than hidden -- an app that will not
+        die quietly is better than one that will not die at all.
+        """
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=3.0)
-        with contextlib.suppress(Exception):
-            self._camera.disconnect()
+            self._thread.join(timeout=STOP_TIMEOUT_S)
+            if self._thread.is_alive():
+                self._publish(error="the camera did not shut down: a call is stuck in the SDK")
+        self._fail_pending("the camera station stopped")
 
     # -- the screens' whole API --------------------------------------------
     def want_live_view(self, enabled: bool = True) -> None:
@@ -468,12 +551,7 @@ class Station:
     def suspend(self) -> None:
         """Hand the camera to a run loop: live view stops, captures may proceed."""
         self._suspended.set()
-        # There is no continuity across a run, so the next frame after it must not be
-        # compared with the one from before it -- that gap would read as no motion at all.
-        with self._lock:
-            self._last_thumb = None
-            self._last_thumb_at = None
-            self._motion.clear()
+        self._forget_motion()
 
     def resume(self) -> None:
         """Give the camera back to live view (after a run stops)."""
@@ -483,19 +561,92 @@ class Station:
     def suspended(self) -> bool:
         return self._suspended.is_set()
 
-    def capture_to(self, path, **kwargs):
-        """Take one picture, serialised against the pump.
+    def _forget_motion(self) -> None:
+        """Drop the change/motion history, because a gap is not a measurement.
 
-        The run loop calls this rather than the camera directly: it is the only place that
-        knows both the camera and the lock, and a capture from two threads is the failure
-        mode EDSDK reports as a transport error (08 §7.2b).
+        After a run or a still capture the next live frame describes a different moment, so
+        comparing it with the one from before reads as a sudden jump (or, after a long gap,
+        as no motion at all). The focus routine uses the same numbers to prove that a pulse
+        was followed by a *new* frame.
         """
-        with self._camera_lock:
-            return self._camera.capture_to(path, **kwargs)
+        with self._lock:
+            self._last_thumb = None
+            self._last_thumb_at = None
+            self._mark = None
+            self._motion.clear()
+
+    # -- work submitted to the pump thread ---------------------------------
+    def capture_to(self, path, *, wait_s: float = CAPTURE_WAIT_S, **kwargs):
+        """Take one picture: the only door to the shutter.
+
+        Blocks the *calling* thread until the pump has done it, which is what callers want:
+        a capture is a request/response, not a fire-and-forget. Keeping it here rather than
+        at the call site is what stops a screen from entering the SDK off the owning thread --
+        which is not a race, it is a hang.
+        """
+        return self._run_job(_Job("capture", (path,), kwargs), wait_s=wait_s, what="capture")
+
+    def apply(self, settings) -> None:
+        """Set ISO and shutter speed, on the pump thread (the run loop calls this)."""
+        self._run_job(_Job("apply", (settings,)), what="camera settings")
+
+    def get_settings(self):
+        """What the dials say, read on the pump thread."""
+        return self._run_job(_Job("settings"), what="reading the camera settings")
 
     @property
+    def disposable_frames(self) -> bool:
+        """Whether this camera's frames are worthless afterwards (the fake's are)."""
+        return bool(getattr(self._camera, "disposable_frames", False))
+
+    def _run_job(self, job: _Job, *, wait_s: float = CAPTURE_WAIT_S, what: str = "request"):
+        """Queue a job for the pump thread and wait for its answer.
+
+        A timeout is not belt-and-braces: a blocking SDK call cannot be interrupted from
+        Python, so if the pump is stuck the only thing this can do is refuse to hang the
+        caller with it. That is the difference between one screen showing an error and the
+        whole app dying.
+        """
+        if self._thread is None or not self._thread.is_alive():
+            raise StationStopped("the camera station is not running")
+        with self._lock:
+            self._jobs.append(job)
+        if not job.done.wait(wait_s):
+            raise StationTimeout(
+                f"the camera did not answer the {what} within {wait_s:.0f} s -- it is probably "
+                "stuck in the SDK; the console is still usable, but the body needs a power cycle"
+            )
+        if job.error is not None:
+            raise job.error
+        return job.result
+
+    def _pop_job(self) -> _Job | None:
+        with self._lock:
+            return self._jobs.popleft() if self._jobs else None
+
+    def _fail_pending(self, reason: str) -> None:
+        """Nothing queued can ever run now, so release the waiters with an error."""
+        with self._lock:
+            pending = list(self._jobs)
+            self._jobs.clear()
+            in_flight, self._in_flight = self._in_flight, None
+        for job in pending:
+            job.error = StationStopped(reason)
+            job.done.set()
+        if in_flight is not None and not in_flight.done.is_set():
+            # The pump may still be inside the SDK; the caller must not inherit that.
+            in_flight.error = StationStopped(reason)
+            in_flight.done.set()
+
+    # -- snapshots ----------------------------------------------------------
+    @property
     def camera(self):
-        """The camera this station drives. Screens use it for capture, not for frames."""
+        """The camera this station drives -- for *state*, never for work.
+
+        Read-only attributes (a body that can report its roll, ``disposable_frames``) are
+        what screens legitimately need. Anything that enters the SDK goes through this class:
+        :meth:`capture_to`, :meth:`apply`, :meth:`request`, :meth:`want_live_view`.
+        """
         return self._camera
 
     def snapshot(self) -> Snapshot:
@@ -526,6 +677,72 @@ class Station:
         with self._lock:
             self._snap = replace(self._snap, **changes)
 
+    def _run(self) -> None:
+        try:
+            self._open()
+            while not self._stop.is_set():
+                if self._serve_job():
+                    continue
+                if self._suspended.is_set():
+                    # A run owns the camera: no live view through a shutter release.
+                    time.sleep(0.02)
+                    continue
+                if not self._live.is_set():
+                    # Nobody is showing a preview yet (PREFLIGHT/SETUP/TARGET/PARAMETERS).
+                    # Waiting here is what keeps the mirror down at startup.
+                    self._live.wait(0.05)
+                    continue
+                self._grab_and_publish()
+        finally:
+            self._close()
+            self._fail_pending("the camera station stopped")
+
+    def _open(self) -> None:
+        """Open the session -- on this thread, which is the whole point of the class."""
+        if self._connect is None:
+            self._publish(name=getattr(self._camera, "name", "camera"))
+            return
+        try:
+            info = self._connect()
+        except Exception as exc:
+            self._publish(error=f"{type(exc).__name__}: {exc}")
+            return
+        name = getattr(info, "name", "") or getattr(self._camera, "name", "camera")
+        self._publish(name=name, error="")
+
+    def _close(self) -> None:
+        disconnect = getattr(self._camera, "disconnect", None)
+        if disconnect is not None:
+            with contextlib.suppress(Exception):
+                disconnect()
+
+    def _serve_job(self) -> bool:
+        """Run one queued job on this thread. Returns whether there was one."""
+        job = self._pop_job()
+        if job is None:
+            return False
+        with self._lock:
+            self._in_flight = job
+        try:
+            if job.kind == "capture":
+                job.result = self._camera.capture_to(*job.args, **job.kwargs)
+            elif job.kind == "apply":
+                job.result = self._camera.apply(*job.args, **job.kwargs)
+            elif job.kind == "settings":
+                job.result = self._camera.get_settings()
+            else:  # pragma: no cover - a typo in a kind is a programming error
+                raise RuntimeError(f"unknown job kind {job.kind!r}")
+        except BaseException as exc:
+            job.error = exc
+        finally:
+            with self._lock:
+                if self._in_flight is job:
+                    self._in_flight = None
+            # Whatever it did, the scene changed underneath the motion history.
+            self._forget_motion()
+            job.done.set()
+        return True
+
     def _send_batch(self) -> None:
         for _ in range(PULSES_PER_TICK):
             with self._lock:
@@ -543,52 +760,39 @@ class Station:
                 return
             time.sleep(PULSE_SETTLE_S)
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            if self._suspended.is_set():
-                # A run owns the camera. Stay alive so a stop still joins promptly, but do
-                # not touch EDSDK: a live-view grab in the middle of an exposure is how a
-                # transfer gets cancelled.
-                time.sleep(0.05)
-                continue
-            if not self._live.is_set():
-                # Nobody is showing a preview yet (PREFLIGHT/SETUP/TARGET/PARAMETERS).
-                # Waiting here is what keeps the mirror down at startup.
-                self._live.wait(0.1)
-                continue
-            try:
-                self._send_batch()
-                with self._camera_lock:
-                    jpeg = self._camera.grab_live_jpeg()
-                analysis = analyse(jpeg)
-                now = time.monotonic()
-                with self._lock:
-                    mark, self._mark = self._mark, None
-                    previous = self._snap
-                    changed = -1.0 if mark is None else float(np.abs(analysis.thumb - mark).max())
-                    motion = -1.0
-                    if self._last_thumb is not None and self._last_thumb_at is not None:
-                        gap = max(1e-3, now - self._last_thumb_at)
-                        delta = float(np.abs(analysis.thumb - self._last_thumb).max())
-                        motion = delta / gap
-                        self._motion.append((now, motion))
-                    self._last_thumb = analysis.thumb
-                    self._last_thumb_at = now
-                    self._snap = Snapshot(
-                        data_uri="data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
-                        hfd=analysis.hfd,
-                        stars=analysis.stars,
-                        contrast=analysis.contrast,
-                        position=int(getattr(self._camera, "position", 0)),
-                        name=previous.name,
-                        error="",
-                        frames=previous.frames + 1,
-                        pending=len(self._pulses),
-                        changed=changed,
-                        motion=motion,
-                        width=analysis.width,
-                        height=analysis.height,
-                    )
-            except Exception as exc:
-                self._publish(error=f"{type(exc).__name__}: {exc}")
-                time.sleep(0.3)
+    def _grab_and_publish(self) -> None:
+        try:
+            self._send_batch()
+            jpeg = self._camera.grab_live_jpeg()
+            analysis = analyse(jpeg)
+            now = time.monotonic()
+            with self._lock:
+                mark, self._mark = self._mark, None
+                previous = self._snap
+                changed = -1.0 if mark is None else float(np.abs(analysis.thumb - mark).max())
+                motion = -1.0
+                if self._last_thumb is not None and self._last_thumb_at is not None:
+                    gap = max(1e-3, now - self._last_thumb_at)
+                    delta = float(np.abs(analysis.thumb - self._last_thumb).max())
+                    motion = delta / gap
+                    self._motion.append((now, motion))
+                self._last_thumb = analysis.thumb
+                self._last_thumb_at = now
+                self._snap = Snapshot(
+                    data_uri="data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"),
+                    hfd=analysis.hfd,
+                    stars=analysis.stars,
+                    contrast=analysis.contrast,
+                    position=int(getattr(self._camera, "position", 0)),
+                    name=previous.name,
+                    error="",
+                    frames=previous.frames + 1,
+                    pending=len(self._pulses),
+                    changed=changed,
+                    motion=motion,
+                    width=analysis.width,
+                    height=analysis.height,
+                )
+        except Exception as exc:
+            self._publish(error=f"{type(exc).__name__}: {exc}")
+            time.sleep(0.3)

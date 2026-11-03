@@ -170,6 +170,7 @@ def run(
 
         catalog = find_catalog(settings, cache=settings.paths.data / "star-index.json")
         camera = FakeCamera(optics=fake_rig.optics() if fake_rig else None, catalog=catalog)
+        connect = None
         initial_error = (
             "" if catalog is not None else "no ASTAP star database: fake frames cannot be solved"
         )
@@ -177,13 +178,13 @@ def run(
         from ministar.camera import EdsdkCamera
 
         camera = EdsdkCamera()
+        # Open the session on the pump thread, never here: EDSDK calls only complete on the
+        # thread that opened the session (station.py), and blocking the event loop to connect
+        # is how a sleepy body used to freeze the console. A failure shows up on the snapshot.
+        connect = camera.connect
         initial_error = ""
-        try:
-            camera.connect()
-        except Exception as exc:
-            initial_error = f"{type(exc).__name__}: {exc}"
 
-    station = Station(camera, initial_error=initial_error)
+    station = Station(camera, connect=connect, initial_error=initial_error)
     station.start()
     _APP = App(session=SessionState(), settings=settings, station=station, rig=fake_rig)
 

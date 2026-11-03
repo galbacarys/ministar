@@ -534,3 +534,73 @@ def test_a_shutter_that_raises_also_cancels(tmp_path: Path) -> None:
 def test_capture_needs_a_connection(tmp_path: Path) -> None:
     with pytest.raises(CameraNotConnected):
         EdsdkCamera().capture_to(tmp_path / "x.cr2")
+
+
+# -- the live-view start sequence, at the FFI level -------------------------
+class RecordingLib:
+    """The ctypes DLL surface ``Edsdk`` calls, recording property writes.
+
+    The camera-level fakes above stub ``start_live_view`` itself, so they cannot see which
+    properties the real one writes -- which is how a call that hangs the body survived.
+    """
+
+    def __init__(self) -> None:
+        self.writes: list[int] = []
+        self.streams = 0
+        self.refs = 0
+
+    def EdsSetPropertyData(self, camera, prop, param, size, ptr):
+        self.writes.append(prop)
+        return 0
+
+    def EdsCreateMemoryStream(self, size, out):
+        self.streams += 1
+        return 0
+
+    def EdsCreateEvfImageRef(self, stream, out):
+        self.refs += 1
+        return 0
+
+
+def a_bare_ffi(lib: RecordingLib) -> edsdk_ffi.Edsdk:
+    """An Edsdk with no DLL behind it: just the attributes start_live_view touches."""
+    import ctypes
+
+    ffi = edsdk_ffi.Edsdk.__new__(edsdk_ffi.Edsdk)
+    ffi._camera = ctypes.c_void_p(1)
+    ffi._live = False
+    ffi._stream = None
+    ffi._evf_image = None
+    ffi.EdsSetPropertyData = lib.EdsSetPropertyData
+    ffi.EdsCreateMemoryStream = lib.EdsCreateMemoryStream
+    ffi.EdsCreateEvfImageRef = lib.EdsCreateEvfImageRef
+    return ffi
+
+
+def test_starting_live_view_never_writes_evf_mode() -> None:
+    """``Evf_Mode`` blocks forever on an EOS 60D; the output route alone is enough.
+
+    Measured on the body: `Evf_Mode = 1` never returns, while `Evf_OutputDevice = PC`
+    answers in 0.06 s and the first JPEG arrives after the usual ~1 s of 0xA102. A hang is
+    not something a caller can defend against -- no exception, no timeout, no message -- so
+    the guard has to be "this write does not exist".
+    """
+    lib = RecordingLib()
+    a_bare_ffi(lib).start_live_view()
+
+    assert edsdk_ffi.PROP_EVF_MODE not in lib.writes, (
+        "writing Evf_Mode hangs the camera; only the output route may be set"
+    )
+    assert lib.writes == [edsdk_ffi.PROP_EVF_OUTPUT_DEVICE]
+
+
+def test_starting_live_view_is_idempotent_and_allocates_once() -> None:
+    lib = RecordingLib()
+    ffi = a_bare_ffi(lib)
+
+    ffi.start_live_view()
+    ffi.start_live_view()
+
+    assert lib.writes == [edsdk_ffi.PROP_EVF_OUTPUT_DEVICE], "second start wrote again"
+    assert (lib.streams, lib.refs) == (1, 1), "the EVF stream was allocated twice"
+    assert ffi._live is True
