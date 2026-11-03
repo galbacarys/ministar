@@ -59,6 +59,9 @@ DLL_CANDIDATES = (_OWN, *BORROWED_DLLS)
 PROP_PRODUCT_NAME = 0x00000002
 PROP_SAVE_TO = 0x0000000B
 #: 0x0000000D is CurrentFolder; reading it as UInt32 returns 0x64 (brief 16 §6.1).
+PROP_ISO_SPEED = 0x00000402
+PROP_AV = 0x00000405
+PROP_TV = 0x00000406
 PROP_AVAILABLE_SHOTS = 0x0000040A
 PROP_LENS_NAME = 0x0000040D
 PROP_EVF_OUTPUT_DEVICE = 0x00000500
@@ -146,6 +149,20 @@ class _EdsDeviceInfo(Structure):
         ("szDeviceDescription", c_char * EDS_MAX_NAME),
         ("deviceSubType", c_uint32),
         ("reserved", c_uint32),
+    ]
+
+
+#: ``EDS_MAX_PROP_DESC``: the array inside ``EdsPropertyDesc``.
+EDS_MAX_PROP_DESC = 128
+
+
+class _EdsPropertyDesc(Structure):
+    #: ``typedef struct { EdsUInt32 readOnly; EdsUInt32 numElements;
+    #: EdsUInt32 propDesc[EDS_MAX_PROP_DESC]; } EdsPropertyDesc;``
+    _fields_ = [
+        ("readOnly", c_uint32),
+        ("numElements", c_uint32),
+        ("propDesc", c_uint32 * EDS_MAX_PROP_DESC),
     ]
 
 
@@ -295,6 +312,10 @@ class Edsdk:
         self.EdsDownload = optional("EdsDownload", c_uint32, [c_void_p, c_uint64, c_void_p])
         self.EdsDownloadComplete = optional("EdsDownloadComplete", c_uint32, [c_void_p])
         self.EdsDownloadCancel = optional("EdsDownloadCancel", c_uint32, [c_void_p])
+        # -- properties (02 §3.2) --
+        self.EdsGetPropertyDesc = optional(
+            "EdsGetPropertyDesc", c_uint32, [c_void_p, c_uint32, POINTER(_EdsPropertyDesc)]
+        )
 
     # -- lifecycle ----------------------------------------------------------
     def initialize(self) -> None:
@@ -388,9 +409,53 @@ class Edsdk:
         )
         return buf.value.decode("ascii", "replace")
 
+    def uint_property(self, prop_id: int) -> int:
+        """One UInt32 property (ISO, Tv, Av)."""
+        value = c_uint32()
+        _check(
+            f"EdsGetPropertyData(0x{prop_id:08X})",
+            self.EdsGetPropertyData(self.camera, prop_id, 0, ctypes.sizeof(value), byref(value)),
+        )
+        return int(value.value)
+
+    def set_uint_property(self, prop_id: int, value: int) -> None:
+        """Write one UInt32 property. Raises on refusal (0x81 = DEVICE_BUSY, 08 §7.2b)."""
+        raw = c_uint32(value)
+        _check(
+            f"EdsSetPropertyData(0x{prop_id:08X})",
+            self.EdsSetPropertyData(self.camera, prop_id, 0, ctypes.sizeof(raw), byref(raw)),
+        )
+
+    def property_desc(self, prop_id: int) -> tuple[int, ...]:
+        """The values *this body* offers for a property, or ``()`` if it cannot say.
+
+        ``EdsGetPropertyDesc`` is the SDK's answer to "what is legal here?" (02 §3.2), and
+        it is per-body: the 60D's Tv list is not the 5D's. Empty means the symbol or the
+        property is unavailable, and the caller must fall back to read-back verification.
+        """
+        if self.EdsGetPropertyDesc is None:
+            return ()
+        desc = _EdsPropertyDesc()
+        try:
+            _check(
+                f"EdsGetPropertyDesc(0x{prop_id:08X})",
+                self.EdsGetPropertyDesc(self.camera, prop_id, byref(desc)),
+            )
+        except EdsdkError:
+            return ()
+        count = min(int(desc.numElements), EDS_MAX_PROP_DESC)
+        return tuple(int(v) for v in desc.propDesc[:count])
+
     # -- live view ----------------------------------------------------------
     def start_live_view(self) -> None:
-        """Route the EVF image to the PC and allocate the stream once."""
+        """Route the EVF image to the PC and allocate the stream once.
+
+        Idempotent: the camera layer calls it lazily on the first preview request rather
+        than at connect time, because on a DSLR starting live view flips the mirror and
+        cycles the shutter -- which must not happen just because the app was launched.
+        """
+        if self._live:
+            return
         mode = c_uint32(1)
         # Some bodies require Evf_Mode first; failure here is not fatal.
         self.EdsSetPropertyData(self.camera, PROP_EVF_MODE, 0, ctypes.sizeof(mode), byref(mode))

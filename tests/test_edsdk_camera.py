@@ -57,6 +57,21 @@ class FakeFfi:
         self.initialized = False
         self.live = False
         self.closed = False
+        #: The body's current codes: ISO 800, Tv 1.6 s, Av f/2.8 by default.
+        self.properties: dict[int, int] = {
+            edsdk_ffi.PROP_ISO_SPEED: 0x60,
+            edsdk_ffi.PROP_TV: 0x33,
+            edsdk_ffi.PROP_AV: 0x20,
+        }
+        #: What this body says it accepts. Empty means "cannot enumerate".
+        self.descriptions: dict[int, tuple[int, ...]] = {
+            edsdk_ffi.PROP_ISO_SPEED: (0x48, 0x50, 0x58, 0x60, 0x68, 0x70),
+            edsdk_ffi.PROP_TV: (0x30, 0x33, 0x35, 0x38, 0x3B, 0x3D, 0x40),
+        }
+        self.set_calls: list[tuple[int, int]] = []
+        #: A camera that refuses the write outright, and one that silently clamps it.
+        self.refuse_properties = False
+        self.clamp_properties = False
         self.opened_index: int | None = None
 
     def initialize(self) -> None:
@@ -119,6 +134,20 @@ class FakeFfi:
     def close(self) -> None:
         self.closed = True
 
+    # -- properties (ISO / Tv / Av) -----------------------------------------
+    def uint_property(self, prop_id: int) -> int:
+        return self.properties[prop_id]
+
+    def set_uint_property(self, prop_id: int, value: int) -> None:
+        if self.refuse_properties:
+            raise edsdk_ffi.EdsdkError(f"EdsSetPropertyData(0x{prop_id:08X})", 0x81)
+        self.set_calls.append((prop_id, value))
+        if not self.clamp_properties:
+            self.properties[prop_id] = value
+
+    def property_desc(self, prop_id: int) -> tuple[int, ...]:
+        return self.descriptions.get(prop_id, ())
+
 
 def camera_for(fake: FakeFfi) -> EdsdkCamera:
     return EdsdkCamera(ffi_factory=lambda: fake, sleep=lambda _s: None)
@@ -135,15 +164,25 @@ def star_field(sigmas: tuple[float, ...] = (1.5,), peak: float = 4000.0) -> np.n
 
 
 # -- connecting -------------------------------------------------------------
-def test_connect_reports_device_and_starts_live_view() -> None:
+def test_connect_does_not_start_live_view() -> None:
+    """Connecting must be quiet: on a DSLR live view flips the mirror and cycles the shutter."""
     fake = FakeFfi()
     cam = camera_for(fake)
     info = cam.connect()
 
     assert info.name == "Fake EOS"
     assert info.port == "usb#1"
-    assert fake.initialized and fake.live
+    assert fake.initialized
+    assert not fake.live  # nothing has asked for a preview yet
     assert cam.connected
+
+
+def test_the_first_preview_starts_live_view() -> None:
+    fake = FakeFfi()
+    cam = camera_for(fake)
+    cam.connect()
+    cam.grab_live_jpeg()
+    assert fake.live
 
 
 def test_connect_is_not_repeatable() -> None:
@@ -297,20 +336,112 @@ def test_measure_records_the_current_position() -> None:
     assert cam.measure(decode=lambda _jpeg: star_field()).position == 6
 
 
-# -- honest gaps ------------------------------------------------------------
-@pytest.mark.parametrize("method", ["get_settings", "capture"])
-def test_unverified_paths_raise_clearly(method: str) -> None:
+# -- camera settings (ISO / Tv) --------------------------------------------
+def test_get_settings_decodes_the_dials() -> None:
+    cam = camera_for(FakeFfi())
+    cam.connect()
+    settings = cam.get_settings()
+    assert settings.iso == 800
+    assert settings.shutter_seconds == pytest.approx(1.6)
+    assert settings.aperture == pytest.approx(2.8)
+
+
+def test_apply_sets_iso_and_tv_in_the_bodys_codes() -> None:
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    cam = camera_for(fake)
+    cam.connect()
+    cam.apply(CameraSettings(iso=1600, shutter_seconds=2.0))
+
+    assert (edsdk_ffi.PROP_ISO_SPEED, 0x68) in fake.set_calls
+    assert (edsdk_ffi.PROP_TV, 0x30) in fake.set_calls
+    assert cam.get_settings().iso == 1600
+    assert cam.get_settings().shutter_seconds == pytest.approx(2.0)
+
+
+def test_an_iso_the_table_knows_is_written_as_asked() -> None:
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    cam = camera_for(fake)
+    cam.connect()
+    cam.apply(CameraSettings(iso=4000, shutter_seconds=1.0))
+    assert fake.properties[edsdk_ffi.PROP_ISO_SPEED] == 0x73  # ISO 4000
+    assert cam.get_settings().iso == 4000
+
+
+def test_an_iso_off_the_ladder_is_refused_rather_than_substituted() -> None:
+    """ISO 900 is not a camera setting; silently using 800 would be a different exposure."""
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    cam = camera_for(fake)
+    cam.connect()
+    with pytest.raises(ValueError, match="not on the supported ladder"):
+        cam.apply(CameraSettings(iso=900, shutter_seconds=1.0))
+
+
+def test_the_body_offers_the_iso_ladder_it_can_actually_use() -> None:
+    cam = camera_for(FakeFfi())
+    values = cam.iso_options()
+    assert 100 in values and 6400 in values
+    assert all(value in values for value in (200, 400, 800, 1600, 3200))
+
+
+def test_a_write_that_is_silently_clamped_is_an_error() -> None:
+    """A clamped Tv would put the wrong exposure on every frame of a run."""
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    fake.clamp_properties = True
+    cam = camera_for(fake)
+    cam.connect()
+    with pytest.raises(RuntimeError, match="did not accept"):
+        cam.apply(CameraSettings(iso=1600, shutter_seconds=2.0))
+
+
+def test_a_refused_write_reports_the_property() -> None:
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    fake.refuse_properties = True
+    cam = camera_for(fake)
+    cam.connect()
+    with pytest.raises(edsdk_ffi.EdsdkError, match="0x00000402"):
+        cam.apply(CameraSettings(iso=1600, shutter_seconds=2.0))
+
+
+def test_the_property_descriptor_is_not_trusted() -> None:
+    """The 60D's descriptor is nonsense through this binding (2026-10-28): a lying one must
+    not be able to snap a 1.6 s request to 25 s, which is what happened on hardware."""
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    # Exactly what the body returned: a list containing 0x13 (25 s) and the current 0x33.
+    fake.descriptions = {edsdk_ffi.PROP_TV: (0x37, 0x10, 0x13, 0x33)}
+    cam = camera_for(fake)
+    cam.connect()
+    cam.apply(CameraSettings(iso=800, shutter_seconds=1.6))
+    assert fake.properties[edsdk_ffi.PROP_TV] == 0x33  # 1.6 s from the table, not 25 s
+
+
+def test_a_body_that_cannot_enumerate_still_sets_by_table() -> None:
+    from ministar.camera.base import CameraSettings
+
+    fake = FakeFfi()
+    fake.descriptions = {}
+    cam = camera_for(fake)
+    cam.connect()
+    cam.apply(CameraSettings(iso=800, shutter_seconds=1.6))
+    assert cam.get_settings().iso == 800
+
+
+def test_capture_still_says_it_is_not_implemented() -> None:
     cam = camera_for(FakeFfi())
     cam.connect()
     with pytest.raises(NotImplementedError, match="brief 16"):
-        getattr(cam, method)(1.0) if method == "capture" else getattr(cam, method)()
-
-
-def test_apply_raises_rather_than_guessing_a_shutter_speed() -> None:
-    cam = camera_for(FakeFfi())
-    cam.connect()
-    with pytest.raises(NotImplementedError, match="DEVICE_BUSY"):
-        cam.apply(object())
+        cam.capture(1.0)
 
 
 def test_keep_alive_reaches_the_ffi() -> None:

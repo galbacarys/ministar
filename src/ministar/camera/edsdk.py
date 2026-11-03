@@ -9,12 +9,15 @@ What is verified on a real EOS 60D (brief 16)
     **STM focus-by-wire**, and the ``0xA102`` warm-up retry.
 
 What is deliberately not implemented yet
-    ``capture``, ``get_settings`` and ``apply``. Setting Tv/Av/ISO needs the
-    body's legal value tables (``EdsGetPropertyDesc``) and Canon's Tv encoding,
-    and capture needs a memory download path -- none of which has been exercised
-    on hardware. Raised explicitly rather than guessed, because a wrong Tv value
-    returns ``EDS_ERR_DEVICE_BUSY`` and would look like transport trouble
-    (08 §7.2b). See brief 16 §11 for the list.
+    ``capture``: it needs a raw decoder, and the session captures *files* through
+    ``capture_to`` instead (16 §11).
+
+How ISO/Tv are set (2026-10-28)
+    The body's own ``EdsGetPropertyDesc`` narrows Canon's code tables to the values
+    *this* body offers, and every write is read back. An illegal Tv is reported by the
+    SDK as ``0x81`` (DEVICE_BUSY), indistinguishable from a transport fault, so the
+    read-back is what separates "the camera refused the value" from "the cable is
+    unhappy" (08 §7.2b).
 
 Design note: the FFI is injected. ``EdsdkCamera`` never constructs ctypes
 objects itself, so every branch below is testable against a fake -- which is why
@@ -34,7 +37,21 @@ from typing import Any
 import numpy as np
 
 from ministar.camera import edsdk_ffi
-from ministar.camera.base import CameraInfo, Frame
+from ministar.camera.base import (
+    CameraInfo,
+    CameraSettings,
+    Frame,
+    label_for_seconds,
+    snap_shutter,
+)
+from ministar.camera.edsdk_codes import (
+    ISO_LADDER,
+    av_fnumber,
+    iso_code_for,
+    iso_value,
+    tv_code_for,
+    tv_seconds,
+)
 from ministar.camera.edsdk_ffi import (
     FAR_STEPS,
     NEAR_STEPS,
@@ -150,7 +167,10 @@ class EdsdkCamera:
             )
 
         info = ffi.open_camera(0)
-        ffi.start_live_view()
+        # Deliberately *not* start_live_view() here. On a DSLR that raises the mirror and
+        # cycles the shutter: doing it at connect time made launching the app look like it
+        # had fired a capture, and tied the body up before the user had asked for anything.
+        # The first grab_live_jpeg() (i.e. a screen that shows a preview) starts it.
         self._ffi = ffi
         self._info = info
         self._closed = False
@@ -191,8 +211,14 @@ class EdsdkCamera:
 
     # -- frame access -------------------------------------------------------
     def grab_live_jpeg(self) -> bytes:
-        """Raw live-view JPEG. Exposed so a UI can stream without decoding here."""
-        return self._require().grab_jpeg()
+        """Raw live-view JPEG, starting live view on first use.
+
+        Exposed so a UI can stream without decoding here. Starting LV here rather than in
+        ``connect`` keeps the mirror down until a screen actually needs a preview.
+        """
+        ffi = self._require()
+        ffi.start_live_view()
+        return ffi.grab_jpeg()
 
     def live_view(self) -> Frame:
         """One live-view frame, decoded. Prefer :meth:`grab_live_jpeg` in a loop."""
@@ -300,18 +326,58 @@ class EdsdkCamera:
             reason=reason,
         )
 
-    # -- Camera: not yet verified on hardware -------------------------------
-    def get_settings(self):
-        raise NotImplementedError(
-            "reading ISO/Tv needs EdsGetPropertyDesc for this body's legal values; "
-            "not yet exercised on hardware (brief 16 §11)"
+    # -- camera settings -----------------------------------------------------
+    def iso_options(self) -> tuple[int, ...]:
+        """The ISO values this project will offer for a Canon body: 100-6400 in 1/3 stops.
+
+        Read from the code table rather than from ``EdsGetPropertyDesc``, which is unusable
+        on this body (see the module note). Every value here is a legal Canon ISO; a body
+        with a narrower range would reject one on write, and the read-back would say so.
+        """
+        return ISO_LADDER
+
+    def get_settings(self) -> CameraSettings:
+        """What the dials say right now, decoded from Canon's property codes."""
+        ffi = self._require()
+        iso_code = ffi.uint_property(edsdk_ffi.PROP_ISO_SPEED)
+        tv_code = ffi.uint_property(edsdk_ffi.PROP_TV)
+        try:
+            av_code = ffi.uint_property(edsdk_ffi.PROP_AV)
+        except edsdk_ffi.EdsdkError:  # a body with no electronic aperture
+            av_code = None
+        return CameraSettings(
+            iso=iso_value(iso_code) or 0,
+            # Bulb reads back as 0x0C, whose seconds are deliberately None: the session
+            # cannot run at bulb (08 §6), and 0.0 says so rather than inventing 30 s.
+            shutter_seconds=tv_seconds(tv_code) or 0.0,
+            aperture=None if av_code is None else av_fnumber(av_code),
         )
 
     def apply(self, settings) -> None:
-        raise NotImplementedError(
-            "setting ISO/Tv is not yet verified; an illegal Tv value returns "
-            "EDS_ERR_DEVICE_BUSY and would masquerade as transport trouble (08 §7.2b)"
-        )
+        """Set ISO and Tv, restricted to the body's own legal values and read back.
+
+        The read-back is not ceremony. Canon reports an illegal property value as
+        ``EDS_ERR_DEVICE_BUSY`` (0x81), the same code as a busy transport, so without it a
+        rejected shutter speed looks exactly like a bad cable -- the failure mode brief 08
+        §7.2b exists to prevent. Worse, the camera can silently clamp to a *different* legal
+        value, which would put the wrong exposure duration on every frame of a run.
+        """
+        ffi = self._require()
+        iso_code = iso_code_for(settings.iso)
+        self._set_checked(ffi, edsdk_ffi.PROP_ISO_SPEED, iso_code, f"ISO {settings.iso}")
+        seconds = snap_shutter(settings.shutter_seconds)
+        code = tv_code_for(seconds)
+        self._set_checked(ffi, edsdk_ffi.PROP_TV, code, f"shutter {label_for_seconds(seconds)}")
+
+    @staticmethod
+    def _set_checked(ffi, prop_id: int, code: int, what: str) -> None:
+        ffi.set_uint_property(prop_id, code)
+        readback = ffi.uint_property(prop_id)
+        if readback != code:
+            raise RuntimeError(
+                f"the camera did not accept {what}: wrote code 0x{code:02X} and it read "
+                f"back 0x{readback:02X} (is the mode dial set to M?)"
+            )
 
     def capture(self, exposure_s: float) -> Frame:
         """Not implemented: a CR2 cannot be decoded into an array without a raw engine.
@@ -356,6 +422,21 @@ class EdsdkCamera:
             return edsdk_ffi.resolve_dll(None)
         except RuntimeError:
             return None
+
+
+#: ⚠️ ``EdsGetPropertyDesc`` is **not used** (measured on the EOS 60D, 2026-10-28).
+#:
+#: Through this binding the descriptor reports ``numElements = 3`` and hands back
+#: ``[0x37, 0x10, 0x13]`` for Tv -- a list whose first entry is not a Tv code and whose real
+#: ladder starts one slot later; the body's own current value is absent. A first attempt
+#: guarded it by "believe the list only if it contains the current value", which failed
+#: *catastrophically*: the garbage list contains 0x13 (25 s), and once an earlier bug had
+#: put the body at 25 s the guard passed, snapping a 1.6 s request to 25 s. Read-back
+#: verified the code, not the seconds, so a 16x overexposure looked successful.
+#:
+#: The static table plus read-back is the authority until the struct layout is understood
+#: against a real SDK build. The FFI keeps ``property_desc`` for that work; nothing here
+#: calls it.
 
 
 __all__ = [

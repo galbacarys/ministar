@@ -190,6 +190,24 @@ EDSDK returns **`EDS_ERR_DEVICE_BUSY` for illegal values**, which reads like "ca
 is really "bad parameter" (documented-by-experiment on a 5DS: `Av=0x32` → DEVICE_BUSY forever,
 `Av=0x33` → OK). 13.19.0 adds `EdsGetPropertyDescEx` for the newer/extended properties.
 
+**⚠️ Verified on the EOS 60D (2026-10-28): writes work; `EdsGetPropertyDesc` does not.**
+ISO/Tv/Av are plain `EdsUInt32` at the IDs above, and in manual mode the body accepted and
+read back ISO 800 (`0x60`), ISO 1600 (`0x68`), 1.6 s (`0x33`), 1/40 (`0x63`) and f/2.8
+(`0x20`). The descriptor, however, is unusable through a straightforward ctypes struct:
+`numElements = 3` and `propDesc = [0x37, 0x10, 0x13]` for Tv, with the real ladder starting
+one slot later and the body's *current* value absent. A guard of the form "believe the list
+only if it contains the current value" failed badly: the stray `0x13` is 25 s, and once an
+earlier bug had left the body at 25 s the guard passed and snapped a 1.6 s request to 25 s —
+a 16x overexposure that read back "successfully", because read-back verifies the *code*, not
+the seconds. Consequences:
+
+* `camera/edsdk_codes.py` (from digiCamControl's MIT tables) plus read-back verification is
+  the authority; the descriptor is called by nothing.
+* ISO options come from the canonical 100–6400 ladder, not from the body. An ISO off that
+  ladder is refused with the list, never silently substituted.
+* Re-check the struct layout against a real SDK header before trusting a per-body list again.
+  The read-back is what caught this; it is not ceremony.
+
 **Events** (via handlers registered above; `EdsGetEvent()` pumps them on Windows):
 
 * object: `kEdsObjectEvent_DirItemCreated` (0x204), `…DirItemRequestTransfer` (0x208),
