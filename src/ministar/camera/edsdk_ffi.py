@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import threading
 import time
 from ctypes import (
     CFUNCTYPE,
@@ -102,6 +103,27 @@ EVF_OUTPUT_PC = 0x00000002
 #: 0x81 (DEVICE_BUSY) appears when focus pulses arrive faster than the body
 #: consumes them.
 RETRYABLE_EVF = frozenset({0x000000A0, 0x0000A102, 0x00000081})
+
+# -- process-wide SDK lifecycle ----------------------------------------------
+#:
+#: ``EdsInitializeSDK`` / ``EdsTerminateSDK`` are **per process**, not per instance. Calling
+#: initialise twice is not harmless: measured on the EOS 60D, the second call returns
+#: ``0x00000002`` (EDS_ERR_INTERNAL_ERROR) and *every* later attempt in that process fails the
+#: same way -- which is what the reconnect button showed as "initialization failed". So the SDK
+#: is reference-counted here, and a second ``Edsdk`` in one process reuses what is already up
+#: rather than initialising over it.
+#:
+#: The count is deliberately not reset on failure to terminate: a leaked instance that never
+#: closed leaves the SDK initialised, which is harmless (it exits with the process) and far
+#: better than making the process unable to talk to a camera at all.
+_SDK_LOCK = threading.Lock()
+_SDK_USERS = 0
+
+
+def _sdk_users() -> int:
+    """How many live ``Edsdk`` instances hold the process-wide initialisation."""
+    return _SDK_USERS
+
 
 # -- still capture -----------------------------------------------------------
 #: ``kEdsSaveTo_*``. Host means the body does not keep a copy; Both keeps a card
@@ -330,7 +352,17 @@ class Edsdk:
 
     # -- lifecycle ----------------------------------------------------------
     def initialize(self) -> None:
-        _check("EdsInitializeSDK", self.EdsInitializeSDK())
+        """Initialise the SDK for this process, once.
+
+        Reference-counted because the *SDK* is global while this class is not: two cameras in one
+        process (or one camera reopened after a failed connect) must not each call
+        ``EdsInitializeSDK``. See the module note by ``_SDK_USERS`` for the measurement.
+        """
+        global _SDK_USERS
+        with _SDK_LOCK:
+            if _SDK_USERS == 0:
+                _check("EdsInitializeSDK", self.EdsInitializeSDK())
+            _SDK_USERS += 1
         self._initialized = True
 
     def list_cameras(self) -> list[DeviceInfo]:
@@ -387,7 +419,11 @@ class Edsdk:
             self.EdsRelease(self._camera)
             self._camera = None
         if self._initialized:
-            self.EdsTerminateSDK()
+            global _SDK_USERS
+            with _SDK_LOCK:
+                _SDK_USERS = max(0, _SDK_USERS - 1)
+                if _SDK_USERS == 0:
+                    self.EdsTerminateSDK()
             self._initialized = False
 
     def __enter__(self):

@@ -7,6 +7,7 @@ counts, frame acceptance -- are testable anywhere, on any OS.
 
 from __future__ import annotations
 
+import ctypes
 import math
 from pathlib import Path
 
@@ -550,6 +551,19 @@ class RecordingLib:
         self.streams = 0
         self.refs = 0
         self.releases = 0
+        self.initialised = 0
+        self.terminated = 0
+
+    def EdsInitializeSDK(self):
+        self.initialised += 1
+        return 0
+
+    def EdsTerminateSDK(self):
+        self.terminated += 1
+        return 0
+
+    def EdsCloseSession(self, camera):
+        return 0
 
     def EdsSetPropertyData(self, camera, prop, param, size, ptr):
         import ctypes
@@ -572,14 +586,16 @@ class RecordingLib:
 
 
 def a_bare_ffi(lib: RecordingLib) -> edsdk_ffi.Edsdk:
-    """An Edsdk with no DLL behind it: just the attributes start_live_view touches."""
-    import ctypes
-
+    """An Edsdk with no DLL behind it: just the attributes the lifecycle and EVF code touches."""
     ffi = edsdk_ffi.Edsdk.__new__(edsdk_ffi.Edsdk)
     ffi._camera = ctypes.c_void_p(1)
     ffi._live = False
     ffi._stream = None
     ffi._evf_image = None
+    ffi._initialized = False
+    ffi.EdsInitializeSDK = lib.EdsInitializeSDK
+    ffi.EdsTerminateSDK = lib.EdsTerminateSDK
+    ffi.EdsCloseSession = lib.EdsCloseSession
     ffi.EdsSetPropertyData = lib.EdsSetPropertyData
     ffi.EdsCreateMemoryStream = lib.EdsCreateMemoryStream
     ffi.EdsCreateEvfImageRef = lib.EdsCreateEvfImageRef
@@ -650,3 +666,93 @@ def test_stopping_live_view_that_was_never_started_does_nothing() -> None:
 
     assert lib.writes == []
     assert lib.releases == 0
+
+
+# -- the SDK is a process-wide singleton -------------------------------------
+@pytest.fixture
+def sdk_state(monkeypatch):
+    """The initialisation count is process-global, so each test starts from zero."""
+    monkeypatch.setattr(edsdk_ffi, "_SDK_USERS", 0)
+    return edsdk_ffi
+
+
+def test_the_sdk_is_initialised_once_per_process(sdk_state) -> None:
+    """``EdsInitializeSDK`` twice in one process fails with 0x2 and never recovers.
+
+    That is what the reconnect button reported: "initialization failed, 0x2". A second
+    ``Edsdk`` -- a reconnect, or a retry after a failed connect -- must reuse the
+    initialisation that is already up, not perform it again.
+    """
+    lib = RecordingLib()
+    first = a_bare_ffi(lib)
+    second = a_bare_ffi(lib)
+
+    first.initialize()
+    second.initialize()  # must not raise: this is the reported failure
+
+    assert lib.initialised == 1, "the SDK was initialised twice in one process"
+    assert sdk_state._sdk_users() == 2
+
+
+def test_the_sdk_is_terminated_by_the_last_user(sdk_state) -> None:
+    """Whoever closes last does the terminate, so a reopen still works afterwards."""
+    lib = RecordingLib()
+    first = a_bare_ffi(lib)
+    second = a_bare_ffi(lib)
+    first.initialize()
+    second.initialize()
+
+    first.close()
+    assert lib.terminated == 0, "shutting one user down killed the SDK for the other"
+
+    second.close()
+    assert lib.terminated == 1
+    assert sdk_state._sdk_users() == 0
+
+    # And a fresh instance can initialise again, which is the whole point.
+    a_bare_ffi(lib).initialize()
+    assert lib.initialised == 2
+
+
+def test_terminating_is_idempotent(sdk_state) -> None:
+    """``disconnect`` may be called twice; the count must not go negative or double-terminate."""
+    lib = RecordingLib()
+    ffi = a_bare_ffi(lib)
+    ffi.initialize()
+    ffi.close()
+    ffi.close()
+
+    assert lib.terminated == 1
+    assert sdk_state._sdk_users() == 0
+
+
+def test_a_connect_that_finds_no_camera_terminates_the_sdk() -> None:
+    """The leak behind the reported bug: init succeeded, so the SDK stayed up.
+
+    ``connect`` initialises, then discovers there is no body -- asleep, unplugged, or held by
+    another app. If it walks away without terminating, the *next* connect calls
+    ``EdsInitializeSDK`` again and gets 0x2 for the rest of the process's life.
+    """
+    fake = FakeFfi(devices=[])
+    cam = camera_for(fake)
+
+    with pytest.raises(EdsdkUnavailable):
+        cam.connect()
+
+    assert fake.closed, "the SDK was left initialised after a failed connect"
+
+
+def test_a_failed_connect_can_be_retried() -> None:
+    """Turn the camera on, press reconnect: the second attempt must be able to initialise."""
+    fake = FakeFfi(devices=[])
+    cam = camera_for(fake)
+
+    with pytest.raises(EdsdkUnavailable):
+        cam.connect()
+
+    fake.devices = [edsdk_ffi.DeviceInfo(port="usb#1", description="Fake EOS", sub_type=1)]
+    fake.closed = False
+    info = cam.connect()
+
+    assert info.name == "Fake EOS"
+    assert not fake.closed, "a successful connect must not close the session it just opened"

@@ -195,6 +195,30 @@ matching the pre-reconnect measurement). So the reconnect button is a real repai
 polite suggestion to restart the console -- which is the difference between a night that continues
 and one that ends.
 
+### 5.2 The SDK is initialised per *process*, not per instance (measured 2026-10-28)
+
+`EdsInitializeSDK` is global to the process, and calling it twice is not harmless: measured on the
+60D, the second call returns **`0x00000002`** (`EDS_ERR_INTERNAL_ERROR`) and *every* later attempt
+in that process fails the same way. The reconnect button reported exactly that -- "initialization
+failed, 0x2" -- and could never recover without restarting the console.
+
+Two holes reached it:
+
+* **`connect()` leaked the initialisation when it failed.** It initialised the SDK, then
+  discovered there was no body (`list_cameras` empty, i.e. the camera asleep or the port held by
+  another process) and raised without terminating. The SDK stayed up; the next connect initialised
+  over it and got `0x2` for the rest of the process's life. A camera that fell asleep mid-session
+  was therefore enough to make every subsequent reconnect fail permanently.
+* **Nothing tied the lifecycle to the process.** Each `Edsdk` instance owned its own
+  initialisation, so any second instance -- a reconnect, a retry -- was a second initialise.
+
+Fixed by reference-counting the initialisation (the SDK is up while any instance is, and the last
+`close()` terminates it) and by terminating on every failure path in `connect()`.
+
+Verified on the body, in one process: a connect that fails because another process holds the port
+(`0xC0`), then a retry after that process exits, connects; and a full `Station.reconnect()`
+afterwards returns True and live view resumes. Measured `0x2` before, same code path, same body.
+
 **Leaving live view drops the mirror.** `Evf_OutputDevice = 0` ends the stream and a DSLR returns
 its mirror; measured round trip, `want_live_view(False)` → **0 frames** while stopped, then
 `want_live_view(True)` → 8.0 fps and frames again, in the same session. This matters beyond

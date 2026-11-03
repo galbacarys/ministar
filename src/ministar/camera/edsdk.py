@@ -84,6 +84,15 @@ class MissingImagingDependency(RuntimeError):
     """Neither OpenCV nor Pillow is installed, so JPEGs cannot be decoded."""
 
 
+def _close_quietly(ffi: Any) -> None:
+    """Release an SDK session we are abandoning; never mask the real error."""
+    close = getattr(ffi, "close", None)
+    if close is None:
+        return
+    with contextlib.suppress(Exception):
+        close()
+
+
 def decode_jpeg(jpeg: bytes) -> np.ndarray:
     """Decode a live-view JPEG.
 
@@ -158,15 +167,25 @@ class EdsdkCamera:
             ffi.initialize()
             devices = ffi.list_cameras()
         except EdsdkError as exc:
+            # Terminate on the way out. The SDK is initialised per *process*, so leaving it up
+            # after a failure poisons every later attempt: the next connect() calls
+            # EdsInitializeSDK again and gets 0x2 (EDS_ERR_INTERNAL_ERROR) forever. That is
+            # exactly how "reconnect" reported "initialization failed" and never recovered.
+            _close_quietly(ffi)
             raise EdsdkUnavailable(f"EDSDK initialisation failed: {exc}") from exc
 
         if not devices:
+            _close_quietly(ffi)
             raise EdsdkUnavailable(
                 "no camera visible to EDSDK (powered off, asleep, cable in a "
                 "charge-only port, or another application holds the session)"
             )
 
-        info = ffi.open_camera(0)
+        try:
+            info = ffi.open_camera(0)
+        except Exception:
+            _close_quietly(ffi)
+            raise
         # Deliberately *not* start_live_view() here. On a DSLR that raises the mirror and
         # cycles the shutter: doing it at connect time made launching the app look like it
         # had fired a capture, and tied the body up before the user had asked for anything.
