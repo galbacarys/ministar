@@ -164,6 +164,24 @@ mid-session prompt would not be.
 ⚠️ Use the **live-view stream** for this, not stills. Live view at 10-30 fps is what makes
 the feedback feel immediate; a 1-2 s still per sample would make hunting miserable.
 
+### 4.2b When the routine fails, the hand still wins (added 2026-10-28)
+
+The automatic stage moves the lens, so a failed run does not leave the operator where they were:
+it leaves them at the routine's best guess, with their own hand-set position gone. That is the
+worst possible outcome for the step whose entire premise is "a human is the better instrument".
+
+So the end of the stage always offers three things, never one:
+
+* **use this focus** -- record the routine's result (offered only when it actually converged);
+* **use this manual focus** -- drive the lens back to the position the hand had it at before the
+  run, measure *there* (averaged, same as the routine), and record that;
+* **discard** -- throw the attempt away and hand the manual controls back, recording nothing.
+
+The hand position is captured when "looks good, start focus" is pressed, and the restore happens
+before the measurement, so the number stored describes where the lens actually is. Without the
+first two, a failure at 3 a.m. means restarting the wizard to get back to a screen that was
+working a minute ago.
+
 ### 4.3 Two metrics, because no single one works across the range
 
 | regime | metric | why |

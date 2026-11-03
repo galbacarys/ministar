@@ -39,6 +39,18 @@ class StationDriver:
     min_stars: int = 5
     timeout_s: float = 5.0
     poll_s: float = 0.02
+    #: Live-view frames averaged into one HFD measurement.
+    #:
+    #: Single-frame HFD is noisy enough to make focusing unreliable rather than slow: measured
+    #: on a monitor starfield (a hard test -- aliased, flat, low contrast) the reading at the
+    #: *best* position jumped between 3 and 6 px. A curve that noisy has no usable minimum, and
+    #: the routine then either refuses to focus or lands by luck. Averaging costs the frame time
+    #: -- at ~8.6 fps ten frames is ~1.2 s per measurement, so a 12-sample sweep is ~15 s -- and
+    #: buys a reading stable enough to fit. The median is used rather than the mean: same cost,
+    #: and one bad frame (a cloud, a gust, a dropped JPEG) cannot drag the sample.
+    frames_per_measure: int = 10
+    #: How long to wait for those frames before measuring with what arrived.
+    measure_timeout_s: float = 6.0
 
     @property
     def position(self) -> int:
@@ -70,18 +82,82 @@ class StationDriver:
             reset(position)
 
     def measure(self) -> FocusSample:
+        """HFD at the current position, averaged over several frames.
+
+        The averaging is the point: see ``frames_per_measure``. Fewer frames than asked for is
+        not an error -- a slow camera or a closing screen returns what arrived, and the caller
+        is told how many frames the number came from.
+        """
         snapshot = self.station.snapshot()
-        hfd = float(snapshot.hfd)
-        stars = int(snapshot.stars)
-        accepted = bool(not snapshot.error and stars >= self.min_stars and math.isfinite(hfd))
-        reason = snapshot.error or ("" if accepted else f"only {stars} star(s) in frame")
+        if snapshot.error:
+            return self._sample(snapshot.position, math.nan, 0, snapshot.error)
+
+        readings = self._frames(self.frames_per_measure)
+        if not readings:
+            # Live view is not delivering. Say so rather than inventing a measurement.
+            return self._sample(
+                snapshot.position,
+                math.nan,
+                0,
+                f"no live-view frames within {self.measure_timeout_s:g} s",
+            )
+
+        usable = [reading for reading in readings if self._usable(reading)]
+        if not usable:
+            stars = max(stars for _, stars in readings)
+            return self._sample(
+                snapshot.position,
+                math.nan,
+                stars,
+                f"only {stars} star(s) in {len(readings)} frame(s)",
+            )
+
+        hfds = sorted(hfd for hfd, _ in usable)
+        star_counts = sorted(stars for _, stars in usable)
+        hfd = hfds[len(hfds) // 2]
+        stars = star_counts[len(star_counts) // 2]
+        # A majority of the frames must have been usable, or this is a star-poor field with an
+        # occasional lucky detection rather than a measurement.
+        accepted = len(usable) * 2 >= len(readings) and math.isfinite(hfd)
+        reason = "" if accepted else f"only {len(usable)} of {len(readings)} frames usable"
+        return self._sample(snapshot.position, hfd, stars, reason, accepted=accepted)
+
+    def _usable(self, reading: tuple[float, int]) -> bool:
+        hfd, stars = reading
+        return stars >= self.min_stars and math.isfinite(hfd) and hfd > 0.0
+
+    @staticmethod
+    def _sample(
+        position: int, hfd: float, stars: int, reason: str, *, accepted: bool | None = None
+    ) -> FocusSample:
+        ok = bool(accepted) if accepted is not None else False
         return FocusSample(
-            position=int(snapshot.position),
-            hfd=hfd,
-            star_count=stars,
-            accepted=accepted,
+            position=int(position),
+            hfd=float(hfd),
+            star_count=int(stars),
+            accepted=ok,
             reason=reason,
         )
+
+    def _frames(self, count: int) -> list[tuple[float, int]]:
+        """Collect ``count`` *distinct* new frames, as (hfd, stars).
+
+        Distinct by the station's frame counter, because the pump republished a snapshot many
+        times between frames and counting those repeats would average the same image ten times
+        and call it ten samples.
+        """
+        first = int(self.station.snapshot().frames)
+        readings: list[tuple[float, int]] = []
+        seen = first
+        deadline = time.monotonic() + self.measure_timeout_s
+        while len(readings) < count and time.monotonic() < deadline:
+            snapshot = self.station.snapshot()
+            if int(snapshot.frames) > seen:
+                seen = int(snapshot.frames)
+                readings.append((float(snapshot.hfd), int(snapshot.stars)))
+                continue
+            time.sleep(self.poll_s)
+        return readings
 
     def _await(self, predicate) -> bool:
         deadline = time.monotonic() + self.timeout_s

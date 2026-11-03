@@ -27,12 +27,14 @@ from __future__ import annotations
 import argparse
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from enum import Enum
 
 from nicegui import ui
+from nicegui.run import io_bound
 
 from ministar.focus.driver import Direction
-from ministar.focus.routine import FocusResult, Start, autofocus
+from ministar.focus.routine import FocusResult, Start, autofocus, move_focus
 from ministar.focus.station_driver import StationDriver
 from ministar.ui.preview import live_image
 from ministar.ui.station import FakeCamera, Snapshot, Station
@@ -83,7 +85,22 @@ def render_focus(
     the position and HFD into the session.
     """
     adapter_factory: Callable[[Station], StationDriver] = StationDriver
-    runner = run_autofocus or (lambda driver: autofocus(driver, start=Start.AT_CURRENT))
+    # Shared between the worker thread and the timer: the routine is synchronous, so its only
+    # route to the screen is a mutable slot. `note` carries the routine's own commentary --
+    # "sweeping toward far", "turned round at 476" -- because an operator watching the position
+    # counter climb needs to know whether that is the sweep working or the sweep lost.
+    state: dict[str, object] = {}
+    #: Where the hand left the focus, so it can be restored when the routine fails. Without
+    #: this, a failed automatic run strands the operator: the routine has moved the lens to its
+    #: best guess and the hand-set position is gone.
+    manual_position: dict[str, int | None] = {"at": None}
+
+    def note(text: str) -> None:
+        state["note"] = text
+
+    runner = run_autofocus or (
+        lambda driver: autofocus(driver, start=Start.AT_CURRENT, on_progress=note)
+    )
 
     name_label = ui.label("").classes("mn-title")
     preview = live_image()
@@ -112,22 +129,67 @@ def render_focus(
     with done:
         ui.label("focus").classes("mn-heading")
         outcome = ui.label("").classes("mn-metrics")
-        if on_accept is not None:
-            ui.button("use this focus", on_click=lambda: on_accept(station.snapshot())).classes(
-                "mn-action"
-            )
+        done_detail = ui.label("").classes("mn-dim")
+        with ui.row().classes("items-center justify-center").style("gap: 10px"):
+            use_auto = ui.button(
+                "use this focus", on_click=lambda: on_accept(station.snapshot())
+            ).classes("mn-action")
+            use_manual = ui.button("use this manual focus", on_click=None).classes("mn-action")
+            discard = ui.button("discard", on_click=None).classes("mn-action")
     done.set_visibility(False)
 
-    # Shared between the worker thread and the timer: the routine is synchronous, so its
-    # only route to the screen is a mutable result slot.
-    state: dict[str, object] = {}
     timer: ui.timer | None = None
 
+    def back_to_manual() -> None:
+        """Throw the automatic attempt away and give the hand controls back."""
+        done.set_visibility(False)
+        auto.set_visibility(False)
+        manual.set_visibility(True)
+        start.set_visibility(True)
+        state.clear()
+        if timer is not None:
+            timer.active = False
+
+    async def keep_manual() -> None:
+        """Put the lens back where the hand left it and record that as the focus.
+
+        The reason this exists: when the routine fails -- a cloudy patch, a faint field, a lens
+        nobody has calibrated -- the fallback must be the operator's own judgement, not a
+        restart. It moves first and *then* records, so the number stored is the one the lens is
+        actually at, measured the same way the routine measures (averaged over frames).
+        """
+        target = manual_position["at"]
+        if target is None or on_accept is None:
+            back_to_manual()
+            return
+        use_manual.disable()
+        discard.disable()
+        done_detail.text = f"moving back to {target:+d}..."
+        driver = adapter_factory(station)
+
+        def work():
+            moved = move_focus(driver, target)
+            return moved, driver.measure()
+
+        moved, sample = await io_bound(work)
+        done_detail.text = (
+            f"manual focus restored at {sample.position:+d}   HFD {sample.hfd:.2f} px"
+            if moved
+            else "could not drive the lens back; the position counter may be stale"
+        )
+        if moved:
+            on_accept(replace(station.snapshot(), hfd=sample.hfd, stars=sample.star_count))
+        use_manual.enable()
+        discard.enable()
+
     def start_auto() -> None:
+        manual_position["at"] = int(station.snapshot().position)
         manual.set_visibility(False)
         auto.set_visibility(True)
         progress.text = "sweeping..."
         driver = adapter_factory(station)
+
+        state["note"] = ""
 
         def worker() -> None:
             try:
@@ -139,6 +201,9 @@ def render_focus(
         if timer is not None:
             timer.activate()
 
+    use_manual.on_click(keep_manual)
+    discard.on_click(back_to_manual)
+
     start = ui.button(MANUAL_ACCEPT_LABEL, on_click=start_auto).classes("mn-action")
     start.style("margin-top: 8px")
 
@@ -148,11 +213,13 @@ def render_focus(
         error = state.get("error")
         snap = station.snapshot()
         if result is None and error is None:
-            progress.text = (
-                f"sweeping...  position {snap.position:+d}   HFD {snap.hfd:.2f} px"
+            said = state.get("note") or ""
+            body = (
+                f"position {snap.position:+d}   HFD {snap.hfd:.2f} px"
                 if snap.stars
-                else f"sweeping...  position {snap.position:+d}   (no stars yet)"
+                else f"position {snap.position:+d}   (no stars yet)"
             )
+            progress.text = f"sweeping...  {body}" + (f"\n{said}" if said else "")
             return
 
         if timer is not None:
@@ -162,9 +229,18 @@ def render_focus(
         start.set_visibility(False)
         if error is not None:
             outcome.text = f"autofocus failed: {error}"
-            return
-        assert isinstance(result, FocusResult)
-        outcome.text = describe_result(result)
+        else:
+            assert isinstance(result, FocusResult)
+            outcome.text = describe_result(result)
+        # Whatever happened, the operator keeps the last word: the routine's answer if it has
+        # one, their own hand focus if it does not, or neither.
+        use_auto.set_visibility(on_accept is not None and error is None and bool(result.ok))
+        use_manual.set_visibility(on_accept is not None and manual_position["at"] is not None)
+        done_detail.text = (
+            "the automatic result is offered above; your hand focus is still available"
+            if error is None and result is not None and result.ok
+            else "hand focus it, then use this manual focus"
+        )
 
     def tick() -> None:
         snap = station.snapshot()

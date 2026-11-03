@@ -232,6 +232,63 @@ whole focus range.
 
 ### P3 — Coarse sweep (the V-curve)
 
+⚠️ **Amended 2026-10-28: the sweep finds the trough; it does not assume which way focus is.**
+The pseudocode below starts from "stars appeared, therefore the minimum is ahead", which is only
+true after P1/P2 (home to the stop, walk inward). The wizard runs **`AT_CURRENT`**, where no homing
+has happened: the counter's zero is arbitrary, and whoever just turned the focus ring by hand is as
+likely to have overshot as to be short. Sweeping one way from the wrong side walks *away* from
+focus, and a V's far arm is monotonic, so "worsened twice" sees nothing wrong.
+
+Reported from the field as *"it just keeps going up and never says try the other way"*. Reproduced
+on a synthetic curve starting 200 units past the minimum: three samples, all further out, then
+**"no reliable minimum (flat curve)"** -- and if the field dies off as it defocuses (a defocused
+star is not a star to any detector) the same start produced **762 pulses** walking 8000 units in
+one direction before giving up.
+
+**What the sweep does now — a trough search, not a gradient bet.**
+
+* **Direction comes from a shape, not a step.** A solved trough is *a run of improving samples
+  followed by a rise*. If the first samples only worsen, that arm is the wrong one and the sweep
+  re-anchors at the start and walks the other way. One sample of HFD is noisy (seeing, JPEG), and
+  the difference across one 24-unit step is smaller than that noise at both ends of the lens range
+  -- an in-focus window is ~100-350 units at 400 mm and thousands at 14 mm, so "one step" means
+  something different on every lens.
+* **The stride is derived from the descent.** A linear model through the last two samples predicts
+  how far HFD would still fall; the next step takes a third of that, bounded below by
+  `sweep_step_units` (24) and above by `sweep_step_max_units` (96, below the narrowest window we
+  expect). A shoulder predicts a long run-out and gets long steps, so a wide curve is crossed in
+  tens of samples rather than hundreds; near the bottom the prediction shortens and the steps
+  tighten, so the trough is not jumped.
+* **A floor guards the last approach.** `sweep_floor_hfd` (2.5 px) is the one quantity that needs
+  no per-rig calibration: HFD is in pixels, and plate scale and diffraction trade off, so an
+  in-focus star lands at ~1.5-4 px on any lens. Within 5% of it the stride drops to the base
+  regardless of what the extrapolation says -- measured without it, a 96-unit step on a shallow
+  descent landed 69 units past focus.
+* **"Out of samples" while still falling is not an answer.** The walk extends up to
+  `sweep_extend_samples` (96) and only reports a trough once it has seen the rise. A field that
+  stops yielding usable samples ends the walk immediately instead (`max_rejected_run`).
+* **The turn is announced**: `on_progress("turned round at N")`, and a `turned-round-at-N` phase,
+  because an operator watching the position counter climb needs to know whether that is the sweep
+  working or the sweep lost.
+
+Measured on the same `AT_CURRENT` configuration, all lenses:
+
+| case | landed | error | pulses | samples | widest step |
+|---|---|---|---|---|---|
+| 400 mm-like window (50 u), from 300 out | 998 of 1000 | -2 | 46 | 12 | 94 |
+| 24 mm-like window (1500 u), from 3000 out | 3000 of 3000 | 0 | 258 | 76 | 96 |
+| asymmetric V, started 200 past focus | 527 of 500 | +27 | 40 | 12 | 72 |
+| asymmetric V, started 200 short of focus | 518 of 500 | +18 | 31 | 11 | 59 |
+
+The wide case is the one a fixed 24-unit stride cannot do at all -- 125 samples just to arrive, and
+the rise that proves a trough would not fit in the budget. On the real 60D with no stars in view,
+`AT_CURRENT` now stops after **44 pulses and 4 units of net travel in 15.5 s** instead of walking
+the range.
+
+`AT_CURRENT` acquisition is likewise bounded to **+/- `acquire_local_units` (200)** in both
+directions rather than one 8000-unit walk: with no anchor, distance travelled is not evidence of
+anything.
+
 ```
 samples = []
 repeat:
@@ -243,6 +300,32 @@ until hfd has worsened for m consecutive samples past the best   # m = 2
 
 Bracketed minimum. `m = 2` rather than 1 because a single bad sample on a marginal frame is
 common.
+
+### P3.5 — One measurement is ten frames (added 2026-10-28)
+
+Every sample in P2-P5 is now the **median HFD of ~10 consecutive live-view frames**
+(`StationDriver.frames_per_measure`), not one frame. The median rather than the mean because it is
+the same cost and one bad frame -- a gust, a cloud edge, a dropped JPEG -- cannot drag the sample.
+
+Measured on the EOS 60D at a fixed lens position, ten measurements each (a monitor starfield in
+view, HFD ~4.5 px, 40 stars):
+
+| frames averaged | mean HFD | sd | range | spread |
+|---|---|---|---|---|
+| 1 | 4.472 | 0.028 | 4.43-4.51 | 0.6 % |
+| 3 | 4.479 | 0.011 | 4.46-4.49 | 0.2 % |
+| 10 | 4.483 | 0.010 | 4.46-4.50 | 0.2 % |
+
+The 2.8x reduction is what sqrt(10) predicts, and the cost is 1.47 s per measurement against
+0.12 s for a single frame at ~8.6 fps. A 12-sample sweep becomes ~18 s rather than ~2 s. That is
+the trade the operator asked for and it is worth it: a 0.6 % reading is fine near a steep shoulder
+but is comparable to the *entire* depth of the curve on a short lens, where the fit has nothing to
+work with. Where the noise is worse than this table -- a dim field, a long exposure-less preview --
+averaging is the difference between a curve and static.
+
+⚠️ If the frame-to-frame spread at one position is ever comparable to the curve's depth, the fit is
+measuring noise. Averaging reduces the spread by sqrt(N) and no more; it does not rescue a field
+whose HFD genuinely varies by 2x per frame.
 
 ### P4 — Fit and land
 
