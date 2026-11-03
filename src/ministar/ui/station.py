@@ -144,6 +144,11 @@ class FakeCamera:
     #: Frames this camera writes are synthetic and worthless once solved.
     disposable_frames = True
 
+    #: The fake's ``roll`` is the position angle of the image +y axis (see ``set_roll``), not
+    #: a clamp angle relative to the ground. The roll advice must therefore use it directly
+    #: rather than adding the parallactic angle a second time.
+    reports_position_angle = True
+
     connected = True
 
     @property
@@ -322,8 +327,15 @@ class FakeCamera:
                 "fake camera has no star catalogue, so its frames cannot be solved "
                 "(point MINISTAR_ASTAP at an ASTAP install with a star database)"
             )
+        # Advance the frame counter *before* rendering. The counter is the noise seed, so
+        # leaving it fixed gave every captured frame the same noise realisation -- and
+        # identical noise correlates perfectly with itself at zero shift, which silently
+        # defeated every frame-to-frame measurement made on captured frames (the stacker's
+        # bump detector found a zero residual no matter what the mount did). A real sensor's
+        # noise is independent per frame; so is the fake's, now.
+        self._frames += 1
         image = (
-            np.clip(scene.render(self._position, frame=self._frames + 1), 0, 255).astype(np.uint16)
+            np.clip(scene.render(self._position, frame=self._frames), 0, 255).astype(np.uint16)
             * 257
         )  # 8-bit dynamic range spread over 16 bits, as a real sensor would be
         cards = {
@@ -406,8 +418,18 @@ class Station:
     def __init__(self, camera, initial_error: str = "") -> None:
         self._camera = camera
         self._lock = threading.Lock()
+        #: Guards every call into the camera. The pump holds it for live view; RUN holds it
+        #: for a capture. The two never overlap because RUN also suspends the pump, but the
+        #: lock is what makes that true even during the handoff.
+        self._camera_lock = threading.Lock()
+        #: Set while a run owns the camera. EDSDK dislikes live view running through a
+        #: shutter release (02 §1.7), so the pump stops rather than queues.
+        self._suspended = threading.Event()
         self._pulses: deque[Direction] = deque()
         self._stop = threading.Event()
+        #: Clear until a screen asks for a preview. A DSLR's live view raises the mirror and
+        #: cycles the shutter, so the pump must not start it merely because the app launched.
+        self._live = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_thumb: np.ndarray | None = None
         self._last_thumb_at: float | None = None
@@ -432,6 +454,45 @@ class Station:
             self._camera.disconnect()
 
     # -- the screens' whole API --------------------------------------------
+    def want_live_view(self, enabled: bool = True) -> None:
+        """Enable or stop previews. Screens that show the live view call this on render."""
+        if enabled:
+            self._live.set()
+        else:
+            self._live.clear()
+
+    @property
+    def live_wanted(self) -> bool:
+        return self._live.is_set()
+
+    def suspend(self) -> None:
+        """Hand the camera to a run loop: live view stops, captures may proceed."""
+        self._suspended.set()
+        # There is no continuity across a run, so the next frame after it must not be
+        # compared with the one from before it -- that gap would read as no motion at all.
+        with self._lock:
+            self._last_thumb = None
+            self._last_thumb_at = None
+            self._motion.clear()
+
+    def resume(self) -> None:
+        """Give the camera back to live view (after a run stops)."""
+        self._suspended.clear()
+
+    @property
+    def suspended(self) -> bool:
+        return self._suspended.is_set()
+
+    def capture_to(self, path, **kwargs):
+        """Take one picture, serialised against the pump.
+
+        The run loop calls this rather than the camera directly: it is the only place that
+        knows both the camera and the lock, and a capture from two threads is the failure
+        mode EDSDK reports as a transport error (08 §7.2b).
+        """
+        with self._camera_lock:
+            return self._camera.capture_to(path, **kwargs)
+
     @property
     def camera(self):
         """The camera this station drives. Screens use it for capture, not for frames."""
@@ -484,9 +545,21 @@ class Station:
 
     def _run(self) -> None:
         while not self._stop.is_set():
+            if self._suspended.is_set():
+                # A run owns the camera. Stay alive so a stop still joins promptly, but do
+                # not touch EDSDK: a live-view grab in the middle of an exposure is how a
+                # transfer gets cancelled.
+                time.sleep(0.05)
+                continue
+            if not self._live.is_set():
+                # Nobody is showing a preview yet (PREFLIGHT/SETUP/TARGET/PARAMETERS).
+                # Waiting here is what keeps the mirror down at startup.
+                self._live.wait(0.1)
+                continue
             try:
                 self._send_batch()
-                jpeg = self._camera.grab_live_jpeg()
+                with self._camera_lock:
+                    jpeg = self._camera.grab_live_jpeg()
                 analysis = analyse(jpeg)
                 now = time.monotonic()
                 with self._lock:

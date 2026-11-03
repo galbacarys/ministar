@@ -197,12 +197,17 @@ def best_start(
     pa_y_deg: float,
     target_radius_arcmin: float = 0.0,
     margin_fraction: float = EDGE_MARGIN_FRACTION,
+    interval_s: float | None = None,
 ) -> tuple[float, float]:
-    """Where to point so the target begins the session at the edge it entered from.
+    """Where to point so the target is centred in the interval's usable frame.
 
-    Aiming *at* the target throws away half the frame: it then has only the half-width ahead
-    of it before it leaves. Starting it against the entry edge gives it the whole run -- 2x
-    for the same pointing, which is what the roll advice is protecting.
+    With ``interval_s`` the target starts half the interval's drift upstream of the frame
+    centre, so it ends the interval the same distance downstream. The retained rectangle is
+    unchanged -- the drift sets that -- but the object sits in the middle of it instead of at
+    its edge. Measured for M45 over 5 minutes at 135 mm: 88.3% retained either way, target at
+    50% of the usable frame instead of 0%. For free, which is why the old edge-entry point was
+    only ever a proxy for "the longest run": it is right only for an interval long enough to
+    reach the far edge. Without an interval the old behaviour is kept.
 
     Solved in *pixels*, by Newton, rather than as a fixed RA offset: a great circle is not a
     parallel, and at 5 deg the two differ by 10 arcmin, which is a whole mount nudge.
@@ -219,7 +224,12 @@ def best_start(
     inset = margin_px + radius_px + 2.0
     inner_w = max(1, round(optics.width_px - 2.0 * inset))
     inner_h = max(1, round(optics.height_px - 2.0 * inset))
-    behind_px = _chord_px(ux, uy, inner_w, inner_h) / 2.0
+    chord_half_px = _chord_px(ux, uy, inner_w, inner_h) / 2.0
+    if interval_s:
+        drift_px = optics.drift_px(dec_deg=target_dec_deg, seconds=interval_s)
+        behind_px = min(drift_px / 2.0, chord_half_px)
+    else:
+        behind_px = chord_half_px
 
     centre_x, centre_y = plane.centre_px
     want_x = centre_x - behind_px * ux
@@ -351,6 +361,7 @@ def frame_advice(
     pa_y_deg: float,
     target_radius_arcmin: float = 0.0,
     margin_fraction: float = EDGE_MARGIN_FRACTION,
+    interval_s: float | None = None,
 ) -> FrameAdvice:
     """Everything the POINT page can say once it knows where the camera actually is."""
     plane = _frame(optics, ra_deg=ra_deg, dec_deg=dec_deg, pa_y_deg=pa_y_deg)
@@ -380,6 +391,7 @@ def frame_advice(
         pa_y_deg=pa_y_deg,
         target_radius_arcmin=target_radius_arcmin,
         margin_fraction=margin_fraction,
+        interval_s=interval_s,
     )
     # What a run looks like from the best start is measured there, not assumed: the entry
     # point puts the target behind the centre, so its travel is the half-extent ahead plus
@@ -501,20 +513,120 @@ def describe(
     )
 
 
+#: How close to the entry point counts as "there" (10 §5): 5 arcmin, or 5% of the frame
+#: height, whichever is larger. The second term exists because a fixed 5' is a third of a
+#: pixel at 400 mm and a whole frame at 14 mm; the frame, not the sky, is what the user is
+#: aiming by.
+ENTRY_TOLERANCE_ARCMIN = 5.0
+ENTRY_TOLERANCE_HEIGHT_FRACTION = 0.05
+
+
+def entry_tolerance_arcmin(optics) -> float:
+    """The aiming tolerance for this frame, in arcminutes."""
+    return max(ENTRY_TOLERANCE_ARCMIN, ENTRY_TOLERANCE_HEIGHT_FRACTION * optics.height_arcmin)
+
+
+def at_entry(
+    *,
+    ra_deg: float,
+    dec_deg: float,
+    target_ra_deg: float,
+    target_dec_deg: float,
+    optics,
+    pa_y_deg: float,
+    target_radius_arcmin: float = 0.0,
+    interval_s: float | None = None,
+) -> bool:
+    """Is the mount close enough to the entry pointing to start (or resume) a run?
+
+    Measured with the same :func:`frame_advice` the page draws its arrows from, so the
+    automatic resume and the instruction cannot disagree about whether the target is there.
+    """
+    advice = frame_advice(
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        target_ra_deg=target_ra_deg,
+        target_dec_deg=target_dec_deg,
+        optics=optics,
+        pa_y_deg=pa_y_deg,
+        target_radius_arcmin=target_radius_arcmin,
+        interval_s=interval_s,
+    )
+    return math.hypot(advice.move_east_arcmin, advice.move_north_arcmin) <= entry_tolerance_arcmin(
+        optics
+    )
+
+
+def entry_corner_name(
+    *,
+    target_ra_deg: float,
+    target_dec_deg: float,
+    optics,
+    pa_y_deg: float,
+    target_radius_arcmin: float = 0.0,
+    margin_fraction: float = EDGE_MARGIN_FRACTION,
+    interval_s: float | None = None,
+) -> str:
+    """Which corner the target starts in, named as the user sees it on screen.
+
+    Derived from the entry pixel the reticle is actually drawn on, so the sentence and the
+    marker cannot disagree -- the failure mode brief 10 §5 warns about is a correct arrow
+    described with the wrong words.
+    """
+    ra, dec = best_start(
+        target_ra_deg=target_ra_deg,
+        target_dec_deg=target_dec_deg,
+        optics=optics,
+        pa_y_deg=pa_y_deg,
+        target_radius_arcmin=target_radius_arcmin,
+        margin_fraction=margin_fraction,
+        interval_s=interval_s,
+    )
+    plane = _frame(optics, ra_deg=ra, dec_deg=dec, pa_y_deg=pa_y_deg)
+    x, y = plane.project(np.array([target_ra_deg]), np.array([target_dec_deg]))
+    return corner_name(float(x[0]), float(y[0]), optics.width_px, optics.height_px)
+
+
+def corner_name(x_px: float, y_px: float, width_px: int, height_px: int) -> str:
+    """The part of the frame a pixel sits in, in the words a person reads off the screen.
+
+    Brief 10 §5 is emphatic that the reframe instruction must name a *corner in image
+    terms* -- "top-left", never "east" -- because the user is looking at a screen and the
+    sky-to-screen mapping is not obvious. This is that naming, derived from the same entry
+    pixel the reticle is drawn on rather than from an enum that could drift from it.
+    """
+    third_x = width_px / 3.0
+    third_y = height_px / 3.0
+    horizontal = "left" if x_px < third_x else ("right" if x_px > 2.0 * third_x else "middle")
+    vertical = "top" if y_px < third_y else ("bottom" if y_px > 2.0 * third_y else "middle")
+    if horizontal == "middle" and vertical == "middle":
+        return "centre"
+    if vertical == "middle":
+        return horizontal
+    if horizontal == "middle":
+        return vertical
+    return f"{vertical}-{horizontal}"
+
+
 __all__ = [
     "BLIND_RADIUS_DEG",
     "EDGE_MARGIN_FRACTION",
+    "ENTRY_TOLERANCE_ARCMIN",
+    "ENTRY_TOLERANCE_HEIGHT_FRACTION",
     "HINT_FLOOR_RADIUS_DEG",
     "HINT_MAX_USEFUL_RADIUS_DEG",
     "MIN_USEFUL_FRACTION",
     "FrameAdvice",
     "SolveReport",
+    "at_entry",
     "best_start",
+    "corner_name",
     "crop_factor",
     "describe",
     "drift_direction_px",
     "drift_since_deg",
     "edge_travel_px",
+    "entry_tolerance_arcmin",
     "frame_advice",
     "keep_capture",
     "solve_hints",

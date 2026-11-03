@@ -1,6 +1,10 @@
 """Reframing: tell the user which way to turn the tripod head.
 
-Not implemented. The specification is ``docs/research/07-altaz-reframing-spec.md``.
+``roll.py`` is implemented: the parallactic angle, the camera roll relative to the horizon,
+and which way to turn the body (10 §2.1c). The **knob** half of the contract is not written:
+converting an alt/az error into turns of a 3-way head needs a head profile, which is the
+unimplemented CALIBRATE phase (13). The specification is
+``docs/research/07-altaz-reframing-spec.md``.
 
 Summary of the contract, so the shape is visible:
 

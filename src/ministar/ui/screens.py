@@ -14,6 +14,7 @@ without touching the shell.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,16 +27,19 @@ from ministar import quality
 from ministar import sky as sky_module
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
 from ministar.config import Settings
-from ministar.exposure import choose_exposure
+from ministar.exposure import choose_exposure, rule_of_500_seconds
 from ministar.io.tiff import TiffError, read_frame_exif
 from ministar.pointing import (
     SolveReport,
+    at_entry,
     best_start,
+    entry_corner_name,
+    entry_tolerance_arcmin,
     frame_advice,
     keep_capture,
     solve_hints,
 )
-from ministar.reframe.roll import parallactic_angle, roll_advice
+from ministar.reframe.roll import parallactic_angle, roll_advice, roll_inputs
 from ministar.rig import RigProfile, better_than, rig_path
 from ministar.rig import load as load_rig
 from ministar.rig import save as save_rig
@@ -767,6 +771,14 @@ def render_parameters(ctx: Context) -> None:
             f"exposure {choice.label}   (2 px of trailing allows {choice.ceiling_s:.2f} s; "
             f"this frame trails {choice.trail_px:.1f} px)"
         ).classes("mn-body")
+        # The rule of 500 is the number a photographer arrives with. Show what it would do
+        # rather than argue with it: on this rig it is more than twice the trail budget.
+        loose = rule_of_500_seconds(optics)
+        loose_trail = optics.drift_px(dec_deg=dec, seconds=loose)
+        ui.label(
+            f"the 500-rule would say {loose:.1f} s -- {loose_trail:.1f} px of trail, "
+            f"stars about {loose_trail / 1.75:.1f}x their at-focus size"
+        ).classes("mn-dim")
     else:
         ui.label("exposure needs a rig profile and a target's declination").classes("mn-warn")
 
@@ -879,6 +891,9 @@ def render_focus(ctx: Context) -> None:
     if ctx.station is None:
         ui.label("no camera").classes("mn-warn")
         return
+    # This screen shows the live view, so the mirror may come up now. (It stays down until
+    # a screen asks: see Station.want_live_view.)
+    ctx.station.want_live_view(True)
 
     def accept(snapshot) -> None:
         ctx.state.focus_position = snapshot.position
@@ -944,7 +959,13 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
     lst = sky_module.lst_deg(datetime.now().astimezone(), site.longitude_deg)
     hour_angle = (lst - ra_deg + 180.0) % 360.0 - 180.0
     q = parallactic_angle(site.latitude_deg, dec_deg, hour_angle)
-    return float(q), float(roll)
+    inputs = roll_inputs(
+        solved_pa_deg=ctx.state.pointing_pa_deg if ctx.state.solved else None,
+        camera_roll_deg=float(roll),
+        camera_reports_pa=bool(getattr(camera, "reports_position_angle", False)),
+        parallactic_deg=float(q),
+    )
+    return None if inputs is None else (float(inputs[0]), float(inputs[1]))
 
 
 def render_point(ctx: Context) -> None:
@@ -965,6 +986,10 @@ def render_point(ctx: Context) -> None:
     """
     ui.label("Pointing").classes("mn-heading")
     station = ctx.station
+    if station is not None:
+        # POINT is the first screen that needs a preview. Starting live view here, not at
+        # connect time, is what stops a launch from flipping the mirror.
+        station.want_live_view(True)
     # One element: the live view is drawn *inside* the pointing SVG, so the marks cannot drift
     # from the stars. sanitize=False because the content is ours (a data URI and an SVG), and
     # the default DOMPurify pass is free to strip SVG it does not recognise.
@@ -1039,6 +1064,7 @@ def render_point(ctx: Context) -> None:
                         optics=rig.optics(),
                         pa_y_deg=float(camera.roll_deg),
                         target_radius_arcmin=target_radius_arcmin(ctx),
+                        interval_s=ctx.state.reframe_interval_s,
                     )
                 )
                 tick()
@@ -1123,6 +1149,7 @@ def render_point(ctx: Context) -> None:
                             optics=rig.optics(),
                             pa_y_deg=ctx.state.pointing_pa_deg or 0.0,
                             target_radius_arcmin=target_radius_arcmin(ctx),
+                            interval_s=ctx.state.reframe_interval_s,
                         ).describe()
                     )
 
@@ -1153,6 +1180,7 @@ def render_point(ctx: Context) -> None:
                 optics=rig.optics(),
                 pa_y_deg=float(getattr(camera, "roll_deg", 0.0)),
                 target_radius_arcmin=target_radius_arcmin(ctx),
+                interval_s=ctx.state.reframe_interval_s,
             )
         )
 
@@ -1185,6 +1213,7 @@ def render_point(ctx: Context) -> None:
             target_dec_deg=ctx.state.target_dec_deg,
             target_radius_arcmin=target_radius_arcmin(ctx),
             roll_direction=direction,
+            interval_s=ctx.state.reframe_interval_s,
         )
         overlay_html.set_content(painting.svg(snapshot.data_uri))
 
@@ -1257,6 +1286,7 @@ def render_point(ctx: Context) -> None:
                         optics=rig.optics(),
                         pa_y_deg=roll,
                         target_radius_arcmin=target_radius_arcmin(ctx),
+                        interval_s=ctx.state.reframe_interval_s,
                     ).describe()
                 )
 
@@ -1390,6 +1420,7 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     ctx.state.solved = True
     ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg = solution.crval
     ctx.state.pointing_pa_deg = solution.position_angle_deg
+    ctx.state.pointing_scale_arcsec = solution.pixel_scale_arcsec
     ctx.state.pointing_solved_at = datetime.now(UTC)
     expected = None
     if profile is not None:
@@ -1408,14 +1439,395 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     return report, note
 
 
+def clock_text(seconds: float) -> str:
+    """Duration as ``m:ss`` (or ``h:mm``), which is how a run is planned."""
+    total = round(max(0.0, float(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {secs:02d}s"
+
+
+def run_metrics_text(snapshot) -> str:
+    """The HUD of brief 15 §6.4, as text.
+
+    Pure and separate from the renderer so a test can check that every number the brief
+    asks for is actually present -- frames accepted and rejected *with reasons*, integration
+    time, coverage, the shrinking valid area, HFD, and the reframe countdown -- without a
+    browser or a camera.
+    """
+    stats = snapshot.stats
+    if stats is None:
+        return "no frames yet"
+    rejected = ", ".join(f"{reason} x{count}" for reason, count in stats.reasons)
+    coverage = stats.coverage
+    hfd = f"{stats.hfd_px:.1f} px" if math.isfinite(stats.hfd_px) else "--"
+    lines = [
+        f"integration  {clock_text(stats.integration_s)}   {stats.accepted} accepted frames",
+        f"frames       {stats.accepted + stats.rejected} captured"
+        f"   {stats.accepted} stacked   {stats.rejected} rejected"
+        + (f"  ({rejected})" if rejected else ""),
+        f"coverage     {coverage.fraction * 100:.0f}% seen"
+        f"   {coverage.fully * 100:.0f}% in every frame",
+    ]
+    if stats.crop is not None:
+        _x, _y, width, height = stats.crop
+        # The preview is cropped to this rectangle, so it is what the user is looking at --
+        # and why it was chosen matters: a centred crop can be smaller than the usable area.
+        if stats.crop_rule == "target":
+            why = "centred on the target"
+        elif snapshot.target_known:
+            # Falling back is the right call at the edge, but it must not look like a bug:
+            # say what would fix it.
+            why = "fully covered -- aim the target nearer the middle to centre it"
+        else:
+            why = "fully covered"
+        lines.append(f"shown        {width} x {height} px  ({why})")
+    lines += [
+        f"preview      {stats.width} x {stats.height}   bin {stats.bin_factor}",
+        f"field        {stats.rotation_deg:+.2f} deg since the first frame",
+        f"focus        {hfd} HFD   {stats.stars} stars",
+        f"defects      {stats.defect_fraction * 100:.1f}% of covered pixels rejected",
+    ]
+    if snapshot.reframe_due_in_s is not None:
+        if snapshot.reframe_due_in_s >= 0:
+            lines.append(f"reframe      in {clock_text(snapshot.reframe_due_in_s)}")
+        else:
+            lines.append(
+                "reframe      past due: the target is leaving the frame -- stop, re-solve, "
+                "and start again from the entry corner"
+            )
+    if snapshot.recoveries:
+        lines.append(f"recovered    {snapshot.recoveries} bump(s) by re-solving the frame")
+    if snapshot.kept_frames:
+        lines.append(f"files        {snapshot.kept_frames} kept in {snapshot.frames_dir}")
+    return "\n".join(lines)
+
+
 def render_run(ctx: Context) -> None:
-    _not_implemented("Capture and live stacking", "15-stacking-pipeline-and-calibration.md")
-    if ctx.station is not None:
-        snap = ctx.station.snapshot()
-        ui.label(
-            f"camera is live: frame {snap.frames}, HFD "
-            + (f"{snap.hfd:.2f}" if snap.stars else "n/a")
-        ).classes("mn-body")
+    """Capture, live stack, and every number the loop is spending (15 §6, 12 §6).
+
+    The page owns no loop state: the runner is a process-wide singleton (``ministar.run``),
+    and this renderer only starts, stops and draws it. That is what lets a page refresh --
+    or a phone reconnecting -- show the run that is already happening.
+    """
+    from ministar import run as run_loop
+    from ministar.run import RunConfig
+    from ministar.stack.transform import FieldModel
+
+    ui.label("Run").classes("mn-heading")
+    station = ctx.station
+    rig = rig_for(ctx)
+    optics = rig.optics() if rig is not None else None
+
+    image = ui.image("").classes("mn-preview").style("max-width: 880px; width: 100%")
+    image.set_visibility(False)
+    metrics = ui.label("").classes("mn-metrics")
+    warning = ui.label("").classes("mn-warn")
+    hint = ui.label("").classes("mn-dim")
+
+    progress = (
+        ui.linear_progress(value=0.0, show_value=False).props("rounded").classes("mn-progress")
+    )
+    progress.set_visibility(False)
+
+    # -- reframe ------------------------------------------------------------
+    # The sub-cycle of 12 §6, built out of the POINT page rather than a second copy of it:
+    # the live view, the entry marker, the solve and the fake-mount controls are exactly
+    # what a re-point needs, so the box embeds that renderer when the loop stops for one.
+    reframe_box = ui.column().classes("w-full items-center").style("gap: 6px; margin-top: 8px")
+    reframe_box.set_visibility(False)
+    point_host = None
+    point_built = {"point": False}
+    with reframe_box:
+        reframe_instruction = ui.label("").classes("mn-heading")
+        reframe_detail = ui.label("").classes("mn-metrics")
+        ui.button("continue now", on_click=lambda: continue_now()).classes("mn-action")
+        point_host = ui.column().classes("w-full items-center")
+
+    def reframe_aim():
+        """The mount's current pointing, as ``(ra, dec, pa, plate_scale)`` -- or ``None``.
+
+        A fake (or any camera that reports where it looks) answers immediately, which is what
+        lets the demo resume without pressing solve. A real body cannot, so the answer comes
+        from a solve taken *after* the reframe began; one taken before the mount was touched
+        describes the old aim and would confirm a move that never happened.
+        """
+        runner = run_loop.active()
+        camera = getattr(station, "camera", None) if station is not None else None
+        live = getattr(camera, "pointing", None)
+        roll = getattr(camera, "roll_deg", None)
+        if live is not None and roll is not None and optics is not None:
+            return float(live[0]), float(live[1]), float(roll), optics.plate_scale_arcsec
+        since = runner.snapshot().reframe_since if runner is not None else None
+        solved_at = ctx.state.pointing_solved_at
+        if (
+            ctx.state.pointing_ra_deg is not None
+            and ctx.state.pointing_dec_deg is not None
+            and solved_at is not None
+            and (since is None or solved_at >= since)
+        ):
+            scale = ctx.state.pointing_scale_arcsec or (
+                optics.plate_scale_arcsec if optics is not None else None
+            )
+            return (
+                float(ctx.state.pointing_ra_deg),
+                float(ctx.state.pointing_dec_deg),
+                float(ctx.state.pointing_pa_deg or 0.0),
+                scale,
+            )
+        return None
+
+    def aim_error(aim) -> float | None:
+        if (
+            aim is None
+            or optics is None
+            or ctx.state.target_ra_deg is None
+            or ctx.state.target_dec_deg is None
+        ):
+            return None
+        advice = frame_advice(
+            ra_deg=aim[0],
+            dec_deg=aim[1],
+            target_ra_deg=ctx.state.target_ra_deg,
+            target_dec_deg=ctx.state.target_dec_deg,
+            optics=optics,
+            pa_y_deg=aim[2],
+            target_radius_arcmin=target_radius_arcmin(ctx),
+            interval_s=ctx.state.reframe_interval_s,
+        )
+        return math.hypot(advice.move_east_arcmin, advice.move_north_arcmin)
+
+    def at_entry_now(aim) -> bool:
+        if (
+            aim is None
+            or optics is None
+            or ctx.state.target_ra_deg is None
+            or ctx.state.target_dec_deg is None
+        ):
+            return False
+        return at_entry(
+            ra_deg=aim[0],
+            dec_deg=aim[1],
+            target_ra_deg=ctx.state.target_ra_deg,
+            target_dec_deg=ctx.state.target_dec_deg,
+            optics=optics,
+            pa_y_deg=aim[2],
+            target_radius_arcmin=target_radius_arcmin(ctx),
+            interval_s=ctx.state.reframe_interval_s,
+        )
+
+    def build_point() -> None:
+        if point_built["point"] or point_host is None:
+            return
+        with point_host:
+            render_point(ctx)
+        point_built["point"] = True
+
+    def drop_point() -> None:
+        if point_host is not None and point_built["point"]:
+            point_host.clear()
+        point_built["point"] = False
+
+    def continue_now() -> None:
+        runner = run_loop.active()
+        if runner is None:
+            return
+        aim = reframe_aim()
+        if aim is None:
+            runner.resume()
+        else:
+            runner.resume_reframe(
+                ra_deg=aim[0],
+                dec_deg=aim[1],
+                pa_y_deg=aim[2],
+                plate_scale_arcsec=aim[3],
+            )
+        drop_point()
+
+    with ui.row().classes("items-center justify-center").style("gap: 16px"):
+        resolution = (
+            ui.select(
+                {"2": "4.5 MP  (bin 2)", "4": "1.1 MP  (bin 4)"},
+                value=str(ctx.state.stack_bin),
+                label="stack resolution",
+            )
+            .classes("mn-body")
+            .style("width: 220px")
+        )
+
+        def set_resolution(event) -> None:
+            ctx.state.stack_bin = int(event.value)
+
+        resolution.on_value_change(set_resolution)
+        restretch = ui.button(
+            "restretch", on_click=lambda: run_loop.active() and run_loop.active().restretch()
+        ).classes("mn-action")
+
+    def resolve_again(path, when, model):
+        """Re-solve the frame the model disagreed with, and hand back its solution.
+
+        A hinted search around the last good centre, with a radius chosen for a *hand* on
+        the mount rather than for drift; ``solve_with_fallback`` retries blind, so a bigger
+        move costs a few seconds rather than a lost session.
+        """
+        if ctx.settings.astap is None or optics is None:
+            return None
+        from ministar.solver import SolveHints, solve_with_fallback
+
+        hints = SolveHints(
+            fov_height_deg=optics.height_arcmin / 60.0,
+            ra_hours=model.ra_deg / 15.0,
+            south_pole_distance_deg=model.dec_deg + 90.0,
+            radius_deg=2.0,
+        )
+        result, _blind = solve_with_fallback(
+            path,
+            ctx.settings.astap,
+            out_base=ctx.settings.paths.scratch / "run_resolve",
+            hints=hints,
+        )
+        return result.solution if result.solved else None
+
+    def start_run() -> None:
+        if station is None or getattr(station, "camera", None) is None:
+            hint.text = "no camera in this session"
+            return
+        if rig is None or ctx.state.pointing_ra_deg is None or ctx.state.pointing_pa_deg is None:
+            hint.text = "solve on POINT first: the drift model needs a measured centre and roll"
+            return
+        if not ctx.state.exposure_s:
+            hint.text = "choose an exposure on PARAMETERS first"
+            return
+        model = FieldModel(
+            ra_deg=float(ctx.state.pointing_ra_deg),
+            dec_deg=float(ctx.state.pointing_dec_deg),
+            pa_y_deg=float(ctx.state.pointing_pa_deg),
+            plate_scale_arcsec=optics.plate_scale_arcsec,
+            # Only the solve's epoch matters here; the dimensions are replaced by the first
+            # frame's, which is the only authoritative source for what dcraw wrote.
+            width_px=optics.width_px,
+            height_px=optics.height_px,
+            epoch=ctx.state.pointing_solved_at or datetime.now(UTC),
+        )
+        hint.text = ""
+        station.suspend()
+        run_loop.start(
+            capture=station.capture_to,
+            camera=station.camera,
+            model=model,
+            config=RunConfig(
+                exposure_s=float(ctx.state.exposure_s),
+                iso=int(ctx.state.iso or 800),
+                reframe_interval_s=ctx.state.reframe_interval_s,
+                bin_factor=int(ctx.state.stack_bin),
+                keep_frames=not bool(getattr(station.camera, "disposable_frames", False)),
+                target_name=ctx.state.target_name or "",
+                target_ra_deg=ctx.state.target_ra_deg,
+                target_dec_deg=ctx.state.target_dec_deg,
+            ),
+            frames_dir=ctx.settings.paths.frames,
+            scratch_dir=ctx.settings.paths.scratch,
+            dcraw=ctx.settings.dcraw,
+            resolve=resolve_again,
+        )
+
+    def pause_or_resume() -> None:
+        runner = run_loop.active()
+        if runner is None:
+            return
+        if runner.snapshot().state == "paused":
+            runner.resume()
+        else:
+            runner.pause()
+
+    def stop_run() -> None:
+        runner = run_loop.active()
+        if runner is not None:
+            runner.stop()
+        if station is not None and station.suspended:
+            station.resume()
+
+    with ui.row().classes("items-center justify-center").style("gap: 8px"):
+        start = ui.button("start", on_click=start_run).classes("mn-action")
+        pause = ui.button("pause", on_click=pause_or_resume).classes("mn-action")
+        stop = ui.button("stop", on_click=stop_run).classes("mn-action")
+
+    def tick() -> None:
+        runner = run_loop.active()
+        if runner is None:
+            metrics.text = run_metrics_text(run_loop.RunSnapshot())
+            warning.text = ""
+            image.set_visibility(False)
+            start.set_enabled(True)
+            pause.set_enabled(False)
+            stop.set_enabled(False)
+            restretch.set_enabled(False)
+            resolution.set_enabled(True)
+            return
+        snapshot = runner.snapshot()
+        if snapshot.data_uri:
+            image.set_source(snapshot.data_uri)
+            image.set_visibility(True)
+        metrics.text = run_metrics_text(snapshot)
+        warning.text = snapshot.error or snapshot.warning
+        progress.set_visibility(snapshot.reframe_due_in_s is not None)
+        progress.value = snapshot.reframe_progress
+        running = snapshot.state == "running"
+        paused = snapshot.state == "paused"
+        reframing = snapshot.state == "reframe"
+        reframe_box.set_visibility(reframing)
+        if reframing:
+            build_point()
+            aim = reframe_aim()
+            error = aim_error(aim)
+            corner = (
+                entry_corner_name(
+                    target_ra_deg=ctx.state.target_ra_deg,
+                    target_dec_deg=ctx.state.target_dec_deg,
+                    optics=optics,
+                    pa_y_deg=aim[2] if aim is not None else (ctx.state.pointing_pa_deg or 0.0),
+                    target_radius_arcmin=target_radius_arcmin(ctx),
+                    interval_s=ctx.state.reframe_interval_s,
+                )
+                if (
+                    optics is not None
+                    and ctx.state.target_ra_deg is not None
+                    and ctx.state.target_dec_deg is not None
+                )
+                else "entry"
+            )
+            reframe_instruction.text = f"re-point: put the target on the {corner} marker"
+            if error is None:
+                reframe_detail.text = (
+                    "solve to confirm the new pointing -- the resume waits for a fresh solve"
+                )
+            else:
+                tolerance = entry_tolerance_arcmin(optics) if optics is not None else 0.0
+                reframe_detail.text = (
+                    f"aim error {error:.0f}' of {tolerance:.0f}'"
+                    f"   holds {runner.reframe_dwell.held_s:.0f}s"
+                    f" of {runner.reframe_dwell.window_s:.0f}s before it resumes"
+                )
+            if runner.reframe_dwell.update(time.monotonic(), at_entry_now(aim)):
+                continue_now()
+        else:
+            runner.reframe_dwell.reset()
+            drop_point()
+        if snapshot.state in {"stopped", "error"} and station is not None and station.suspended:
+            # The loop can end without the page asking (an error, or the app closing), and a
+            # station left suspended would freeze live view for every later screen.
+            station.resume()
+        start.set_enabled(not (running or paused or reframing))
+        pause.set_enabled(running or paused)
+        pause.text = "resume" if paused else "pause"
+        stop.set_enabled(running or paused or reframing)
+        restretch.set_enabled(bool(snapshot.stats and snapshot.stats.accepted))
+        resolution.set_enabled(not (running or paused or reframing))
+
+    tick()
+    ui.timer(0.5, tick)
 
 
 def render_done(ctx: Context) -> None:

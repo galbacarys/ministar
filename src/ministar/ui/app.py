@@ -24,7 +24,7 @@ from nicegui import ui
 
 from ministar.config import Settings
 from ministar.rig import RigProfile
-from ministar.session import ORDER, SessionState
+from ministar.session import ORDER, Phase, SessionState
 from ministar.ui import screens
 from ministar.ui.station import FakeCamera, Station
 from ministar.ui.theme import install
@@ -56,6 +56,7 @@ def wizard_page() -> None:
     def go_back() -> None:
         index = ORDER.index(app.session.phase)
         if index > 0:
+            end_run_if_leaving(app)
             app.session.phase = ORDER[index - 1]
             content.refresh()
 
@@ -63,6 +64,7 @@ def wizard_page() -> None:
         index = ORDER.index(app.session.phase)
         if index >= len(ORDER) - 1 or not app.session.can_advance():
             return
+        end_run_if_leaving(app)
         app.session.advance()
         content.refresh()
 
@@ -127,6 +129,23 @@ def wizard_page() -> None:
     content()
 
 
+def end_run_if_leaving(app: App) -> None:
+    """Stop the loop when the wizard walks away from RUN.
+
+    A runner outlives a page refresh on purpose (the phone can reconnect), but it must not
+    outlive the *phase*: leaving RUN with the shutter still going would keep capturing while
+    the DONE screen says the session is over. The station is handed back to live view in the
+    same place, so no screen inherits a frozen preview.
+    """
+    if app.session.phase is not Phase.RUN:
+        return
+    from ministar import run as run_loop
+
+    run_loop.stop()
+    if app.station is not None and app.station.suspended:
+        app.station.resume()
+
+
 def run(
     *,
     fake: bool = False,
@@ -185,6 +204,9 @@ def run(
             native=native,
         )
     finally:
+        from ministar import run as run_loop
+
+        run_loop.stop()
         station.stop()
 
 

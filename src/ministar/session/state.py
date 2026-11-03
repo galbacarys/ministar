@@ -79,6 +79,10 @@ class SessionState:
     iso: int | None = None
     reframe_interval_s: float | None = None
     usable_mp: float | None = None
+    #: Sensor pixels per stacked pixel. 2 is the full super-pixel frame (4.5 MP on the
+    #: 60D), 4 the half-size preview (brief 15 §2.1). Chosen on the RUN page; fixed once a
+    #: stack starts, because the accumulator's grid and the drift model must agree.
+    stack_bin: int = 2
 
     # Focus (11, 12 §3)
     focus_position: int | None = None
@@ -96,6 +100,9 @@ class SessionState:
     #: Position angle of the image +y axis from the solve (ASTAP's CD matrix). The frame
     #: orientation, which the aiming advice needs and a real camera cannot report.
     pointing_pa_deg: float | None = None
+    #: Arcsec per pixel from that solve. A reframe rebuilds the drift model from the solve
+    #: rather than from the rig file, and this is the one number the session did not keep.
+    pointing_scale_arcsec: float | None = None
     #: Consecutive failed solves. Two is a pattern: the page stops offering the solve and
     #: offers a retry instead (quality.should_hold_off). Reset by success or by asking.
     solve_failures: int = 0

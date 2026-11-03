@@ -8,6 +8,7 @@ star-count gate -- are testable without a camera, a browser or cv2.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -133,3 +134,44 @@ def test_motion_history_answers_whether_the_mount_moved_during_a_capture() -> No
     assert station.motion_since(100.5) == 9.5
     assert station.motion_since(101.5) == 2.6
     assert station.motion_since(103.0) == -1.0
+
+
+def test_every_capture_gets_fresh_noise(sky, tmp_path) -> None:
+    """The frame counter seeds the noise; a fixed counter made every capture identical.
+
+    Identical noise correlates with itself at zero shift, which is not a subtle failure: it
+    made the live stack's bump detector report zero residual however far the mount moved.
+    """
+    from ministar.io.fits import read_fits
+
+    a, _ = read_fits(sky.camera.capture_to(tmp_path / "a.fit"))
+    b, _ = read_fits(sky.camera.capture_to(tmp_path / "b.fit"))
+    assert not (a == b).all()
+    assert sky.camera._frames == 2
+
+
+def test_the_pump_does_not_start_until_a_preview_is_wanted() -> None:
+    """The startup bug: a DSLR's live view raises the mirror, so the pump must wait."""
+    from ministar.ui.station import FakeCamera, Station
+
+    camera = FakeCamera(shape=(64, 64), count=4)
+    grabs = {"count": 0}
+    original = camera.grab_live_jpeg
+
+    def counting() -> bytes:
+        grabs["count"] += 1
+        return original()
+
+    camera.grab_live_jpeg = counting  # type: ignore[method-assign]
+    station = Station(camera)
+    station.start()
+    try:
+        time.sleep(0.4)
+        assert grabs["count"] == 0, "the pump grabbed a preview before anyone asked"
+        station.want_live_view(True)
+        deadline = time.monotonic() + 3.0
+        while grabs["count"] == 0 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert grabs["count"] > 0
+    finally:
+        station.stop()

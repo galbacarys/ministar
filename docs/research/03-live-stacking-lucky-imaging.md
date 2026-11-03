@@ -101,7 +101,26 @@ Drift and the resulting **maximum sub length** (4.0 µm pixels; trail budget 2 p
 | 300 mm | 2.8″/px | 902″/min → **0.37 s** | 0.5 s | 2.1 s |
 | 600 mm | 1.4″/px | 902″/min → **0.18 s** | 0.26 s | 1.05 s |
 
-Five-second trail length in px (δ=45°): 24 mm → 1.6, 50 mm → 3.2, 135 mm → 8.7, 300 mm → 19, 600 mm → 39. **This is the hard constraint the whole project lives inside.** Note the tension: a 15 s sub at 50 mm is a **10–14 px** streak (δ=45°→0°; stars become dashes), and at 135 mm it is **26–37 px** — unusable. Realistically:
+Five-second trail length in px (δ=45°): 24 mm → 1.6, 50 mm → 3.2, 135 mm → 8.7, 300 mm → 19, 600 mm → 39. **This is the hard constraint the whole project lives inside.**
+
+**The 500-rule and NPF, measured against the budget (2026-10-28).** On the 60D at 135 mm
+(f = 135, p = 4.434 µm, N = 2.8) at Dec 24:
+
+| rule | exposure | trail | stars |
+|---|---|---|---|
+| 2 px budget (this project) | 0.99 s | 2.0 px | HFD ≈ 2.2 px (1.25× at-focus) |
+| NPF, refined (Michaud): `(16.856N + 0.0997f + 13.713p)/(f cos δ)` | 0.99 s | 2.0 px | same |
+| NPF, simple `(35N + 30p)/f` (no declination) | 1.68 s | 3.4 px | 1.9× |
+| 500-rule, `500/(f × 1.6)` | 2.31 s | 4.7 px | 2.7× |
+
+So the 500-rule is the outlier, not the budget: it is a print-size heuristic that ignores
+pixel pitch and declination, and on this sensor it implies a 4.7 px streak. The *precise*
+heuristic (NPF) agrees with the pixel-trail model to a few percent at f/2.8, because both
+encode "about two pixels of trail" — ours measures it, NPF bakes it in as a constant. NPF's
+aperture term is the one thing the trail model cannot see, and it matters only because a wide
+aperture enlarges the Airy disk and leaves less room for trailing; at f/2.8 the two agree.
+`npf_seconds()` and `rule_of_500_seconds()` exist so the UI can show the comparison rather
+than argue about it. Note the tension: a 15 s sub at 50 mm is a **10–14 px** streak (δ=45°→0°; stars become dashes), and at 135 mm it is **26–37 px** — unusable. Realistically:
 - **14–85 mm**: untracked 2–15 s subs are geometrically sound; the target is wide-field (Milky Way, big nebulae, constellations). This is the sweet spot.
 - **135 mm**: 1–2 s subs; ~1000–3000 frames/session; read noise starts to bite (§3.3).
 - **≥300 mm**: sub-second subs; you are doing planetary-style high-frame-rate work on a deep-sky target, and 24 MP of sub-second frames is a data-rate problem before it is an algorithm problem.

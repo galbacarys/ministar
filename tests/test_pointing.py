@@ -398,3 +398,124 @@ def test_the_contradiction_is_what_the_shared_radius_prevents() -> None:
     assert not advice.inside
     assert "NOT fully in the frame" in " ".join(advice.describe())
     assert "across" in " ".join(advice.describe()), "say why, not just that"
+
+
+def test_the_entry_tolerance_is_five_arcmin_or_five_percent() -> None:
+    """10 §5: a fixed 5' is a third of a pixel at 400 mm and most of a frame at 14 mm."""
+    from ministar.optics import Optics
+    from ministar.pointing import entry_tolerance_arcmin
+
+    wide = Optics.from_pitch(width_px=5184, height_px=3456, pixel_um=4.434, focal_length_mm=14.0)
+    mid = Optics.from_pitch(width_px=5184, height_px=3456, pixel_um=4.434, focal_length_mm=400.0)
+    long = Optics.from_pitch(width_px=5184, height_px=3456, pixel_um=4.434, focal_length_mm=1000.0)
+    assert entry_tolerance_arcmin(wide) == wide.height_arcmin * 0.05
+    # 400 mm: 5% of a 2.2-degree-high frame is 6.6', so the frame term wins ...
+    assert entry_tolerance_arcmin(mid) == mid.height_arcmin * 0.05
+    # ... and at 1 m the frame is small enough that the 5' floor takes over.
+    assert entry_tolerance_arcmin(long) == 5.0
+
+
+def test_at_entry_accepts_the_best_start_and_rejects_a_nudge() -> None:
+    from ministar.optics import Optics
+    from ministar.pointing import at_entry, best_start
+
+    optics = Optics.from_pitch(width_px=480, height_px=320, pixel_um=4.434, focal_length_mm=135.0)
+    entry_ra, entry_dec = best_start(
+        target_ra_deg=100.0, target_dec_deg=45.0, optics=optics, pa_y_deg=20.0
+    )
+    kwargs = dict(
+        target_ra_deg=100.0,
+        target_dec_deg=45.0,
+        optics=optics,
+        pa_y_deg=20.0,
+    )
+    assert at_entry(ra_deg=entry_ra, dec_deg=entry_dec, **kwargs) is True
+    # A degree off is a whole frame at this focal length, not a nudge.
+    assert at_entry(ra_deg=entry_ra + 1.0, dec_deg=entry_dec, **kwargs) is False
+
+
+def test_the_entry_corner_is_named_in_image_terms() -> None:
+    """Brief 10 §5: "top-left", never "east" -- the user is reading a screen."""
+    from ministar.optics import Optics
+    from ministar.pointing import entry_corner_name
+
+    optics = Optics.from_pitch(width_px=480, height_px=320, pixel_um=4.434, focal_length_mm=135.0)
+    name = entry_corner_name(target_ra_deg=100.0, target_dec_deg=45.0, optics=optics, pa_y_deg=20.0)
+    assert name in {
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
+        "top",
+        "bottom",
+        "left",
+        "right",
+    }
+
+
+def test_corner_names_divide_the_frame_into_thirds() -> None:
+    from ministar.pointing import corner_name
+
+    assert corner_name(0, 0, 300, 300) == "top-left"
+    assert corner_name(299, 299, 300, 300) == "bottom-right"
+    assert corner_name(150, 150, 300, 300) == "centre"
+    assert corner_name(150, 10, 300, 300) == "top"
+    assert corner_name(10, 150, 300, 300) == "left"
+
+
+def test_the_interval_start_centres_the_target_in_the_retained_frame() -> None:
+    """The point of the offset: same retained area, subject in the middle not the corner."""
+    import pytest as _pytest
+
+    from ministar.optics import Optics
+    from ministar.pointing import best_start
+    from ministar.projection import TangentPlane
+
+    optics = Optics.from_pitch(width_px=5184, height_px=3456, pixel_um=4.434, focal_length_mm=135.0)
+    target = (56.87, 24.1)  # M45
+    interval = 300.0
+    start_ra, start_dec = best_start(
+        target_ra_deg=target[0],
+        target_dec_deg=target[1],
+        optics=optics,
+        pa_y_deg=0.0,
+        interval_s=interval,
+    )
+    plane = TangentPlane(
+        ra_deg=start_ra,
+        dec_deg=start_dec,
+        pa_y_deg=0.0,
+        plate_scale_arcsec=optics.plate_scale_arcsec,
+        width_px=optics.width_px,
+        height_px=optics.height_px,
+    )
+    x, _y = plane.project([target[0]], [target[1]])
+    drift = optics.drift_px(dec_deg=target[1], seconds=interval)
+
+    # North-up drift is horizontal, so the retained rectangle is [0, W-1-d] x [0, H-1].
+    retained_centre = (optics.width_px - 1 - drift) / 2.0
+    assert float(x[0]) == _pytest.approx(retained_centre, abs=3.0)
+    # ... and the end is symmetric about the frame centre: equal margins left and right.
+    end = float(x[0]) + drift
+    assert abs(float(x[0]) - ((optics.width_px - 1) - end)) < 6.0
+
+
+def test_without_an_interval_the_target_starts_at_the_entry_edge() -> None:
+    from ministar.optics import Optics
+    from ministar.pointing import best_start
+    from ministar.projection import TangentPlane
+
+    optics = Optics.from_pitch(width_px=5184, height_px=3456, pixel_um=4.434, focal_length_mm=135.0)
+    start_ra, start_dec = best_start(
+        target_ra_deg=56.87, target_dec_deg=24.1, optics=optics, pa_y_deg=0.0
+    )
+    plane = TangentPlane(
+        ra_deg=start_ra,
+        dec_deg=start_dec,
+        pa_y_deg=0.0,
+        plate_scale_arcsec=optics.plate_scale_arcsec,
+        width_px=optics.width_px,
+        height_px=optics.height_px,
+    )
+    x, _y = plane.project([56.87], [24.1])
+    assert 0.0 <= float(x[0]) < 0.05 * optics.width_px  # the margin, not the middle

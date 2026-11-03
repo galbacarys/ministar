@@ -149,7 +149,10 @@ def test_a_degree_of_azimuth_is_not_a_degree_of_sky() -> None:
     def sky_step(alt_deg: float) -> float:
         ra1, dec1 = sky.radec_from_altaz(alt_deg, 180.0, lst, site.latitude_deg)
         ra2, dec2 = sky.radec_from_altaz(alt_deg, 181.0, lst, site.latitude_deg)
-        return float(abs(dec2 - dec1) + abs((float(ra2) - float(ra1)) * 0.75))
+        # RA is cyclic: a naive ra2 - ra1 reports ~269 degrees when the pair straddles 0.
+        # That made this test pass or fail depending on the time of day it was run.
+        gap_ra = abs((float(ra2) - float(ra1) + 180.0) % 360.0 - 180.0)
+        return float(abs(dec2 - dec1) + gap_ra * 0.75)
 
     assert sky_step(20.0) > 4.0 * sky_step(80.0), "overhead, 1 deg of az is not 1 deg of sky"
 

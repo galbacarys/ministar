@@ -89,3 +89,44 @@ def test_the_label_reads_like_a_shutter_speed() -> None:
     chosen = choose_exposure(optics_at(200), 41.3)
 
     assert chosen.label.endswith('"') or chosen.label.startswith("1/")
+
+
+def test_the_npf_rule_agrees_with_the_trail_budget_on_this_rig() -> None:
+    """The measured answer to "the 500-rule lets me go longer": the *precise* heuristic
+    (NPF, aperture- and pitch-aware) lands where the 2 px budget does, not where 500 does."""
+    from ministar.exposure import npf_seconds
+
+    optics = optics_at(135.0, pixel_um=4.434)
+    npf = npf_seconds(optics, 24.1, f_number=2.8)
+    # The physical ceiling, not the floored Tv: 0.99 s of ceiling lands on the 0.8 s shutter,
+    # which is the camera's granularity rather than a disagreement between the rules.
+    ceiling = choose_exposure(optics, 24.1).ceiling_s
+    assert npf == pytest.approx(ceiling, rel=0.05)
+
+
+def test_the_npf_rule_scales_with_declination_like_the_trail_rule() -> None:
+    from ministar.exposure import npf_seconds
+
+    optics = optics_at(135.0, pixel_um=4.434)
+    low = npf_seconds(optics, 0.0, f_number=2.8)
+    high = npf_seconds(optics, 60.0, f_number=2.8)
+    assert high / low == pytest.approx(1 / 0.5, rel=0.01)
+
+
+def test_the_500_rule_is_the_loose_heuristic() -> None:
+    """500/(f*1.6) = 2.3 s here: 4.7 px of trail, 2.7x the at-focus star size."""
+    from ministar.exposure import rule_of_500_seconds
+
+    optics = optics_at(135.0, pixel_um=4.434)
+    loose = rule_of_500_seconds(optics)
+    assert loose == pytest.approx(500 / (135 * 1.6))
+    assert optics.drift_px(dec_deg=24.1, seconds=loose) > 4.0
+
+
+def test_the_npf_rule_needs_a_focal_length() -> None:
+    from ministar.exposure import npf_seconds
+    from ministar.optics import Optics
+
+    optics = Optics(width_px=480, height_px=320, plate_scale_arcsec=6.0)
+    with pytest.raises(ValueError):
+        npf_seconds(optics, 0.0, f_number=2.8)

@@ -359,3 +359,58 @@ def test_without_an_override_the_measured_profile_is_used(tmp_path) -> None:
     ctx = Context(state=SessionState(), settings=settings, station=None, refresh=lambda: None)
 
     assert rig_for(ctx).focal_length_mm == 200.0
+
+
+def test_the_run_hud_reports_the_numbers_the_brief_asks_for() -> None:
+    """15 §6.4: accepted/rejected/why, integration, coverage, valid area, HFD, countdown."""
+    from ministar.run import RunSnapshot
+    from ministar.stack.accumulator import Coverage
+    from ministar.stack.stacker import StackStats
+
+    stats = StackStats(
+        width=2592,
+        height=1728,
+        bin_factor=2,
+        frames=12,
+        accepted=10,
+        rejected=2,
+        reasons=(("the mount moved (measured shift disagreed with the model)", 2),),
+        integration_s=125.0,
+        hfd_px=3.2,
+        stars=41,
+        coverage=Coverage(fraction=0.95, fully=0.80, rect=(100, 200, 1800, 1200)),
+        defect_fraction=0.004,
+        rotation_deg=-0.42,
+        jpeg=b"",
+        crop=(100, 200, 1800, 1200),
+        crop_rule="target",
+    )
+    text = screens.run_metrics_text(
+        RunSnapshot(state="running", frame=12, stats=stats, reframe_due_in_s=252.0, recoveries=2)
+    )
+    assert "2m 05s" in text  # integration, in minutes and seconds
+    assert "10 stacked" in text and "2 rejected" in text
+    assert "mount moved" in text
+    assert "95% seen" in text and "80% in every frame" in text
+    assert "1800 x 1200 px  (centred on the target)" in text
+    assert "3.2 px HFD" in text
+    assert "+0.42 deg" not in text and "-0.42 deg" in text
+    assert "in 4m 12s" in text
+    assert "2 bump(s) by re-solving" in text
+
+
+def test_the_run_hud_names_an_overdue_reframe_as_overdue() -> None:
+    from ministar.run import RunSnapshot
+    from ministar.stack.stacker import empty_stats
+
+    stats = empty_stats(2592, 1728, 2)
+    text = screens.run_metrics_text(
+        RunSnapshot(state="running", frame=1, stats=stats, reframe_due_in_s=-30.0)
+    )
+    assert "past due" in text
+
+
+def test_the_clock_reads_in_minutes_not_seconds_past_an_hour() -> None:
+    assert screens.clock_text(0) == "0m 00s"
+    assert screens.clock_text(65) == "1m 05s"
+    assert screens.clock_text(3661) == "1h 01m"

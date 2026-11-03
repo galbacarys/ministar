@@ -231,6 +231,7 @@ def build(
     target_dec_deg: float,
     target_radius_arcmin: float = 0.0,
     roll_direction: str | None = None,
+    interval_s: float | None = None,
 ) -> Overlay:
     """The picture for one frame of live view. Pure geometry: no UI, no camera."""
     if width <= 0 or height <= 0:
@@ -269,6 +270,7 @@ def build(
         optics=optics,
         pa_y_deg=roll_deg,
         target_radius_arcmin=target_radius_arcmin,
+        interval_s=interval_s,
     )
     goal = _project(plane_at(*goal_ra_dec), target_ra_deg, target_dec_deg)
 

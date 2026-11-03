@@ -99,6 +99,26 @@ class TangentPlane:
         centre_x, centre_y = self.centre_px
         return centre_x + x_along / scale, centre_y - y_along / scale
 
+    def deproject_pixels(self, x, y) -> tuple[np.ndarray, np.ndarray]:
+        """Pixel coordinates back to sky positions: the exact inverse of :meth:`project`.
+
+        Needed by the stacker, which has pixels (the reference frame) and wants the sky
+        direction to look up in the *present* frame (``stack/transform.py``). Written as the
+        algebraic inverse of the forward map rather than a search, so a round trip is exact to
+        floating point and a test can assert it.
+        """
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        scale = math.radians(self.plate_scale_arcsec / 3600.0)
+        pa = math.radians(self.pa_y_deg)
+        x_along = (x - self.centre_px[0]) * scale
+        y_along = -(y - self.centre_px[1]) * scale
+        if self.east_left:
+            x_along = -x_along
+        xi = x_along * math.cos(pa) + y_along * math.sin(pa)
+        eta = -x_along * math.sin(pa) + y_along * math.cos(pa)
+        return deproject(self.ra_deg, self.dec_deg, xi, eta)
+
     def inside(self, x: np.ndarray, y: np.ndarray, margin_px: float = 0.0) -> np.ndarray:
         return (
             (x >= margin_px)

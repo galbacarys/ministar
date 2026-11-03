@@ -382,3 +382,137 @@ is a small enough set to package for an SBC.
 - Does the count-map hole filler ever visibly differ from a proper defect map? Worth an A/B on a
   known-bad sensor if one turns up.
 - Do we expose the rejected frames as thumbnails (03 §8.6 argues yes) or only as counts?
+
+## RUN, built — and the four things measuring it changed
+
+**Status:** implemented 2026-10-28. `src/ministar/stack/` (frames, accumulator, stretch,
+transform, stacker) and `src/ministar/run/` (the capture loop), driven by the RUN page.
+
+The pipeline is §2–§6 as written: super-pixel bin → sky subtract → warp by the predicted
+transform → σ gate → accumulate → frozen STF → JPEG. Flats are supported per-frame in
+sensor coordinates (§7.3) but nothing produces one yet; the reframe sub-cycle of 12 §6 is built: the countdown is a progress bar, the loop stops at the interval and embeds the POINT page, and it resumes by itself once the aim has held for fifteen seconds (12).
+
+Measured on the fake rig at 4.5 MP, Windows laptop, 18 MP synthetic frames:
+
+| stage | measured | §2.2 estimate |
+|---|---|---|
+| super-pixel bin + sky subtract | 103 ms | 0.05–0.09 s |
+| homography fit | 0.3 ms | — |
+| warp + mask + σ gate + accumulate | 365 ms | 0.05 s (understated) |
+| STF + resize + JPEG (1200 px, q85) | 121 ms | 0.08 s |
+| **total, mono** | **~0.59 s** | ~0.4 s |
+| preview payload | 239 KB at 1200x800 | ~150 KB |
+
+A real CFA frame is three planes rather than the fake's one, so the warp and accumulator
+terms scale by ~3 and the real path is ~0.9–1.0 s per frame. Inside the 2 s exposure it
+has to fit in, and 4× cheaper at bin 4. The §2.2 table's warp+accumulate row (0.05 s at
+4.5 MP) was optimistic by roughly an order of magnitude on this CPU; everything else held.
+
+**1. The transform has to be projective, not affine.** The composition of two tangent-plane
+projections around a pole rotation is a homography. An affine (6 parameters) fitted to the
+same correspondences is exact at 480 px and **6.5 px out at the corners of the full field
+after 15 minutes** (9.7x6.5 deg at 135 mm) — 44 arcseconds of smear, growing with the run.
+The homography (8 parameters) fits to machine precision at every elapsed time tested
+(60, 300, 900 s). The lesson is not "affine is inaccurate"; it is that the whole premise of
+§1 — *the transform is known* — is only true if the model family matches the physics.
+
+**2. A sky-subtracted stack breaks the textbook STF.** Two independent failures, both silent:
+``shadows = max(0, median − 2.8σ)`` clamps to zero when the median is zero (it is, after
+§2's per-frame subtraction), which drives the midpoint solve to ``m = 0.0014`` — a nearly
+binary transfer; and a 99.9th-percentile white point lands **inside the noise** on a
+star-sparse frame (measured: white = 5.7 ADU while stars reached 225). Together they turned
+the preview into full-contrast static. The fix is to let shadows go negative and to take
+white as the frame maximum: the stretch is about "the brightest real thing is white", not
+"the 99.9th percentile is white".
+
+**3. Coverage is geometric, the count map is photometric.** Using ``count >= frames`` as
+the "covered by every frame" mask produced a lace curtain — the σ gate rejects a scattered
+pixel here and there, so almost no 16 px block was fully accepted and the inscribed
+rectangle came back empty on a frame that was 50% covered. §3.2 already says to track
+``seen`` separately; coverage and the shrinking rectangle use ``seen``, while ``count``
+stays the weight and the defect map (§8.2).
+
+**4. HFD cannot gate a saturated field — and must not pretend it can.** The star detector
+correctly refuses to measure saturated candidates, so a bright field (or a saturated patch
+in the crop) reports **zero stars on a frame that is plainly full of them**. Rejecting on
+"no stars" therefore rejected every frame of a dense synthetic field, and would reject
+bright real ones. The frame gate uses a *signal* test instead (brightest pixel above
+8σ of the background), which is saturation-proof, and the HFD/focus gate only acts when
+an HFD was actually measured. "Cannot measure" is not "bad frame".
+
+### A bump is recovered by re-solving, not by re-registering
+
+§4 called for an astroalign fallback. Building it showed the better answer is already in
+the building: ASTAP. When a frame's measured shift disagrees with the model, that frame is
+on disk and already decoded, so it costs one hinted solve to ask *where the camera is now*
+— including its roll and, via the CD matrix, a focal-length change from focus breathing.
+Astroalign could re-register the frame but would not answer that question.
+
+The accumulator keeps its canvas. ``LiveStack.rebase`` composes a homography from canvas
+pixels to the new solve's plane with the fresh model, so every earlier frame stays valid and
+the frame that triggered the solve is accumulated. Measured on the fake rig at full size on
+a 0.05° nudge (27 sensor pixels): one rejection, one **0.24 s** hinted solve, then stacking
+continues, with the accumulated mean still matching the first frame to **0.04 px**. The
+overlap between the old canvas and the new frame is reported; below 50% the HUD says the run
+is mostly a new field rather than quietly stacking almost nothing. A failed solve costs a
+message and a 20 s cooldown, not a crash.
+
+The same mechanism serves the reframe (12 §6): the solve that confirms the new aim is the
+one that reprojects the canvas, so a re-point costs no extra solver run and the frames
+already taken are not thrown away.
+
+### A fake-camera bug that would have hidden all of this
+
+``FakeCamera.capture_to`` rendered with ``frame=self._frames + 1`` and never advanced the
+counter. The counter is the noise seed, so every captured frame carried **the same noise
+realisation** — and identical noise correlates perfectly with itself at zero shift. The bump
+detector therefore measured a zero residual no matter what the mount did: 118 frames of a
+deliberately bumped run were accepted with no rejection at all, and the feature looked absent
+rather than broken. Real sensors have independent noise per frame, and the fake now advances
+its counter too. General lesson worth keeping: any frame-to-frame measurement on synthetic
+data is only meaningful if the synthetic noise is independent per frame.
+
+### What the preview shows: centred on the target, and aimed dark
+
+**Noise falls as `1/sqrt(N)`, and the alignment does not drift.** Measured over 60 frames at
+full size: background sigma 2.00 -> 0.85 (N=5) -> 0.44 (15) -> 0.29 (30) -> **0.20** (60),
+slightly better than `1/sqrt(N)` because of the gate; the brightest star's centroid moved
+**0.00 px** from N=5 to N=60 and HFD fell 2.99 -> 2.58 as noise left the profile. So the
+per-frame homography and its interpolation are doing what §1 predicts.
+
+**The frozen 0.25-midtone stretch was hiding that improvement.** At N=60, 99% of the output
+lay between 0.25 and 0.35 — a flat grey wash whose *noise* dominated the visible change. The
+preview now targets **0.06**: the sky sits at 15/255 (dark adaptation, 14 §6) and the
+displayed noise falls 5.19 -> 2.68 -> 1.24 over the same frames. Re-measuring a
+σ-normalising stretch on a timer would have undone exactly that: measured, a fresh stretch at
+frame 60 was *noisier* (p99 93) than the frame-5 one (p99 73), because it stretched the newly
+quiet background harder. The freeze stays; the display is re-measured only when the **sky**
+changes materially (> 1.5x its level at the time of the stretch: moonrise, twilight, cloud).
+That answers §11.5 — a slow tracking update is the wrong shape, a reactive one is right.
+
+**The preview crops around the target, not around the covered area.** The first version
+cropped to the fully-covered intersection, which fixed the noisy bands but moved the
+*subject*: the target is fixed on the aligned canvas while the intersection shrinks away from
+one side, so a target aimed at the middle ends up near an edge of the crop. The crop is now
+centred on the target's canvas pixel, sized by the canvas:
+
+| target in canvas | crop | note |
+|---|---|---|
+| centred | 100% (2591x1727 of 2592x1728) | whole frame, target centred |
+| 10% off-centre | 85% (2216 px wide) | full height |
+| 20% off-centre | 71% (1842 px wide) | full height |
+| within 12% of an edge | falls back to the usable rectangle | a centred crop would be 4% |
+
+With the interval-centred aim of 10 §5 the target sits at the centre of the *fully-covered*
+rectangle, so the two rules agree and the crop is the whole usable field; the target-centred
+fallback remains for a manually aimed mount. The last row is the entry-corner strategy doing
+what it says: it starts the target
+2% from an edge, where centring is a 25x zoom, not a preview. The HUD names the fallback and
+what would fix it ("aim the target nearer the middle to centre it") rather than switching
+rule silently. Centring is a *window* on the canvas, not a re-anchor: the accumulated frames
+and the drift model are untouched.
+
+**Still open, in the order they matter:** weighting by ``1/sigma_f^2`` (deferred as planned);
+meridian-flip and long-gap behaviour of the reframe's auto-resume on a real body; and a real
+measurement of libraw decode cost, which is the largest remaining unknown in the budget
+(§11.1).

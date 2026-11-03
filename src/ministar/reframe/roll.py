@@ -62,6 +62,33 @@ def drift_angle_from_long_axis(*, psi_deg: float, parallactic_deg: float) -> flo
     return (180.0 - pa_y) % 180.0
 
 
+def roll_inputs(
+    *,
+    solved_pa_deg: float | None,
+    camera_roll_deg: float | None,
+    camera_reports_pa: bool,
+    parallactic_deg: float,
+) -> tuple[float, float] | None:
+    """The two angles ``roll_advice`` needs, or ``None`` when it cannot know.
+
+    The distinction this exists to keep: a *position angle* already includes the
+    parallactic angle, while a *clamp angle* read off the head does not. Adding q to a PA
+    double-counts it, and on the fake camera -- whose reported roll **is** its PA -- that
+    error is the whole parallactic angle. Measured for M45 at a 39 deg parallactic angle:
+    the advice told the user to rotate 39 deg, which rotated the drift *into* the diagonal
+    it was trying to avoid, costing 8% of the frame over a 5-minute interval.
+
+    Returns ``(q_used_in_roll_advice, psi)``; q is zero when the PA is known.
+    """
+    if solved_pa_deg is not None:
+        return 0.0, float(solved_pa_deg)
+    if camera_reports_pa and camera_roll_deg is not None:
+        return 0.0, float(camera_roll_deg)
+    if camera_roll_deg is None:
+        return None
+    return float(parallactic_deg), float(camera_roll_deg)
+
+
 @dataclass(frozen=True)
 class RollAdvice:
     """What to do with the camera, in the units of the thing being turned."""
@@ -107,4 +134,5 @@ __all__ = [
     "drift_angle_from_long_axis",
     "parallactic_angle",
     "roll_advice",
+    "roll_inputs",
 ]

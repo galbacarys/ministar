@@ -78,7 +78,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 06 | [stacking-backends.md](docs/research/06-stacking-backends.md) | Siril/ASTAP/DSS CLI vs. owning the numerics in numpy. |
 | 07 | [altaz-reframing-spec.md](docs/research/07-altaz-reframing-spec.md) | Alt/az reframing: per-axis error, `cos(alt)`, tolerances, degeneracies. |
 | 08 | [edsdk-binding-plan.md](docs/research/08-edsdk-binding-plan.md) | Fork pyedsdk; port N.I.N.A.'s Canon knowledge. |
-| 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit choice; PySide6 vs Tk, threading, packaging. |
+| 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 | 10 | [target-catalog-and-reframe-envelope.md](docs/research/10-target-catalog-and-reframe-envelope.md) | OpenNGC catalog; the drift envelope and reframe cadence. |
 | 11 | [autofocus.md](docs/research/11-autofocus.md) | Lens autofocus: drive primitive, HFD, V-curve fit; MF required. |
 | 12 | [session-flow.md](docs/research/12-session-flow.md) | The setup wizard: preflight, target, parameters, focus, point, run. |
@@ -86,7 +86,6 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 14 | [portability-browser-ui-and-linux-sbc.md](docs/research/14-portability-browser-ui-and-linux-sbc.md) | Browser UI (NiceGUI), libgphoto2 port, SBC deployment. |
 | 15 | [stacking-pipeline-and-calibration.md](docs/research/15-stacking-pipeline-and-calibration.md) | Per-frame accumulator, why no dark library, flats at the end. |
 | 16 | [verified-hardware-eos-60d.md](docs/research/16-verified-hardware-eos-60d.md) | First hardware run: STM focus-by-wire works, 0xA102 is warm-up, HFD fabricates stars. |
-| 09 | [python-gui-windows.md](docs/research/09-python-gui-windows.md) | GUI toolkit: PySide6 vs Tk/wx/Dear PyGui/webview, measured cold start, bundle size, 24 MP preview path, threading contract, LGPL bundling. |
 
 ## Findings that change the design
 
@@ -147,13 +146,20 @@ src/ministar/
   focus/           autofocus: HFD metric, V-curve fit, motion planner, calibration
   session/state.py the setup wizard as a dependency-checked state machine
   io/              fits.py (reader + writer), tiff.py (EXIF and pixel data)
-  stack/           not written yet (design in 03, 06)
-  reframe/         not written yet (spec in 07)
+  stack/           live stacking: frames, transform (the known model), accumulator,
+                   stretch, stacker (warp, gate, accumulate, crop, encode)
+  run/             the RUN loop: runner.py (capture, stack, pace, reframe) and
+                   reframe.py (how long an aim must hold before resuming)
+  reframe/         roll.py = which way to turn the body (10 §2.1c); the knob-turn
+                   half waits on the head profile (13)
+  pointing.py      where the target should start, and which way to nudge (10 §5)
+  exposure.py      sub-length limits: pixel trail, NPF, the 500-rule, Canon's Tv grid
   ui/              NiceGUI wizard: screens.py, theme.py (red-on-black), app.py
 tools/
   sync.sh          rsync to C:\ministar\build, optionally run there
   setup.bat        create the Windows venv (once)
   ministar.bat     the only Windows entry point
+  ui.bat           launch the wizard (the camera's entry point)
 ```
 
 ## Development
@@ -189,9 +195,13 @@ Two things worth knowing before editing:
 
 ## Status
 
-Scaffolded. The algorithms that can be proven without hardware **are** proven: 77 tests, and the
-commit history records five real defects found by running against the user's own frames rather
-than only synthetic data. Nothing has yet touched the camera.
+The wizard runs end to end, from PREFLIGHT to DONE, on Windows. 575 tests pass, and the
+commit history records the defects found by running against the user's own frames and the real
+body rather than only synthetic data. Two different kinds of confidence apply, and the
+difference matters when reading the table below: the **camera** path has been verified on the
+hardware it will ship against (an EOS 60D), while the **stack** path has so far only seen
+synthetic frames. The fake rig is a real star field -- decoded from ASTAP's own database -- but
+it is still one mono plane, not three CFA planes of independent sensor noise.
 
 **Working**
 
@@ -199,23 +209,27 @@ than only synthetic data. Nothing has yet touched the camera.
 |---|---|
 | ASTAP driver | complete; hinted solve measured at **0.74 s** |
 | Focus: HFD metric, V-curve fit, motion planner, routine | complete, validated on real frames |
+| Canon backend (EDSDK) | enumerate, session, live view, still capture to file, ISO/Tv/Av write + read-back: **verified on the 60D**. `capture()` (a decoded array) is deliberately absent -- the loop reads the file the body produced |
+| Live stacking | complete and measured on the fake rig: **~0.59 s/frame** at 4.5 MP, projective transform, sigma gate, frozen STF (15) |
+| RUN loop + reframe sub-cycle | complete: start/pause/stop, measured pacing, bump -> re-solve -> rebase, auto-resume after the aim holds 15 s |
+| POINT: roll advice, entry point, nudges | complete (10 §2.1c, §5) |
+| Exposure limits | trail model, NPF, 500-rule shown side by side rather than a gate (03) |
 | Session state machine | complete (linear wizard, guards, persistence) |
 | Preflight / config / Windows entry points | complete, verified on Windows |
+| UI wizard | complete through RUN and DONE (NiceGUI); `ui.bat`, plus `--fake` with no hardware |
 | FITS reader, `ministar hfd` | complete |
 
 **Pending implementation** (designs exist, code does not)
 
 | Item | Brief | Note |
 |---|---|---|
-| EDSDK camera backend | 08 | the last untested assumption in the whole project |
-| Live stacking | 03, 06 | in-process numpy; Siril only for the end-of-session restack |
-| Reframe geometry (envelope, corner, turns) | 07, 10, 13 | the maths is verified; the code is not written |
-| `CALIBRATE` phase + head profile store | 12, 13 | enum member, guard, JSON store |
-| UI | 09, 14 | NiceGUI (supersedes PySide6); browser + native wrapper |
+| `CALIBRATE` phase + head profile store | 12, 13 | no `Phase` member; `render_calibrate` is a `_not_implemented` stub |
+| Knob-turn instructions | 07, 13 | roll advice exists; degrees -> turns needs the head profile above |
+| A run on real frames | 15 | the stack path has never seen a CFA frame; dcraw decode cost is the largest unmeasured term in the per-frame budget |
+| Calibration frames | 15 | the flat divide is wired per frame in sensor coordinates; nothing produces a flat yet. No darks, no bias |
+| End-of-session restack | 06 | Siril as a subprocess; live stacking does not use it |
 | libgphoto2 camera backend | 14 | for the Linux/SBC target |
-| Live stack accumulator | 15 | sum/count/M2 at display res; no dark library |
-| Canon focus path | 16 | **verified on hardware**; STM lens drive works |
-| Calibration frames | 15 | flats terminal + optional; no darks, no bias |
+| Native window / packaging | 09, 14 | browser UI works; `--native` and an installer do not exist yet |
 
 **Outstanding research / validation**
 
@@ -227,21 +241,23 @@ than only synthetic data. Nothing has yet touched the camera.
   the entire instruction vocabulary depends on it.
 - Backlash magnitude on a real 3-way head is unmeasured, and it sets whether knob instructions can
   hit the aiming tolerance at all.
-- No decision recorded on the exposure planner that snaps to Canon's discrete Tv table.
+- The reframe's auto-resume has only been exercised on the fake rig. On a real body it depends on a
+  solve taken *after* the reframe began, and neither a meridian flip nor a long gap between
+  reframes has been observed (15, still open).
 
 ## Licence
 
 MIT -- see [LICENSE](LICENSE). It covers this project's own code.
 
-Three dependencies need care, and none of them change the licence of *our* code:
+Four dependencies need care, and none of them change the licence of *our* code:
 
 - **EDSDK.dll (Canon) is proprietary and is not covered by MIT.** It is never committed
   (`.gitignore` blocks `*.dll`) and is currently loaded from an already-installed application.
   Shipping it inside an installer, as 08 section 4 plans, is governed by Canon's SDK agreement
   rather than by this one.
-- **PySide6 is LGPL-3.0**, not permissive. It appears only as the optional `ui` extra and nothing
-  imports it. Brief 14 supersedes it with NiceGUI (MIT), so it should be replaced rather than
-  shipped -- doing so leaves no copyleft dependency in the runtime.
+- **PySide6 is gone, and should stay gone.** It is LGPL-3.0, it was only ever an optional `ui`
+  extra, and brief 14 replaced it with NiceGUI (MIT). Nothing imports it, so the runtime carries
+  no copyleft dependency; adding one back is the thing to avoid, not a thing to plan around.
 - **Siril (GPL-3.0)** and **ASTAP (MPL-2.0)** are only ever invoked as separate processes and never
   linked, which is what keeps this project's licence unaffected. The same reasoning must keep
   applying: do not import Siril.

@@ -98,3 +98,49 @@ def test_the_turn_is_never_the_long_way_round() -> None:
     for roll in range(-180, 180, 7):
         advice = roll_advice(psi_deg=roll, parallactic_deg=0.0)
         assert advice.degrees <= 90.0 + ALIGNED_TOLERANCE_DEG
+
+
+def test_a_position_angle_is_used_without_adding_the_parallactic_angle() -> None:
+    """The bug: the fake's roll *is* its PA, so adding q rotated the drift into the diagonal."""
+    from ministar.reframe.roll import roll_inputs
+
+    assert roll_inputs(
+        solved_pa_deg=39.0, camera_roll_deg=0.0, camera_reports_pa=False, parallactic_deg=39.0
+    ) == (0.0, 39.0)
+    assert roll_inputs(
+        solved_pa_deg=None, camera_roll_deg=39.0, camera_reports_pa=True, parallactic_deg=39.0
+    ) == (0.0, 39.0)
+
+
+def test_a_clamp_angle_still_needs_the_parallactic_angle() -> None:
+    from ministar.reframe.roll import roll_inputs
+
+    assert roll_inputs(
+        solved_pa_deg=None, camera_roll_deg=0.0, camera_reports_pa=False, parallactic_deg=39.0
+    ) == (39.0, 0.0)
+
+
+def test_without_a_roll_there_is_nothing_to_advise() -> None:
+    from ministar.reframe.roll import roll_inputs
+
+    assert (
+        roll_inputs(
+            solved_pa_deg=None, camera_roll_deg=None, camera_reports_pa=False, parallactic_deg=39.0
+        )
+        is None
+    )
+
+
+def test_a_north_up_image_is_aligned_whatever_the_parallactic_angle() -> None:
+    """M45 at q=39: the old advice said "rotate 39", which made the drift diagonal."""
+    from ministar.reframe.roll import drift_angle_from_long_axis, roll_advice
+
+    assert drift_angle_from_long_axis(psi_deg=0.0, parallactic_deg=0.0) == 0.0
+    assert roll_advice(psi_deg=0.0, parallactic_deg=0.0).direction == "none"
+    assert roll_advice(psi_deg=39.0, parallactic_deg=0.0).direction in {"cw", "ccw"}
+
+
+def test_the_fake_camera_declares_that_its_roll_is_a_position_angle() -> None:
+    from ministar.ui.station import FakeCamera
+
+    assert FakeCamera.reports_position_angle is True

@@ -237,6 +237,13 @@ sweep second because it depends on this:
 
 ## 5. POINT — getting the target in the right corner
 
+**Updated 2026-10-28.** The marker is the centre of the *retained* rectangle, not the frame
+corner: with the chosen interval the target starts at ``centre - d/2`` along the drift, so it is
+centred in the usable field and ends the mirror-image distance downstream (10 §5). The roll
+advice now takes the image's position angle directly when it is known (a solve, or the fake's
+roll) and only adds the parallactic angle to a *clamp* angle read off the head — the old code
+added it to the fake's PA and told the user to rotate 39 deg into the diagonal.
+
 The subtle step. It is not "centre the target" (10 §5): the drift direction is fixed
 by physics, so the target must start at the **upstream** corner of the envelope and
 be allowed to cross.
@@ -351,6 +358,41 @@ phase (§6).
 
 Deliberately unimplemented: anything that needs a UI to be meaningful, and the
 wizard's ordering of *prompts* rather than its ordering of *dependencies*.
+
+**RUN (2026-10-28).** The loop is `src/ministar/run/`, and the page only starts, stops and
+draws it: the runner is a process-wide singleton, so a refresh or a phone reconnecting sees
+the run that is actually happening rather than a new one. Four choices worth keeping:
+
+- **The station is suspended, not shared.** The camera pump stops while a run owns the
+  camera, and captures go through the station's lock — EDSDK is never entered from two
+  threads, and live view is not running through a shutter release (§02).
+- **Pacing is measured from the start of each frame**, so the cadence does not drift by the
+  capture's own duration; a slow frame makes the next one immediate rather than banking
+  time.
+- **Fake frames go to a temporary directory** and are deleted on stop. Real frames are the
+  session's originals and stay in `data/frames`.
+- **A bump is recovered in place.** The frame whose measured shift disagrees with the model
+  is solved with ASTAP and the model rebased onto the same canvas (15), so a nudge costs one
+  rejection and a fraction of a second instead of the night. The loop only asks the user to
+  re-point when that solve fails or the new field barely overlaps the old one.
+- **The preview is cropped to the usable rectangle and the sky is dark.** The display does
+  not show the partially-covered edges (they are noisier and make the picture look soft), and
+  the stretch targets a dark background so the falling noise stays visible instead of being
+  re-normalised away (15).
+- **The reframe is a sub-cycle inside RUN, and it reuses POINT rather than a copy.** The
+  countdown is a progress bar over the interval; when it fills, the loop stops the shutter
+  and the RUN page embeds the POINT renderer — live view, entry marker, solve, and the
+  fake-mount controls — with the instruction naming the corner in image terms ("put the
+  target on the top-left marker", 10 §5). No parameter or target re-selection.
+- **It resumes by itself once the aim has *held*.** Fifteen seconds inside the tolerance of
+  10 §5 (5', or 5% of the frame height), continuous rather than accumulated: a hand sweeping
+  through the marker must not resume the run mid-nudge. A camera that reports where it looks
+  (the fake) is judged live; a real body needs a solve taken after the reframe began, because
+  one taken before describes the old aim. "continue now" overrides the wait.
+- **Resuming rebases the stack onto the resume solve.** The mount has moved by most of a
+  frame, so the loop is not restarted and the old frames are not discarded: the solve that
+  confirmed the aim is also the one that reprojects the canvas (15). The interval, and the
+  bar, start again from zero.
 
 ---
 

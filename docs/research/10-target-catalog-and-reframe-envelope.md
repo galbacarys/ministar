@@ -137,6 +137,15 @@ depends on focal length, declination *and* camera roll.
 
 ### 2.1c Camera roll is worth an instruction (measured)
 
+**Measured for M45 (dec 24) at 135 mm over 5 minutes:** 608 px of drift. Aligned with the long
+axis, the frame retains **88.3%**; 39 deg off it (a north-up clamp at the Pleiades' typical
+parallactic angle) retains **80.8%**, and the time to 60% retention falls from **17.1 to
+11.2 min**. So "corner to corner" is *not* better: the diagonal path is longer, but the frame
+loses height as well as width, and the retained rectangle is an axis-aligned box either way.
+The one thing to get right is that a **position angle is not a clamp angle**: a solved PA (or
+the fake camera's roll, which *is* a PA) already contains the parallactic angle. Adding it again
+rotated the advice into the diagonal it was trying to avoid.
+
 The drift direction is set by `ψ`, i.e. by how the camera happens to sit in its clamp. But the
 *retained area* depends on the drift direction relative to the frame's aspect ratio. Maximum
 drift achievable for 80% retention, by drift angle from the frame's long axis:
@@ -699,6 +708,28 @@ Two implementation notes:
 ---
 
 ## 5. Entry and exit corners
+
+### Where the start point actually goes (measured 2026-10-28)
+
+The entry *corner* was a proxy for "the longest run": start the target at the upstream edge and
+it can travel the whole frame. Against a *chosen* interval that proxy is wrong about the
+framing. The retained rectangle is ``[0, W-1-d]``, so an edge start leaves the target at the
+**edge** of the usable picture for the entire run. Starting at ``(W-1-d)/2`` — the centre of the
+retained rectangle — costs nothing, because ``d`` sets the retained area, not the start point.
+
+| start rule | target in the usable frame | retained @ 5 min (M45, 135 mm) |
+|---|---|---|
+| entry edge (``centre - chord/2``) | 1.6% | 88.3% |
+| **centre of the retained rect** (``centre - d/2``) | **50.0%** | **88.3%** |
+
+``best_start`` takes ``interval_s`` and uses the second rule; without an interval it keeps the
+edge rule ("as long as possible"). The end is symmetric about the frame centre, so the target
+sweeps from 44% to 56% of the frame rather than corner to corner. That also means the reframe
+marker sits near the centre, and the instruction reads "put the target on the centre marker".
+
+⚠️ **Do not confuse this with aiming *at* the target.** ``centre`` here is the frame centre and
+``centre - d/2`` is 44% across for a 5-minute interval; aiming at the target (50%) leaves only
+``W/2`` of travel before it exits, whereas either rule above allows the full ``W``.
 
 The subtlety that must not be fudged: **the drift direction is fixed by physics** (celestial
 west). So "put it in the opposite corner" only works if the *opposite* corner is the **upstream**
