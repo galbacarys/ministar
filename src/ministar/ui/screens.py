@@ -53,6 +53,7 @@ from ministar.targets import Filters as TargetFilters
 from ministar.targets import Row, compute_visibility, filter_rows, top
 from ministar.ui import focus as focus_screen
 from ministar.ui import overlay
+from ministar.ui.preview import live_image
 from ministar.ui.station import Station
 
 #: Rows sent to the browser. Quasar renders client-side, so all ~13 000 would be
@@ -1550,7 +1551,7 @@ def render_run(ctx: Context) -> None:
     rig = rig_for(ctx)
     optics = rig.optics() if rig is not None else None
 
-    image = ui.image("").classes("mn-preview").style("max-width: 880px; width: 100%")
+    image = live_image(style="max-width: 880px; width: 100%")
     image.set_visibility(False)
     metrics = ui.label("").classes("mn-metrics")
     warning = ui.label("").classes("mn-warn")

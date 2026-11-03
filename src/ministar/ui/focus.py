@@ -34,6 +34,7 @@ from nicegui import ui
 from ministar.focus.driver import Direction
 from ministar.focus.routine import FocusResult, Start, autofocus
 from ministar.focus.station_driver import StationDriver
+from ministar.ui.preview import live_image
 from ministar.ui.station import FakeCamera, Snapshot, Station
 from ministar.ui.theme import install
 
@@ -85,7 +86,7 @@ def render_focus(
     runner = run_autofocus or (lambda driver: autofocus(driver, start=Start.AT_CURRENT))
 
     name_label = ui.label("").classes("mn-title")
-    preview = ui.image("").classes("mn-preview")
+    preview = live_image()
     metrics = ui.label("").classes("mn-metrics")
     warn = ui.label("").classes("mn-warn")
 
