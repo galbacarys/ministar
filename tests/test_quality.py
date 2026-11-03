@@ -64,8 +64,8 @@ def test_silence_is_not_stillness_but_it_is_also_not_an_accusation() -> None:
 
 
 def test_a_moving_mount_is_reported_in_terms_of_the_picture() -> None:
-    assert quality.motion_verdict(2.5) is None, "drift and noise live here"
-    verdict = quality.motion_verdict(9.0)
+    assert quality.motion_verdict(0.9) is None, "drift and noise live here"
+    verdict = quality.motion_verdict(6.0)
 
     assert verdict is not None and "mount moved" in verdict
 
@@ -98,16 +98,58 @@ def _feed(tracker: quality.Stillness, samples, *, step: float = 0.5) -> None:
 
 def test_a_drifting_sharp_sky_is_still() -> None:
     tracker = quality.Stillness()
-    _feed(tracker, [(-1.0, 2.6), (2.4, 2.6), (2.5, 2.7), (2.4, 2.6)])
+    _feed(tracker, [(-1.0, 2.6), (0.9, 2.6), (1.0, 2.7), (0.9, 2.6)])
 
     assert not tracker.moving
-    assert tracker.describe() == "mount still"
+    assert tracker.describe().startswith("mount still")
+
+
+def test_a_noisy_field_raises_its_own_threshold() -> None:
+    """The reported bug: a *static* scene read as moving.
+
+    Measured on an EOS 60D pointed at a fixed star field: 0.9 grey levels between frames, whole
+    spread 0.8-1.2 over 59 frames. The limit has to come from the field, because a noisier body
+    (higher ISO, darker lens) has a higher floor and a single constant cannot serve both.
+    """
+    tracker = quality.Stillness()
+    # A quiet field: this is the measured static case, and it must not fire.
+    _feed(tracker, [(0.9, 2.6), (1.0, 2.6), (0.9, 2.7), (1.1, 2.6), (0.9, 2.6), (1.0, 2.7)])
+    assert not tracker.moving, f"a static field fired: {tracker.describe()}"
+
+    # A noisier body: a floor of ~4 levels raises the limit with it, so 5.0 is still quiet.
+    noisy = quality.Stillness()
+    _feed(noisy, [(4.0, 2.6), (4.2, 2.6), (3.9, 2.7), (4.1, 2.6), (4.0, 2.6), (4.1, 2.7)])
+    noisy.observe(_Snap(5.0, 2.6), 2.6)
+    assert not noisy.moving, "the limit did not follow the field's own noise"
+    assert noisy.threshold >= 3 * 3.9
+    assert "of" in noisy.describe(), "the readout should say what it is comparing against"
+
+
+def test_a_real_bump_still_fires_above_a_noisy_floor() -> None:
+    """Raising the limit must not make the gate deaf: a hand moves whole cells, not 10%."""
+    tracker = quality.Stillness()
+    _feed(
+        tracker,
+        [(4.0, 2.6), (3.9, 2.6), (4.1, 2.6), (4.0, 2.6), (3.9, 2.6), (4.0, 2.6), (4.1, 2.6)],
+    )
+    assert not tracker.moving
+
+    tracker.observe(_Snap(40.0, 2.6), 3.0)
+    assert tracker.moving
+    assert "40.0 levels between frames" in tracker.describe()
+
+
+def test_without_a_floor_the_old_behaviour_stands() -> None:
+    """A synthetic field has no noise to measure; the absolute floor is what it gets."""
+    assert quality.motion_threshold(-1.0) == quality.MOVING_LEVELS_PER_FRAME
+    assert quality.motion_verdict(1.0) is None
+    assert quality.motion_verdict(5.0) is not None
 
 
 def test_a_defocused_frame_is_not_mistaken_for_a_moving_mount() -> None:
     """Stably soft means focus; erratically soft means the mount. This is the distinction."""
     tracker = quality.Stillness()
-    _feed(tracker, [(2.4, 6.1), (2.5, 6.0), (2.4, 6.2), (2.3, 5.9)])
+    _feed(tracker, [(0.9, 6.1), (1.0, 6.0), (0.9, 6.2), (0.8, 5.9)])
 
     assert not tracker.moving
     assert tracker.hfd_spread < quality.HFD_UNSTABLE_FRACTION
@@ -115,16 +157,18 @@ def test_a_defocused_frame_is_not_mistaken_for_a_moving_mount() -> None:
 
 def test_a_hand_on_the_knob_shows_up_in_the_picture() -> None:
     tracker = quality.Stillness()
-    _feed(tracker, [(9.0, 3.1), (2.4, 3.0), (7.0, 2.9), (2.4, 3.2)])
+    _feed(tracker, [(9.0, 3.1), (0.9, 3.0), (7.0, 2.9), (0.9, 3.2)])
 
     assert tracker.moving
-    assert "levels/s" in tracker.describe()
+    assert "between frames" in tracker.describe()
 
 
 def test_sharpness_swinging_is_enough_on_its_own() -> None:
     """The signal that survives when the thumbnail rate is too deaf to see a small bump."""
     tracker = quality.Stillness()
-    _feed(tracker, [(2.4, 3.1), (2.4, 6.8), (2.4, 2.9), (2.4, 5.4)])
+    # A sustained swing: the sharpness is not settling, which is the mount (or the focus)
+    # rather than frame noise. Six samples, because the spread needs a quartile to exist.
+    _feed(tracker, [(0.9, 3.1), (0.9, 6.8), (0.9, 2.9), (0.9, 5.4), (0.9, 3.3), (0.9, 6.1)])
 
     assert tracker.moving
     assert "sharpness swinging" in tracker.describe()
@@ -132,7 +176,8 @@ def test_sharpness_swinging_is_enough_on_its_own() -> None:
 
 def test_samples_older_than_the_window_are_forgotten() -> None:
     tracker = quality.Stillness(window_s=2.0)
-    _feed(tracker, [(9.0, 3.0), (2.4, 3.0), (2.4, 3.0), (2.4, 3.0), (2.4, 3.0), (2.4, 3.0)])
+    # One bump at t=0, then quiet: the window is 5 s, so the bump must be forgotten.
+    _feed(tracker, [(9.0, 3.0), (0.9, 3.0), (0.9, 3.0), (0.9, 3.0), (0.9, 3.0), (0.9, 3.0)])
 
     assert not tracker.moving, "the bump was five samples ago"
 
@@ -149,3 +194,39 @@ def test_one_failure_is_bad_luck_and_two_are_a_pattern() -> None:
     assert not quality.should_hold_off(1)
     assert quality.should_hold_off(2)
     assert quality.should_hold_off(3)
+
+
+def test_hfd_jitter_on_a_static_field_is_not_movement() -> None:
+    """Measured: 72 frames on a motionless 60D with a monitor starfield ran 4.81-7.10 px.
+
+    That is 38% as max-minus-min and 73% over some windows -- enough to call a motionless mount
+    moving. As an interquartile spread the same data is 12%, so the gate has to use the robust
+    statistic. Frame-to-frame jitter is the *measurement*, not the mount.
+    """
+    tracker = quality.Stillness()
+    jitter = [5.58, 5.08, 6.04, 5.68, 6.15, 6.07, 5.56, 6.73, 6.05, 6.86, 5.58, 4.89]
+    _feed(tracker, [(0.9, hfd) for hfd in jitter])
+
+    assert tracker.hfd_spread < quality.HFD_UNSTABLE_FRACTION
+    assert not tracker.moving, tracker.describe()
+
+
+# -- the operator's override -------------------------------------------------
+def test_the_override_never_holds_the_shutter() -> None:
+    """The gate is a guess about the picture; the operator can see the mount.
+
+    This exists because the gate was wrong on a *static* scene: a starfield displayed on a
+    monitor beats against the rolling shutter, and no amount of tuning makes a heuristic
+    reliable against every artefact of a test bench. "Inform, never block" applies to the gate
+    itself, so the decision has to be the operator's.
+    """
+    reading = 40.0  # far above any threshold
+    assert quality.motion_blocked(reading, ignore=True) is False
+    assert quality.motion_blocked(reading, ignore=False) is True
+
+
+def test_the_override_does_not_hide_what_was_seen() -> None:
+    """Turning the check off changes the decision, not the evidence: it can still be quoted."""
+    verdict = quality.motion_verdict(40.0)
+    assert verdict is not None and "40.0" in verdict
+    assert quality.motion_blocked(40.0, ignore=True) is False

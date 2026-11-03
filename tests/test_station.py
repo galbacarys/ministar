@@ -318,8 +318,9 @@ def test_a_failed_capture_still_gives_the_camera_back(live_station) -> None:
 
 def test_the_frame_after_a_capture_reports_no_motion(analysed) -> None:
     # Slow frames on purpose: the claim is about *one* published snapshot, so there has to be
-    # time to look at it before the next frame replaces it.
-    camera = GuardedCamera(frame_s=0.08)
+    # time to look at it before the next frame replaces it. 0.3 s, not 0.08: at 80 ms the full
+    # suite's CPU load was enough to publish two frames before the test looked.
+    camera = GuardedCamera(frame_s=0.3)
     station = Station(camera)
     station.start()
     try:

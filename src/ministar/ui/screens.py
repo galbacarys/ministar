@@ -19,6 +19,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 
 from nicegui import ui
 from nicegui.run import io_bound
@@ -1177,13 +1178,15 @@ def render_point(ctx: Context) -> None:
             # wait for it to be still before spending one. Bounded: if it never settles, say so
             # rather than hang.
             deadline = time.monotonic() + SETTLE_TIMEOUT_S
-            while stillness.moving and time.monotonic() < deadline:
+            while not ignore_motion.value and stillness.moving and time.monotonic() < deadline:
                 settle_label.text = f"{stillness.describe()} -- waiting for it to settle"
                 await asyncio.sleep(0.2)
             settle_label.text = ""
             # Off the event loop: a capture plus a blind solve is up to nine seconds, and the
             # page would be frozen for all of it -- including the live view it is showing.
-            solved = await io_bound(_solve, ctx, stillness)
+            solved = await io_bound(
+                partial(_solve, ctx, stillness, ignore_motion=bool(ignore_motion.value))
+            )
             report, note = solved if solved is not None else (None, "solve was cancelled")
             solve_note.text = note
             show_buttons()
@@ -1214,6 +1217,12 @@ def render_point(ctx: Context) -> None:
             solve_button = ui.button("capture and solve", on_click=run_solve).classes("mn-action")
             retry_button = ui.button("retry", on_click=retry_solve).classes("mn-retry")
             retry_button.set_visibility(False)
+            ignore_motion = ui.switch("ignore the movement check").classes("mn-body")
+        ui.label(
+            "the movement check compares the picture with itself frame to frame. It is a "
+            "guess: a starfield on a monitor, a dimming screen or a cloud edge can look like "
+            "a nudge. Turn it off to capture anyway -- a smeared frame will simply not solve."
+        ).classes("mn-dim")
         hold_label = ui.label("").classes("mn-warn")
         show_buttons()
 
@@ -1353,7 +1362,9 @@ def render_point(ctx: Context) -> None:
     ui.timer(0.25, tick)
 
 
-def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
+def _solve(
+    ctx: Context, stillness=None, *, ignore_motion: bool = False
+) -> tuple[SolveReport | None, str]:
     """Capture, convert to FITS, solve, and record the result in the session.
 
     ASTAP cannot read RAW (01 §9), so the capture is converted on the way through -- the same
@@ -1370,7 +1381,7 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     camera = getattr(station, "camera", None) if station is not None else None
     if station is None or camera is None or getattr(camera, "capture_to", None) is None:
         return None, "this camera cannot capture in this session (the fake one cannot)"
-    if stillness is not None and stillness.moving:
+    if stillness is not None and not ignore_motion and stillness.moving:
         return None, f"{stillness.describe()} -- wait for it to settle, then solve again"
     if ctx.settings.astap is None:
         return None, "astap_cli.exe not found -- run preflight"
@@ -1459,14 +1470,25 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
     # Was the mount moving while the shutter was open? The pump's own history answers this
     # even though the UI thread was blocked: a smeared frame is not worth a solver's time, and
     # "you moved" is a better sentence than "no solution found".
+    motion_note = None
     if station is not None and hasattr(station, "motion_since"):
         worst = station.motion_since(opened_at)
-        moved = quality.motion_verdict(worst)
-        if moved is not None:
+        # Against this field's own noise floor, which the page's tracker has been measuring.
+        # A fixed number cannot serve both a quiet sensor and a noisy one
+        # (quality.motion_threshold).
+        floor = stillness.noise_floor if stillness is not None else -1.0
+        moved = quality.motion_verdict(worst, noise_floor=floor)
+        if moved is not None and quality.motion_blocked(
+            worst, ignore=ignore_motion, noise_floor=floor
+        ):
             if converted is not raw:
                 raw.unlink(missing_ok=True)
             converted.unlink(missing_ok=True)
             return None, f"nothing solved: {moved}"
+        if moved is not None:
+            # The check is off by the operator's choice: keep the result and say what was seen,
+            # because a solve that lands on a smeared frame still tells them where they point.
+            motion_note = f"kept despite a movement reading: {moved}"
 
     solution = result.solution
     ctx.state.solve_failures = 0
@@ -1489,6 +1511,8 @@ def _solve(ctx: Context, stillness=None) -> tuple[SolveReport | None, str]:
         note += "  (blind: the hint missed, so the mount may have moved)"
     if focus_note is not None:
         note += f"\n{focus_note}"
+    if motion_note is not None:
+        note += f"\n{motion_note}"
     return report, note
 
 

@@ -599,6 +599,40 @@ Shipped as: `hfd_arcsec()`, `focus_verdict()`, `motion_verdict()`, `centre_crop(
 to 4 s for it to say "still" before capturing, and refuses to spend a capture or a solve while
 it says "moving".
 
+⚠️ **Corrected 2026-10-28: the unit was wrong, not just the number.** The threshold was 5.0
+"levels/s", calibrated on the fake. On a real 60D pointed at a *fixed* star field it reported
+"mount moving" at 9.5. Measured over 59 frames: the per-frame change on the 32x32 thumbnail is
+**0.9 grey levels** (whole spread 0.8-1.2) -- a quiet field -- and the preview arrives every
+**102 ms**. Dividing by that interval turned 0.9 into 8.8 "levels/s". So the metric was measuring
+the *preview rate* as much as the sky: noise is a property of the sensor and the JPEG, and it does
+not accumulate with time. No constant could have been right, because the fake's pump and a real
+body deliver frames at different intervals.
+
+`Snapshot.motion` is now **levels between frames** (no time division), and the limit is
+**relative to the field's own floor**: `max(1.5, 3 x p10 of the recent window)`. On the measured
+static field that is `max(1.5, 2.7)`, so 0.9 reads "mount still (0.9 of 2.7 levels between
+frames)"; a hand on the head moves whole cells, an order of magnitude beyond it. The *p10* rather
+than the median matters: measured with p25, a reading that sat at 18.9 for six seconds lifted its
+own limit to 18.3 and the gate went quiet while the scene was still changing.
+
+This is the same class of error as the focus sweep's fixed stride, and the same fix: derive the
+threshold from the measurement in front of you instead of carrying a number from another
+environment.
+
+**The HFD half of the gate had the same flaw.** Measured on the same static monitor starfield (72
+frames, 40 stars): HFD ran 4.81-7.10 px around a median of 5.99, which is **38%** as
+`(max-min)/median` and reached 73% over some 5 s windows -- enough to call a motionless mount
+moving. As an interquartile spread the same data is **12%**. So `Stillness.hfd_spread` is now
+IQR/median, and the 0.5 threshold has a 4x margin on a quiet field instead of a negative one.
+
+**And a gate about the picture must not overrule the operator.** A DSLR pointed at a monitor is a
+test bench with a million artefacts -- LCD refresh beating against the rolling shutter, moiré,
+gamma -- and no threshold survives all of them. The POINT page now has an explicit *ignore the
+movement check* switch: with it on, the settle wait and the post-capture motion veto are both
+skipped, and the reading is still reported ("kept despite a movement reading: ..."). That is the
+README's "inform, never block" applied to the gate itself: the operator can see the mount, and the
+gate cannot.
+
 **The motion threshold was guessed wrong by 250x, then measured.** The estimate was ~0.01 grey
 levels/s (a drifting sky moves one 32x32 thumbnail cell per 96 s). Measured on the fake: noise
 floor **2.6**, drifting **2.4**, a 2' nudge **2.4** -- drift and noise are *indistinguishable*,

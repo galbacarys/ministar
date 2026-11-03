@@ -440,9 +440,17 @@ class Snapshot:
     pending: int = 0
     #: Max thumbnail delta since the last pulse; -1 means "nothing to compare".
     changed: float = -1.0
-    #: How fast the picture is changing, in grey levels per second on the 32x32 thumbnail.
-    #: Drift is slow and steady and a hand on the mount is neither, so this is what separates
-    #: "the sky is moving" from "the user is still adjusting" (11 §"quality gate"). -1 = unknown.
+    #: How much the picture changed since the previous frame, in grey levels on the 32x32
+    #: thumbnail: the largest change of any single cell.
+    #:
+    #: **Per frame, not per second.** It was per second, and that was wrong: the change is a
+    #: property of the sensor and the JPEG, so dividing it by the frame interval makes the number
+    #: depend on the preview rate rather than on the sky. Measured on a static field at 102 ms
+    #: per frame, the per-frame change is 0.9 levels -- a quiet field -- while the same data
+    #: divided by the interval reads 8.8 levels/s and looked like movement.
+    #:
+    #: Drift is slow and steady and a hand on the mount is neither, so this separates "the sky is
+    #: moving" from "the user is still adjusting" (11 §"quality gate"). -1 = unknown.
     motion: float = -1.0
     #: The live view's pixel dimensions, for converting HFD to arcseconds.
     width: int = 0
@@ -528,7 +536,7 @@ class Station:
         self._thread: threading.Thread | None = None
         self._last_thumb: np.ndarray | None = None
         self._last_thumb_at: float | None = None
-        #: (monotonic time, levels per second) for the last few seconds, so a capture can ask
+        #: (monotonic time, levels per frame) for the last few seconds, so a capture can ask
         #: afterwards whether the mount was moving *while* the shutter was open.
         self._motion: deque[tuple[float, float]] = deque(maxlen=240)
         self._mark: np.ndarray | None = None
@@ -896,9 +904,10 @@ class Station:
                 changed = -1.0 if mark is None else float(np.abs(analysis.thumb - mark).max())
                 motion = -1.0
                 if self._last_thumb is not None and self._last_thumb_at is not None:
-                    gap = max(1e-3, now - self._last_thumb_at)
-                    delta = float(np.abs(analysis.thumb - self._last_thumb).max())
-                    motion = delta / gap
+                    # No division by the gap: see Snapshot.motion. The interval is the *pump's*,
+                    # not the sky's, and including it only made the reading a function of the
+                    # preview rate.
+                    motion = float(np.abs(analysis.thumb - self._last_thumb).max())
                     self._motion.append((now, motion))
                 self._last_thumb = analysis.thumb
                 self._last_thumb_at = now

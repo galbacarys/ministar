@@ -164,6 +164,20 @@ mid-session prompt would not be.
 ⚠️ Use the **live-view stream** for this, not stills. Live view at 10-30 fps is what makes
 the feedback feel immediate; a 1-2 s still per sample would make hunting miserable.
 
+### 4.2c The movement check is advisory (added 2026-10-28)
+
+POINT holds the shutter while the picture is changing faster than its own noise (`Stillness`), and
+vetoes a solve whose capture happened during movement. Both are heuristics about *pixels*, and a
+picture changes for reasons that have nothing to do with the mount -- a starfield on a monitor
+beating against the rolling shutter is the case that exposed it, at 0.9 grey levels per frame being
+read as movement until the unit and threshold were fixed.
+
+So the page carries an explicit **ignore the movement check** switch. With it on, the settle wait
+and the veto are skipped; the reading is still quoted in the result, because turning a check off
+should change the decision and not the evidence. The alternative -- a gate that cannot be
+overridden -- makes a heuristic the authority on something the operator can see and the software
+cannot.
+
 ### 4.2b When the routine fails, the hand still wins (added 2026-10-28)
 
 The automatic stage moves the lens, so a failed run does not leave the operator where they were:
