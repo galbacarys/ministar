@@ -167,7 +167,8 @@ tools/
   sync.sh          rsync to C:\ministar\build, optionally run there
   setup.bat        create the Windows venv (once)
   ministar.bat     the only Windows entry point
-  ui.bat           launch the wizard (the camera's entry point)
+  ui.bat           launch the wizard (the Windows entry point)
+  ui.sh            sync + launch the wizard from WSL (the dev entry point)
 ```
 
 ## Development
@@ -186,6 +187,49 @@ uv venv && uv pip install -e '.[dev]'
 
 One-time on the Windows side: `C:\ministar\build\tools\setup.bat`, then
 `tools\ministar.bat preflight`.
+
+### Running the app
+
+```bash
+./tools/ui.sh            # sync, then launch the console against the real camera
+./tools/ui.sh --fake     # synthetic stars, no camera attached
+./tools/ui.sh --stop     # stop the server
+./tools/ui.sh --restart  # stop, then launch
+```
+
+That is the whole procedure; `ui.sh` wraps the three steps that cost real time to
+rediscover when done by hand.
+
+1. **It syncs first.** Windows cannot open ext4 paths, so the app always runs from
+   the mirrored `C:\ministar\build`, never from this checkout (00 §2–3).
+2. **It launches detached.** A plain `cmd.exe /c tools\ui.bat` from WSL blocks: the
+   interop layer waits on the whole Windows process tree, so a server that is meant
+   to keep running looks like a hang. The app starts fine either way — the difference
+   is only whether your shell comes back.
+3. **It verifies from the Windows stack.** WSL2 runs in mirrored networking here, so
+   `curl http://localhost:8080` from bash can hit WSL's own stack and report a failure
+   that is not real. The script asks `curl.exe` instead (00 §5).
+
+Three things that bite when you drive it by hand instead:
+
+- **Check reachability from Windows**, not WSL:
+  `cmd.exe /c "curl.exe -s -o NUL -w %{http_code} http://127.0.0.1:8080/"`
+- **Stop by PID, not by the launcher.** A bound NiceGUI socket outlives the bash
+  process group; the next launch then fails with *only one usage of each socket
+  address* (00 §8). `netstat -ano | findstr :8080` gives the PID for
+  `taskkill /F /PID <pid>` — or just use `./tools/ui.sh --stop`.
+- **There is no console window; there is a log.** The server runs in the background and
+  writes to `C:\ministar\data\logs\ui.log` — `tail -f` it to watch a session, and read
+  it first when a launch fails. Want the live window back? Run
+  `C:\ministar\build\tools\ui.bat` from a Windows command prompt; that path blocks and
+  shows the output directly. The app binds all interfaces so a phone on the tailnet can
+  drive the session.
+
+**EDSDK.** The app borrows a copy that another program installed: N.I.N.A.'s first,
+Lightroom's second (`edsdk_ffi.BORROWED_DLLS`). Either is fine for development — that
+is what every hardware session so far has used. `EDSDK_PATH` overrides the choice.
+Our own copy belongs at `C:\ministar\tools\edsdk\EDSDK.dll` and is what the installer
+ships; it stays out of git because it is Canon's binary (08 §4).
 
 The console binds **all interfaces** (`0.0.0.0`) so it can be driven from a phone on
 the same private network -- Tailscale in practice. There is no authentication, so the
