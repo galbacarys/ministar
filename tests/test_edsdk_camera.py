@@ -74,6 +74,10 @@ class FakeFfi:
         self.refuse_properties = False
         self.clamp_properties = False
         self.opened_index: int | None = None
+        #: How many more open attempts fail before the body accepts a session. Models
+        #: the field failure: a killed process left the camera in PC live view.
+        self.open_failures = 0
+        self.evf_off_calls = 0
 
     def initialize(self) -> None:
         self.initialized = True
@@ -82,8 +86,15 @@ class FakeFfi:
         return list(self.devices)
 
     def open_camera(self, index: int = 0):
+        if self.open_failures > 0:
+            self.open_failures -= 1
+            raise edsdk_ffi.EdsdkError("EdsOpenSession", 0x00000081)
         self.opened_index = index
         return self.devices[index]
+
+    def evf_off(self) -> None:
+        self.evf_off_calls += 1
+        self.live = False
 
     def start_live_view(self) -> None:
         self.live = True
@@ -191,6 +202,29 @@ def test_connect_is_not_repeatable() -> None:
     cam.connect()
     with pytest.raises(RuntimeError, match="already connected"):
         cam.connect()
+
+
+def test_connect_clears_a_stale_live_view_it_did_not_start() -> None:
+    """A killed process leaves the body in EVF; opening must force the output back to none."""
+    fake = FakeFfi()
+    fake.live = True  # what a dead owner leaves behind
+    cam = camera_for(fake)
+
+    cam.connect()
+
+    assert fake.evf_off_calls == 1
+    assert not fake.live, "the stale stream was not cleared"
+
+
+def test_connect_retries_a_body_left_busy_by_a_killed_process() -> None:
+    fake = FakeFfi()
+    fake.open_failures = 3
+    cam = camera_for(fake)
+
+    info = cam.connect()
+
+    assert info.name == "Fake EOS"
+    assert fake.open_failures == 0, "the retry budget did not reach an open"
 
 
 def test_connect_with_no_camera_raises_unavailable() -> None:

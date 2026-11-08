@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ministar.optics import Optics
@@ -190,10 +190,49 @@ class RigProfile:
 
 
 def better_than(candidate: RigProfile, existing: RigProfile | None) -> bool:
-    """Should ``candidate`` replace ``existing``? Only if its provenance is better."""
+    """Is ``candidate`` the better *measurement of the same configuration*?
+
+    Only asks about geometry. Provenance compares two readings of one optical setup --
+    a solve measures arcsec per pixel, EXIF derives it from the reported focal length
+    and is about 3% off, typing is a guess. That ranking is only meaningful while the
+    setup is unchanged, so this does **not** decide whether a lens is still the one on
+    the camera. Use :func:`reconcile` for a fresh read; it applies this to the geometry
+    and takes the identity fields from the camera.
+    """
     if existing is None:
         return True
     return PROVENANCE_ORDER[candidate.source] > PROVENANCE_ORDER[existing.source]
+
+
+def reconcile(existing: RigProfile | None, candidate: RigProfile) -> RigProfile:
+    """Merge a fresh camera read into the stored profile. Two consumers, two rules.
+
+    *Session parameters* -- focal length, lens, camera -- describe the rig as it is
+    **right now**, and the camera is the only thing that can know that. The candidate's
+    values are taken unconditionally. A profile that keeps reporting 24 mm with a 100 mm
+    lens mounted is not being conservative, it is simply wrong.
+
+    *Stacking geometry* -- ``plate_scale_arcsec`` and where it came from -- feeds the
+    warp and the frame-fit math. There provenance still decides: a measured solve beats
+    a 3%-off EXIF derivation of the same configuration.
+
+    A changed focal length is not a disagreement about one configuration, it is a
+    different configuration, so the candidate's geometry replaces the old one instead of
+    being merged into it. Otherwise the camera's labels are ground truth and the geometry
+    keeps the stronger source.
+    """
+    if existing is None:
+        return candidate
+    if not existing.focal_matches(candidate.focal_length_mm):
+        return candidate
+    geometry = candidate if better_than(candidate, existing) else existing
+    # ``recorded`` belongs to the measurement, not to the label, so a pure identity
+    # refresh must not make the geometry look newly measured.
+    return replace(
+        geometry,
+        camera=candidate.camera or geometry.camera,
+        lens=candidate.lens or geometry.lens,
+    )
 
 
 def rig_path(data_directory: Path) -> Path:
@@ -234,6 +273,7 @@ __all__ = [
     "RigProfile",
     "better_than",
     "load",
+    "reconcile",
     "rig_path",
     "save",
 ]

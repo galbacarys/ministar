@@ -84,15 +84,23 @@ class StationDriver:
     def measure(self) -> FocusSample:
         """HFD at the current position, averaged over several frames.
 
-        The averaging is the point: see ``frames_per_measure``. Fewer frames than asked for is
-        not an error -- a slow camera or a closing screen returns what arrived, and the caller
-        is told how many frames the number came from.
+        The averaging is the point: see ``frames_per_measure``. The station may average
+        pixels before publishing (``Station.live_average``); when it does, fewer published
+        snapshots are collected so the number of raw frames spent per sample stays about
+        the same. Fewer frames than asked for is not an error -- a slow camera or a closing
+        screen returns what arrived, and the caller is told how many frames it came from.
         """
         snapshot = self.station.snapshot()
         if snapshot.error:
             return self._sample(snapshot.position, math.nan, 0, snapshot.error)
 
-        readings = self._frames(self.frames_per_measure)
+        # Each published snapshot may already be a pixel average of several live-view
+        # frames (Station.live_average). Keep the *raw* frame budget roughly constant:
+        # when the station averages, fewer snapshots are needed, and the averaging is
+        # what removes the detection noise a median of HFDs cannot.
+        average = max(1, int(getattr(self.station, "live_average", 1)))
+        wanted = max(1, math.ceil(self.frames_per_measure / average))
+        readings = self._frames(wanted)
         if not readings:
             # Live view is not delivering. Say so rather than inventing a measurement.
             return self._sample(

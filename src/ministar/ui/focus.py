@@ -25,15 +25,20 @@ Run it standalone::
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import threading
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
 
 from nicegui import ui
 from nicegui.run import io_bound
 
-from ministar.focus.driver import Direction
+from ministar.config import Settings
+from ministar.focus.driver import Direction, FocusSample
 from ministar.focus.routine import FocusResult, Start, autofocus, move_focus
 from ministar.focus.station_driver import StationDriver
 from ministar.ui.preview import live_image
@@ -63,6 +68,81 @@ class Stage(Enum):
     DONE = "done"
 
 
+def _log_line(path: Path | None, record: dict[str, object]) -> None:
+    """Append one JSON line. A broken log must never break a focus run."""
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def _log_sample(path: Path | None, run: str, sample: FocusSample) -> None:
+    """Record every measurement the routine makes, accepted or not.
+
+    Diagnostic on purpose: the interesting failure is a *shape* -- which arm improved,
+    where it turned, what the fit used -- and that cannot be recovered from the final
+    position alone. Written as it happens, so a run that is abandoned still leaves its
+    trail.
+    """
+    _log_line(
+        path,
+        {
+            "run": run,
+            "event": "sample",
+            "t": datetime.now().isoformat(timespec="milliseconds"),
+            "position": sample.position,
+            "hfd": round(sample.hfd, 5) if math.isfinite(sample.hfd) else None,
+            "stars": sample.star_count,
+            "accepted": sample.accepted,
+            "reason": sample.reason,
+        },
+    )
+
+
+def _log_result(path: Path | None, run: str, result: FocusResult) -> None:
+    """Record what the routine concluded, and the fit that took it there."""
+    fit = result.fit
+    _log_line(
+        path,
+        {
+            "run": run,
+            "event": "result",
+            "t": datetime.now().isoformat(timespec="milliseconds"),
+            "ok": result.ok,
+            "position": result.position,
+            "hfd": round(result.hfd, 5) if math.isfinite(result.hfd) else None,
+            "reason": result.reason,
+            "pulses": result.pulses,
+            "samples": len(result.samples),
+            "sweep_samples": result.sweep_samples,
+            "phases": result.phases,
+            "fit": None
+            if fit is None
+            else {
+                "best_position": round(fit.best_position, 3),
+                "best_hfd": round(fit.best_hfd, 5),
+                "a": fit.a,
+                "b": fit.b,
+                "c": fit.c,
+                "r_squared": round(fit.r_squared, 5),
+                "samples_used": fit.samples_used,
+                "samples_rejected": fit.samples_rejected,
+            },
+        },
+    )
+
+
+def _set_live_average(station: Station, frames: int) -> None:
+    """Apply the live-view averaging setting, if this station supports it."""
+    setter = getattr(station, "set_live_average", None)
+    if setter is not None:
+        setter(frames)
+
+
 def describe_result(result: FocusResult) -> str:
     """One honest line about how the automatic stage went."""
     if not result.ok:
@@ -78,6 +158,7 @@ def render_focus(
     *,
     on_accept: Callable[[Snapshot], None] | None = None,
     run_autofocus: Callable[[StationDriver], FocusResult] | None = None,
+    log_path: Path | None = None,
 ) -> None:
     """Draw the two-stage focus step into the current container.
 
@@ -98,9 +179,16 @@ def render_focus(
     def note(text: str) -> None:
         state["note"] = text
 
-    runner = run_autofocus or (
-        lambda driver: autofocus(driver, start=Start.AT_CURRENT, on_progress=note)
-    )
+    def logged_runner(driver: StationDriver) -> FocusResult:
+        run: str = state.get("run", "")  # type: ignore[assignment]
+        return autofocus(
+            driver,
+            start=Start.AT_CURRENT,
+            on_progress=note,
+            on_sample=None if log_path is None else lambda s: _log_sample(log_path, run, s),
+        )
+
+    runner = run_autofocus or logged_runner
 
     name_label = ui.label("").classes("mn-title")
     preview = live_image()
@@ -110,6 +198,16 @@ def render_focus(
     manual = ui.column().classes("w-full items-center")
     with manual:
         ui.label("1. hand focus").classes("mn-heading")
+        # Exposed because the right value trades preview rate for HFD stability, and that
+        # trade depends on the sky: four frames is the default, one is the fast view.
+        with ui.row().classes("items-center justify-center").style("gap: 8px"):
+            ui.label("average").classes("mn-dim")
+            ui.toggle(
+                {1: "1", 2: "2", 4: "4", 8: "8"},
+                value=int(getattr(station, "live_average", 1)),
+                on_change=lambda event: _set_live_average(station, int(event.value)),
+            ).classes("mn-title")
+            ui.label("live frames (less noise, slower)").classes("mn-dim")
         ui.label("drive until the stars look like points, not discs").classes("mn-dim")
         count = ui.toggle({1: "1", 3: "3", 10: "10"}, value=1).classes("mn-title")
         with ui.row().classes("items-center justify-center"):
@@ -118,6 +216,14 @@ def render_focus(
                     label, on_click=lambda d=direction: station.request(d, count.value)
                 ).classes("mn-drive").style("margin: 3px")
         ui.label("lens must be on MF (focus-by-wire)").classes("mn-dim")
+        # One press, no auto run: the hand often gets there first, and the automatic
+        # sweep should be an option rather than a toll gate. Only in the wizard, where
+        # there is somewhere to record the result.
+        accept_manual = ui.button(
+            "use this manual focus",
+            on_click=lambda: None if on_accept is None else on_accept(station.snapshot()),
+        ).classes("mn-action")
+        accept_manual.set_visibility(on_accept is not None)
 
     auto = ui.column().classes("w-full items-center")
     with auto:
@@ -190,6 +296,9 @@ def render_focus(
         driver = adapter_factory(station)
 
         state["note"] = ""
+        # One id per attempt, so two runs on the same evening do not merge in the log.
+        state["run"] = datetime.now().strftime("%Y%m%dT%H%M%S")
+        state["logged"] = False
 
         def worker() -> None:
             try:
@@ -224,6 +333,10 @@ def render_focus(
 
         if timer is not None:
             timer.active = False
+        if error is None and isinstance(result, FocusResult) and not state.get("logged"):
+            # Once per attempt: poll only stops the timer, but a late tick must not re-log.
+            state["logged"] = True
+            _log_result(log_path, str(state.get("run", "")), result)
         auto.set_visibility(False)
         done.set_visibility(True)
         start.set_visibility(False)
@@ -282,7 +395,7 @@ def focus_page() -> None:
         if station is None:  # pragma: no cover - only if imported without run()
             ui.label("station is not running").classes("mn-warn")
             return
-        render_focus(station)
+        render_focus(station, log_path=Settings.load().paths.logs / "focus.jsonl")
 
 
 def run(

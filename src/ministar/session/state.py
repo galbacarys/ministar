@@ -65,6 +65,9 @@ class SessionState:
 
     # Target selection (10 §1)
     target_name: str | None = None
+    #: Catalog code for the session folder (``M31``, ``NGC0224``); the display label can
+    #: carry a common name, which is not a folder name.
+    target_code: str | None = None
     target_ra_deg: float | None = None
     target_dec_deg: float | None = None
     #: The target's extent, so PARAMETERS can clamp its interval to the object's own
@@ -83,6 +86,16 @@ class SessionState:
     #: 60D), 4 the half-size preview (brief 15 §2.1). Chosen on the RUN page; fixed once a
     #: stack starts, because the accumulator's grid and the drift model must agree.
     stack_bin: int = 2
+
+    # Session output (SETUP)
+    #: Root folder for captures. ``None`` means the app's own ``data/output`` directory.
+    output_root: str | None = None
+    #: Folder name under ``output_root``. ``None``/blank means the automatic
+    #: ``YYYY_MM_DD-HH-MM-TARGETCODE``, fixed when the RUN page is first drawn.
+    session_name: str | None = None
+    #: True while ``session_name`` is generated rather than typed by the user. A new
+    #: target then gets a new folder instead of keeping the old target's name.
+    session_name_auto: bool = True
 
     # Focus (11, 12 §3)
     focus_position: int | None = None

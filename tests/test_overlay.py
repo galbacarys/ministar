@@ -18,7 +18,9 @@ def _optics():
     return RigProfile.fake().optics()
 
 
-def _paint(pointing, *, roll=0.0, width=W, height=H, radius=RADIUS, direction="cw"):
+def _paint(
+    pointing, *, roll=0.0, width=W, height=H, radius=RADIUS, direction="cw", hint: str | None = None
+):
     return overlay.build(
         width=width,
         height=height,
@@ -29,6 +31,7 @@ def _paint(pointing, *, roll=0.0, width=W, height=H, radius=RADIUS, direction="c
         target_dec_deg=DEC,
         target_radius_arcmin=radius,
         roll_direction=direction,
+        hint=hint,
     )
 
 
@@ -79,6 +82,22 @@ def test_a_target_outside_the_frame_is_pointed_at_from_the_edge() -> None:
     markup = painting.svg()
     assert 'stroke="#e06a5c"' in markup, "an edge arrow, not an invisible circle"
     assert not painting.aligned
+
+
+def test_the_altaz_hint_is_drawn_on_the_frame() -> None:
+    """It belongs on the picture, next to what the eye is already looking at."""
+    text = "tilt up 3.2 deg and pan left 1.4 deg"
+    markup = _paint((RA, DEC), hint=text).svg()
+
+    assert "<text" in markup
+    assert text in markup
+    assert 'font-family="monospace"' in markup
+
+
+def test_a_hint_with_markup_characters_is_escaped() -> None:
+    markup = _paint((RA, DEC), hint="tilt up 3 deg <really> & pan").svg()
+    assert "&lt;really&gt; &amp;" in markup
+    assert "<really>" not in markup
 
 
 def test_a_binned_live_view_draws_the_right_size_circle() -> None:

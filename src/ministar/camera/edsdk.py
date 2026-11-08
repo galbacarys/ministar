@@ -68,6 +68,16 @@ _FAR_BIT = 0x8000
 #: Canon needs a settle between pulses or it coalesces them.
 PULSE_SETTLE_S = 0.06
 
+#: How long to keep trying to open a session that a dead process may still hold.
+#:
+#: Windows releases the old USB handle when the process dies, but a body left in PC
+#: live view does not necessarily accept the next session on the first ask. Measured
+#: in the field: restarting the console during live view made connect fail until the
+#: camera was power-cycled. A short retry costs nothing on a healthy connect and is
+#: the difference between a restart and a body that looks bricked.
+CONNECT_ATTEMPTS = 12
+CONNECT_RETRY_S = 0.25
+
 #: Below this many stars a frame cannot inform focus (11 §4).
 MIN_STARS = 5
 
@@ -165,7 +175,6 @@ class EdsdkCamera:
 
         try:
             ffi.initialize()
-            devices = ffi.list_cameras()
         except EdsdkError as exc:
             # Terminate on the way out. The SDK is initialised per *process*, so leaving it up
             # after a failure poisons every later attempt: the next connect() calls
@@ -174,27 +183,50 @@ class EdsdkCamera:
             _close_quietly(ffi)
             raise EdsdkUnavailable(f"EDSDK initialisation failed: {exc}") from exc
 
-        if not devices:
-            _close_quietly(ffi)
-            raise EdsdkUnavailable(
-                "no camera visible to EDSDK (powered off, asleep, cable in a "
-                "charge-only port, or another application holds the session)"
-            )
+        # A body left in PC live view by a killed process can refuse or stall the first
+        # open: the old handle is released asynchronously by Windows, and the camera may
+        # still believe the EVF stream has an owner. Retry briefly rather than declaring
+        # the camera missing, then clear any stale stream once a session exists.
+        last: Exception | None = None
+        for attempt in range(CONNECT_ATTEMPTS):
+            try:
+                devices = ffi.list_cameras()
+            except EdsdkError as exc:
+                last = exc
+                devices = []
+            if devices:
+                try:
+                    info = ffi.open_camera(0)
+                except Exception as exc:
+                    last = exc
+                else:
+                    # The recovery for a process that died in live view: force EVF output
+                    # to nobody before this instance allocates a stream. Harmless when it
+                    # is already off, and the only reset available without a session.
+                    with contextlib.suppress(Exception):
+                        ffi.evf_off()
+                    # Deliberately *not* start_live_view() here. On a DSLR that raises the
+                    # mirror and cycles the shutter: doing it at connect time made launching
+                    # the app look like it had fired a capture, and tied the body up before
+                    # the user had asked for anything. The first grab_live_jpeg() (i.e. a
+                    # screen that shows a preview) starts it.
+                    self._ffi = ffi
+                    self._info = info
+                    self._closed = False
+                    self._position = 0
+                    return CameraInfo(name=info.description, port=info.port)
+            if attempt + 1 < CONNECT_ATTEMPTS:
+                self._sleep(CONNECT_RETRY_S)
 
-        try:
-            info = ffi.open_camera(0)
-        except Exception:
-            _close_quietly(ffi)
-            raise
-        # Deliberately *not* start_live_view() here. On a DSLR that raises the mirror and
-        # cycles the shutter: doing it at connect time made launching the app look like it
-        # had fired a capture, and tied the body up before the user had asked for anything.
-        # The first grab_live_jpeg() (i.e. a screen that shows a preview) starts it.
-        self._ffi = ffi
-        self._info = info
-        self._closed = False
-        self._position = 0
-        return CameraInfo(name=info.description, port=info.port)
+        _close_quietly(ffi)
+        if last is not None:
+            raise EdsdkUnavailable(
+                f"EDSDK could not open the camera after {CONNECT_ATTEMPTS} attempts: {last}"
+            ) from last
+        raise EdsdkUnavailable(
+            "no camera visible to EDSDK (powered off, asleep, cable in a "
+            "charge-only port, or another application holds the session)"
+        )
 
     def disconnect(self) -> None:
         ffi, self._ffi = self._ffi, None

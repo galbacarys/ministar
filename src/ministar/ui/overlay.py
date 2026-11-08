@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from html import escape
 
 import numpy as np
 
@@ -51,6 +52,8 @@ class Overlay:
     exit: tuple[float, float]
     inside: bool
     roll_direction: str | None = None
+    #: One line drawn on the frame itself (the altitude/azimuth correction).
+    hint: str | None = None
 
     @property
     def move_px(self) -> tuple[float, float]:
@@ -151,8 +154,31 @@ class Overlay:
         # Roll: the chevrons from the advice, dimmed when they are not the instruction.
         if self.roll_direction is not None:
             parts.append(self._roll_chevrons(stroke, head))
+        # The head-frame correction, on the picture: the operator is already looking here,
+        # and a line below the frame is a second place to look at night.
+        if self.hint:
+            parts.append(self._hint_markup(stroke))
         parts.append("</svg>")
         return "".join(parts)
+
+    def _hint_markup(self, stroke: float) -> str:
+        """A dark box and one bright line, legible over any part of the sky."""
+        assert self.hint is not None
+        # Fit the line to the frame: monospace advance is about 0.6 em.
+        available = max(1.0, self.width - 8.0 * stroke)
+        size = max(9.0, min(self.width * 0.017, available / (0.60 * len(self.hint))))
+        pad = size * 0.45
+        x = stroke * 4.0 + pad
+        y = stroke * 4.0 + pad
+        box_w = size * 0.60 * len(self.hint) + 2.0 * pad
+        box_h = size * 1.35
+        return (
+            f'<rect x="{x - pad:.1f}" y="{y - pad:.1f}" width="{box_w:.1f}" '
+            f'height="{box_h:.1f}" rx="{pad:.1f}" fill="#000000" opacity="0.55"/>'
+            f'<text x="{x:.1f}" y="{y + size:.1f}" fill="{BRIGHT}" '
+            f'font-family="monospace" font-size="{size:.1f}" opacity="0.95">'
+            f"{escape(self.hint, quote=False)}</text>"
+        )
 
     def _roll_chevrons(self, stroke: float, head: float) -> str:
         y = self.height * 0.93
@@ -232,6 +258,7 @@ def build(
     target_radius_arcmin: float = 0.0,
     roll_direction: str | None = None,
     interval_s: float | None = None,
+    hint: str | None = None,
 ) -> Overlay:
     """The picture for one frame of live view. Pure geometry: no UI, no camera."""
     if width <= 0 or height <= 0:
@@ -246,6 +273,7 @@ def build(
             exit=(0.0, 0.0),
             inside=False,
             roll_direction=roll_direction,
+            hint=hint,
         )
 
     # The live view's own scale: it may be binned relative to the sensor, and the still's plate
@@ -294,6 +322,7 @@ def build(
         exit=exit_,
         inside=inside,
         roll_direction=roll_direction,
+        hint=hint,
     )
 
 

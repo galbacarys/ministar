@@ -17,6 +17,7 @@ Two scales matter, and getting one wrong makes the whole gate useless:
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 
@@ -189,6 +190,35 @@ class Stillness:
         self.samples.append((now, float(snapshot.motion), float(snapshot.hfd)))
         while self.samples and now - self.samples[0][0] > self.window_s:
             self.samples.popleft()
+
+    def steady_for(self, seconds: float, now: float | None = None) -> bool:
+        """Has nothing moved for the last ``seconds``? A settle test, not a verdict.
+
+        ``moving`` judges the *whole* window, which is right before a shutter but too
+        conservative for "the hand has stopped": the 5 s window keeps reporting a nudge
+        for 5 s, so waiting on it makes every settle five times longer than the operator
+        expects. This looks only at the recent samples, against the same noise-derived
+        limit, so a one-second settle means one second.
+        """
+        moment = time.monotonic() if now is None else float(now)
+        recent = [rate for when, rate, _ in self.samples if when >= moment - seconds and rate >= 0]
+        # Two published frames, not one: a single quiet reading can be the gap between a
+        # pulse and the frame that shows it. With live-view averaging the publish period is
+        # longer, so this is also the shortest interval that can contain a real transition.
+        if len(recent) < 2:
+            return False
+        limit = self.threshold
+        return all(rate <= limit for rate in recent)
+
+    def reset(self) -> None:
+        """Forget the window: a scene change is not mount motion.
+
+        An exposure or ISO change -- a solve capture, then the restore -- makes the
+        frame-to-frame difference jump, and the window would call that a hand on the head
+        for :data:`STILLNESS_WINDOW_S` seconds after the operator has stopped touching
+        anything. Clearing starts a fresh baseline instead of judging the transition.
+        """
+        self.samples.clear()
 
     @property
     def motion(self) -> float:

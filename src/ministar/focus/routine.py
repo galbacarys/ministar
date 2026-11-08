@@ -137,6 +137,10 @@ class FocusResult:
     samples: list[FocusSample] = field(default_factory=list)
     fit: VCurveFit | None = None
     phases: list[str] = field(default_factory=list)
+    #: How many of ``samples`` came from the sweep itself. The landing move afterwards is a
+    #: deliberate jump to the fitted trough, not a search stride, and tests that police stride
+    #: width need to stop counting at this index.
+    sweep_samples: int = 0
 
 
 class _Budget:
@@ -212,15 +216,30 @@ def _home(driver: FocusDriver, cfg: RoutineConfig, budget: _Budget) -> tuple[boo
     return True, "homing budget exhausted without detecting the stop"
 
 
-def _measure_ok(driver: FocusDriver, cfg: RoutineConfig) -> FocusSample:
+def _measure_ok(
+    driver: FocusDriver,
+    cfg: RoutineConfig,
+    *,
+    on_sample: Callable[[FocusSample], None] | None = None,
+) -> FocusSample:
+    """Measure once, applying the routine's own star-count gate.
+
+    ``on_sample`` is the observation hook: it fires for every measurement, accepted or
+    not, so a field run can be reconstructed afterwards from a log. Kept here because
+    this is the only place the routine calls ``driver.measure`` -- hooking anywhere
+    else would miss the acquire probes and the landing checks.
+    """
     sample = driver.measure()
-    return FocusSample(
+    checked = FocusSample(
         position=sample.position,
         hfd=sample.hfd,
         star_count=sample.star_count,
         accepted=sample.accepted and sample.star_count >= cfg.min_stars,
         reason=sample.reason,
     )
+    if on_sample is not None:
+        on_sample(checked)
+    return checked
 
 
 def _acquire(
@@ -232,6 +251,7 @@ def _acquire(
     *,
     span: int | None = None,
     both_ways: bool = False,
+    on_sample: Callable[[FocusSample], None] | None = None,
 ) -> tuple[FocusSample | None, str]:
     """Get stars in view: jump to a known offset, else walk until stars appear.
 
@@ -243,7 +263,7 @@ def _acquire(
     if known_offset is not None and known_offset > 0:
         ok, _ = _move_to(driver, known_offset, ratios, budget)
         if ok:
-            sample = _measure_ok(driver, cfg)
+            sample = _measure_ok(driver, cfg, on_sample=on_sample)
             if sample.accepted:
                 return sample, ""
 
@@ -270,7 +290,7 @@ def _acquire(
             steps += 1
             if cfg.acquire_widen_every and steps % cfg.acquire_widen_every == 0:
                 stride = min(stride * 2, cfg.acquire_step_units * 4)
-            sample = _measure_ok(driver, cfg)
+            sample = _measure_ok(driver, cfg, on_sample=on_sample)
             if sample.accepted:
                 return sample, ""
         else:
@@ -289,6 +309,7 @@ def _sweep(
     first: FocusSample,
     ratios: StepRatios,
     on_progress: Callable[[str], None] | None = None,
+    on_sample: Callable[[FocusSample], None] | None = None,
 ) -> tuple[list[FocusSample], str]:
     """Find the trough: walk until HFD has fallen and then risen again.
 
@@ -314,33 +335,29 @@ def _sweep(
     operator should be told when the sweep changes direction rather than left watching the
     position counter run away.
     """
-    forward, improved, turned_up = _walk(driver, cfg, budget, first, 1, ratios, on_progress)
-    samples = [first, *forward]
+    # Sweep up toward near until the field is unfocused enough, return to the rough position,
+    # then sweep down toward far the same way. This is the operator's mental model in as many
+    # words: up, back to the start, down -- and then fit the trough from both shoulders.
+    #
+    # Both arms are always walked. A trough found on the way up does not end the sweep: with
+    # only one shoulder measured the parabola is biased toward the unmeasured side, which is
+    # how the fit came to report an optimum 12 units from the sharpest sample. The far arm is
+    # cheap when the trough is already bracketed -- leaving it worsens immediately, so the
+    # walk stops after its worsening allowance.
+    samples: list[FocusSample] = [first]
+    note = ""
+    for direction in (1, -1):
+        _move_to(driver, first.position, ratios, budget)
+        arm, improved, _ = _walk(
+            driver, cfg, budget, first, direction, ratios, on_progress, on_sample=on_sample
+        )
+        samples.extend(arm)
+        if direction > 0 and not improved:
+            note = f"turned round at {first.position}"
+            if on_progress is not None:
+                on_progress(note)
 
-    if improved and turned_up:
-        # Fell, then rose: the trough is in this arm.
-        return samples, ""
-    if improved and not turned_up:
-        # Still falling when the extended allowance ran out. The minimum is further on.
-        if on_progress is not None:
-            on_progress("still falling: the trough is further along")
-        return samples, "still falling at the end of the sweep"
-
-    # This arm only got worse, so focus is the other way. Re-anchor at the start before
-    # searching outward: every sample on the way back is worse than the start (that is why we
-    # are turning round), so judging improvements while retracing would spend the whole
-    # worsening allowance before reaching the point we already know is better.
-    note = f"turned round at {first.position}"
-    if on_progress is not None:
-        on_progress(note)
-    _move_to(driver, first.position, ratios, budget)
-    back, back_improved, back_turned = _walk(driver, cfg, budget, first, -1, ratios, on_progress)
-    samples.extend(back)
-    if back_improved and back_turned:
-        return samples, note
-    if back_improved:
-        return samples, "still falling at the end of the sweep"
-    return samples, note if not back else "no trough in either direction"
+    return samples, note
 
 
 def _walk(
@@ -351,6 +368,8 @@ def _walk(
     direction: int,
     ratios: StepRatios,
     on_progress: Callable[[str], None] | None,
+    *,
+    on_sample: Callable[[FocusSample], None] | None = None,
 ) -> tuple[list[FocusSample], bool, bool]:
     """Walk one way from ``start``. Returns (samples, improved, turned_up).
 
@@ -380,7 +399,7 @@ def _walk(
         ok, moved = _move_to(driver, driver.position + direction * stride, ratios, budget)
         if not ok or not moved:
             break
-        sample = _measure_ok(driver, cfg)
+        sample = _measure_ok(driver, cfg, on_sample=on_sample)
         samples.append(sample)
 
         if not (sample.accepted and math.isfinite(sample.hfd)):
@@ -403,9 +422,11 @@ def _walk(
             # before the bottom predict a short one (short steps, so the trough is not jumped).
             near_floor = sample.hfd <= cfg.sweep_floor_hfd * 1.05
             if near_floor:
-                # At the sharpness an in-focus star can have: the trough is close, so take the
-                # smallest step we can justify. The linear extrapolation is useless here -- a
-                # shallow descent predicts a long run-out and would stride straight past.
+                # At the sharpness an in-focus star can have: the trough is close, so keep the
+                # base stride. It must NOT shrink here: on a wide curve HFD approaches the
+                # floor over a thousand units, so a 6-unit creep would spend the whole sample
+                # budget 1200 units short of the bottom (measured: landed at 2358 for a
+                # trough at 3000). The narrow-trough case is handled by the refine probes.
                 stride = cfg.sweep_step_units
             elif fall > 0.0 and stride > 0:
                 remaining = sample.hfd / (fall / stride)
@@ -437,6 +458,7 @@ def autofocus(
     known_offset: int | None = None,
     ratios: StepRatios | None = None,
     on_progress: Callable[[str], None] | None = None,
+    on_sample: Callable[[FocusSample], None] | None = None,
 ) -> FocusResult:
     """Run the full routine. Ordinary failures are reported, never raised.
 
@@ -464,7 +486,9 @@ def autofocus(
                 False, driver.position, math.nan, home_note, budget.used, phases=phases
             )
 
-        sample, acquire_note = _acquire(driver, cfg, budget, known_offset, ratios)
+        sample, acquire_note = _acquire(
+            driver, cfg, budget, known_offset, ratios, on_sample=on_sample
+        )
         if sample is None:
             return FocusResult(
                 False, driver.position, math.nan, acquire_note, budget.used, phases=phases
@@ -472,7 +496,7 @@ def autofocus(
         phases.append(f"acquire:{budget.used}")
     else:
         # Already anchored and already looking at sky: only verify we have stars.
-        current = _measure_ok(driver, cfg)
+        current = _measure_ok(driver, cfg, on_sample=on_sample)
         if current.accepted:
             sample = current
         else:
@@ -487,6 +511,7 @@ def autofocus(
                 ratios,
                 span=cfg.acquire_local_units,
                 both_ways=True,
+                on_sample=on_sample,
             )
             if sample is None:
                 return FocusResult(
@@ -494,7 +519,10 @@ def autofocus(
                 )
             phases.append(f"acquire:{budget.used}")
 
-    samples, sweep_note = _sweep(driver, cfg, budget, sample, ratios, on_progress)
+    samples, sweep_note = _sweep(
+        driver, cfg, budget, sample, ratios, on_progress, on_sample=on_sample
+    )
+    sweep_samples = len(samples)
     phases.append(f"sweep:{budget.used}")
     if sweep_note.startswith("turned round"):
         phases.append(sweep_note.replace(" ", "-"))
@@ -507,56 +535,45 @@ def autofocus(
         # inventing an optimum. On a short lens this is normal and correct (11 §3).
         best = _best_accepted(samples, sample)
         _move_to(driver, best.position, ratios, budget)
+        final = _measure_ok(driver, cfg, on_sample=on_sample)
+        samples.append(final)
         reason = "no reliable minimum (flat curve); kept the best measured position"
         if sweep_note:
             reason = f"{reason} ({sweep_note})"
+        # Report what the lens actually did. Returning ``best.hfd`` while a failed move has
+        # left the lens somewhere else is how a run reports a good HFD from a position that
+        # is nowhere near it -- the operator then sees "focused" on a blurry frame.
         return FocusResult(
-            True,
+            final.accepted,
             driver.position,
-            best.hfd,
+            final.hfd if final.accepted else math.nan,
             reason,
             budget.used,
             samples,
             fit,
             phases,
+            sweep_samples,
         )
 
+    # Sweep up, sweep down, fit the trough, land on it. That is the whole routine: no refine
+    # loop and no second search. The parabola interpolates between the measured points, which
+    # is what finds a trough narrower than the search stride without adding another phase.
     landing = round(fit.best_position)
-
-    for _ in range(cfg.refine_iterations):
-        ok, _ = _move_to(driver, landing, ratios, budget)
-        if not ok:
-            break
-        check = _measure_ok(driver, cfg)
-        samples.append(check)
-        if check.accepted and abs(check.hfd - fit.best_hfd) <= fit.best_hfd * cfg.hfd_tolerance:
-            break
-
-        # Sweep a narrow window either side of where we landed, then refit.
-        # Five probes across +/-2 windows: the fit needs MIN_SAMPLES points to
-        # refit at all, so a 3-point window would make this phase a no-op.
-        window = max(2, cfg.sweep_step_units // 3)
-        local: list[tuple[float, float]] = []
-        probe_positions = [landing + offset * window for offset in (-2, -1, 0, 1, 2)]
-        for position in probe_positions:
-            # No clamping at zero: the position origin is only the far stop when we
-            # homed there. After the user turns the focus ring by hand the counter's
-            # zero is arbitrary, and clamping would drag every probe toward it.
-            _move_to(driver, position, ratios, budget)
-            probe = _measure_ok(driver, cfg)
-            samples.append(probe)
-            if probe.accepted and math.isfinite(probe.hfd):
-                local.append((probe.position, probe.hfd))
-        refit = fit_v_curve(local) if len(local) >= 5 else None
-        if refit is None:
-            break
-        fit = refit
-        landing = round(refit.best_position)
-
     phases.append(f"done:{budget.used}")
     _move_to(driver, landing, ratios, budget)
-    final = _measure_ok(driver, cfg)
+    final = _measure_ok(driver, cfg, on_sample=on_sample)
     samples.append(final)
+
+    # One honest check: the fit's optimum is an estimate and can sit past the trough on an
+    # asymmetric shoulder. If the landing measures worse than the best sample we already
+    # have, return to that sample. This is the "reported a good HFD from a position nowhere
+    # near it" failure, and it costs a single measurement to avoid.
+    best = _best_accepted(samples, sample)
+    if not final.accepted or final.hfd > best.hfd:
+        _move_to(driver, best.position, ratios, budget)
+        final = _measure_ok(driver, cfg, on_sample=on_sample)
+        samples.append(final)
+        landing = best.position
 
     ok = final.accepted
     return FocusResult(
@@ -568,4 +585,5 @@ def autofocus(
         samples,
         fit,
         phases,
+        sweep_samples,
     )

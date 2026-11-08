@@ -18,8 +18,13 @@ Run it::
 from __future__ import annotations
 
 import argparse
+import os
+import threading
+import time
 from dataclasses import dataclass
 
+from fastapi import HTTPException, Request
+from nicegui import app as nicegui_app
 from nicegui import ui
 
 from ministar.config import Settings
@@ -41,6 +46,35 @@ class App:
 
 
 _APP: App | None = None
+
+
+def _exit_soon() -> None:
+    """Let the HTTP response leave before the process does."""
+    time.sleep(0.1)
+    os._exit(0)
+
+
+@nicegui_app.post("/_shutdown")
+def _shutdown(request: Request) -> dict[str, str]:
+    """Close the camera, then exit. The clean counterpart to ``taskkill /F``.
+
+    A killed process runs no Python teardown, so the body is left in PC live view and
+    the next launch has to recover a stream it never owned. ``tools/ui.sh`` calls this
+    before falling back to a hard kill, which makes a restart put the mirror down and
+    close the session on the way out.
+
+    Local only: this is a process kill switch, and the console already has no login.
+    """
+    client = request.client.host if request.client else ""
+    if client not in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}:
+        raise HTTPException(status_code=403, detail="local only")
+    from ministar import run as run_loop
+
+    run_loop.stop()
+    if _APP is not None and _APP.station is not None:
+        _APP.station.stop()
+    threading.Thread(target=_exit_soon, name="shutdown", daemon=True).start()
+    return {"status": "stopping"}
 
 
 @ui.page("/")

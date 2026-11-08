@@ -14,14 +14,44 @@ testable on any OS.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 APP_NAME = "ministar"
 
 ASTAP_EXE = "astap_cli.exe"
 EDSDK_DLL = "EDSDK.dll"
+
+
+def session_token(text: str) -> str:
+    """A piece of a target name that is safe as one path component on Windows."""
+    token = re.sub(r"[^A-Za-z0-9._-]+", "_", text.strip())
+    return token.strip("._-")[:48]
+
+
+def safe_folder_name(text: str, *, limit: int = 80) -> str:
+    """Keep a name the user typed, but never let it name a different directory.
+
+    Spaces are fine on every platform; separators, drive colons and the Windows wildcard
+    set are not, because ``output / "../elsewhere"`` would write outside the session root.
+    """
+    cleaned = re.sub(r'[<>:"/\\|?*]', "_", text.strip())
+    return cleaned.strip(" .")[:limit]
+
+
+def default_session_name(target: str | None = None, when: datetime | None = None) -> str:
+    """``YYYY_MM_DD-HH-MM-TARGETCODE``, with the target omitted when there is none.
+
+    Local time, not UTC: this is the name a person reads on disk after the session, and
+    it should match the clock on the phone they were using. Sanitised because a catalogue
+    label can contain spaces and a common name, and Windows folder names cannot.
+    """
+    stamp = (when or datetime.now()).strftime("%Y_%m_%d-%H-%M")
+    token = session_token(target or "")
+    return f"{stamp}-{token}" if token else stamp
 
 
 def default_home() -> Path:

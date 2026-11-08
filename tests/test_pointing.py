@@ -11,7 +11,13 @@ from datetime import UTC
 
 import pytest
 
-from ministar.pointing import MIN_USEFUL_FRACTION, crop_factor, describe, solved_width_deg
+from ministar.pointing import (
+    MIN_USEFUL_FRACTION,
+    altaz_advice,
+    crop_factor,
+    describe,
+    solved_width_deg,
+)
 from ministar.solver.astap import Solution
 
 #: Brief 07 §5, a real solve.
@@ -27,6 +33,51 @@ FRAME_A = Solution(
         -6.3784928262788855e-4,
     ),
 )
+
+
+def test_altaz_advice_gives_the_head_frame_direction() -> None:
+    """A target east of the meridian is to the left facing south, and lower if south."""
+    advice = altaz_advice(
+        ra_deg=0.0,
+        dec_deg=0.0,
+        target_ra_deg=1.0,
+        target_dec_deg=-1.0,
+        lst_deg=0.0,
+        latitude_deg=39.16,
+    )
+
+    assert advice.usable
+    assert advice.move_az_deg < 0.0, "east of the meridian is to the left facing south"
+    assert advice.move_alt_deg < 0.0, "one degree off the meridian is slightly lower"
+    text = advice.describe()
+    assert "pan left" in text and "tilt down" in text and "alt/az" in text
+
+
+def test_altaz_advice_reports_centred() -> None:
+    advice = altaz_advice(
+        ra_deg=80.0,
+        dec_deg=20.0,
+        target_ra_deg=80.0,
+        target_dec_deg=20.0,
+        lst_deg=0.0,
+        latitude_deg=39.16,
+    )
+    assert advice.usable
+    assert "within 0.05 deg" in advice.describe()
+
+
+def test_altaz_advice_refuses_to_print_an_impossible_pan() -> None:
+    """Near the zenith the azimuth demand is unbounded; say so instead of a 47 deg turn."""
+    advice = altaz_advice(
+        ra_deg=0.0,
+        dec_deg=0.0,
+        target_ra_deg=0.0,
+        target_dec_deg=0.5,
+        lst_deg=0.0,
+        latitude_deg=0.0,
+    )
+    assert not advice.usable
+    assert "zenith" in advice.describe()
 
 
 def test_the_solved_width_comes_from_the_cd_matrix() -> None:

@@ -400,7 +400,14 @@ class Edsdk:
 
         info = _EdsDeviceInfo()
         _check("EdsGetDeviceInfo", self.EdsGetDeviceInfo(camera, byref(info)))
-        _check("EdsOpenSession", self.EdsOpenSession(camera))
+        try:
+            _check("EdsOpenSession", self.EdsOpenSession(camera))
+        except Exception:
+            # The camera ref is ours until a session owns it. Leaking it on the failure
+            # path is what made a busy port look permanent across retries.
+            with contextlib.suppress(Exception):
+                self.EdsRelease(camera)
+            raise
         self._camera = camera
         return DeviceInfo(
             port=info.szPortName.decode("ascii", "replace"),
@@ -550,6 +557,27 @@ class Edsdk:
         if not ptr.value or length.value == 0:
             return b""
         return ctypes.string_at(ptr, length.value)
+
+    def evf_off(self) -> None:
+        """Force EVF output to nobody, even if this instance never started it.
+
+        Recovery, not tidiness. If the process that owned live view is killed (a
+        console restart, a crash, a lost USB handle) the body can be left streaming
+        to a PC that no longer exists. A new ``EdsOpenSession`` may then succeed while
+        the body is still in EVF, and the first frame read behaves like a stale
+        stream. Writing 0 here, before this instance allocates anything, is the
+        cheapest way back to a known state; it is the same call ``stop_live_view``
+        makes and is verified on the EOS 60D.
+        """
+        if self._camera is None:
+            return
+        value = c_uint32(EVF_OUTPUT_OFF)
+        _check(
+            "EdsSetPropertyData(Evf_OutputDevice=0)",
+            self.EdsSetPropertyData(
+                self.camera, PROP_EVF_OUTPUT_DEVICE, 0, ctypes.sizeof(value), byref(value)
+            ),
+        )
 
     def stop_live_view(self) -> None:
         """Route the EVF away from the PC and free the stream.

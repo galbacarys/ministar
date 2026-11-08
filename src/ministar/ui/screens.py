@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
+from pathlib import Path
 
 from nicegui import ui
 from nicegui.run import io_bound
@@ -27,12 +29,14 @@ from nicegui.run import io_bound
 from ministar import preflight as preflight_checks
 from ministar import quality
 from ministar import sky as sky_module
+from ministar.camera.base import CameraSettings
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
-from ministar.config import Settings
+from ministar.config import Settings, default_session_name, safe_folder_name
 from ministar.exposure import choose_exposure, rule_of_500_seconds
 from ministar.io.tiff import TiffError, read_frame_exif
 from ministar.pointing import (
     SolveReport,
+    altaz_advice,
     at_entry,
     best_start,
     entry_corner_name,
@@ -42,7 +46,7 @@ from ministar.pointing import (
     solve_hints,
 )
 from ministar.reframe.roll import parallactic_angle, roll_advice, roll_inputs
-from ministar.rig import RigProfile, better_than, rig_path
+from ministar.rig import RigProfile, reconcile, rig_path
 from ministar.rig import load as load_rig
 from ministar.rig import save as save_rig
 from ministar.session import Phase, SessionState
@@ -246,6 +250,30 @@ def interval_slider_max_minutes(
     return max(1, min(int(min(limits)), 60))
 
 
+def session_directory(ctx: Context) -> Path:
+    """Where this session's captures go.
+
+    The automatic name is materialised here and kept in session state, so stopping and
+    restarting a run writes into the same folder instead of starting a new session every
+    time the shutter is resumed. Clearing the name on SETUP asks for a new one.
+    """
+    raw_root = os.path.expandvars(str(ctx.state.output_root or ctx.settings.paths.output))
+    root = Path(raw_root).expanduser()
+    raw = (ctx.state.session_name or "").strip()
+    if ctx.state.session_name_auto:
+        # Blank, or a name this app generated on an earlier RUN.
+        name = raw or default_session_name(ctx.state.target_code or ctx.state.target_name or "")
+    else:
+        # The user typed this one: make it a single safe component. If nothing usable
+        # remains, fall back to automatic rather than writing outside the root.
+        name = safe_folder_name(raw)
+        if not name:
+            name = default_session_name(ctx.state.target_code or ctx.state.target_name or "")
+            ctx.state.session_name_auto = True
+    ctx.state.session_name = name
+    return root / name
+
+
 def select_row(ctx: Context, row: dict) -> None:
     """Record a clicked table row in session state, and unblock NEXT.
 
@@ -255,6 +283,12 @@ def select_row(ctx: Context, row: dict) -> None:
     look again. A screen may change state mid-render, so it has to say so.
     """
     ctx.state.target_name = str(row.get("label") or "")
+    new_code = str(row.get("code") or "")
+    # An automatic session name belongs to the target that produced it. A different
+    # target should not write into the previous one's folder.
+    if ctx.state.session_name_auto and new_code != ctx.state.target_code:
+        ctx.state.session_name = None
+    ctx.state.target_code = new_code
     ctx.state.target_ra_deg = float(row["ra"])
     ctx.state.target_dec_deg = float(row["dec"])
     # Extent travels with the selection so PARAMETERS can clamp its slider without
@@ -270,6 +304,7 @@ def _table_row(index: int, row: Row) -> dict[str, object]:
     return {
         "key": f"{index}-{row.target.name}",
         "label": row.target.label,
+        "code": (f"M{row.target.messier}" if row.target.messier is not None else row.target.name),
         "type": TYPE_LABELS.get(row.target.type, row.target.type),
         "size": _UNKNOWN_SIZE if row.size_arcmin is None else round(row.size_arcmin, 2),
         "mag": _UNKNOWN_MAG if row.magnitude is None else round(row.magnitude, 2),
@@ -346,6 +381,16 @@ class Context:
 #: duration, because the operator has to aim by eye -- that is handled on the RUN page, where
 #: the state is actually known.
 LIVE_VIEW_PHASES: frozenset[Phase] = frozenset({Phase.FOCUS, Phase.POINT})
+
+#: Exposure for a plate-solve capture, in seconds.
+#:
+#: A pointing capture is not an imaging sub and must not inherit whatever the last "Tv"
+#: happened to be. On a dark field a short frame gives ASTAP too few stars to match; on a
+#: fixed tripod a long one smears them. One second at the session ISO is enough at 100 mm
+#: f/2.8, and trailing stays under a couple of pixels. A constant rather than the
+#: PARAMETERS value on purpose: a 30 s sub must not turn every solve into a 30 s wait.
+SOLVE_EXPOSURE_S = 1.0
+SOLVE_ISO_DEFAULT = 800
 
 
 def wants_live_view(phase: Phase) -> bool:
@@ -543,10 +588,27 @@ def render_setup(ctx: Context) -> None:
             exif = read_frame_exif(frame)
             candidate = RigProfile.from_frame_exif(exif, recorded=datetime.now().date().isoformat())
             current = load_rig(rig_store)
-            if not better_than(candidate, current):
-                return f"kept the {current.source} profile: {current.describe()}", False
-            save_rig(rig_store, candidate)
-            return f"saved: {candidate.describe()}", True
+            merged = reconcile(current, candidate)
+            if merged == current:
+                # Nothing changed: same focal length, and the stored geometry is at least
+                # as good. Say so plainly -- a silent no-op reads as a broken button.
+                return (
+                    f"kept the {current.source} profile at the same focal length: "
+                    f"{current.describe()}",
+                    False,
+                )
+            save_rig(rig_store, merged)
+            if current is not None and not current.focal_matches(merged.focal_length_mm):
+                # Name what was replaced: the whole complaint this fixes is a stale lens
+                # config surviving silently, so replacing it silently would be half a fix.
+                return (
+                    f"saved: {merged.describe()} "
+                    f"(replaced the {current.focal_length_mm:g} mm {current.source} profile)",
+                    True,
+                )
+            if current is not None and merged.lens != current.lens:
+                return f"saved: {merged.describe()} (lens now {merged.lens})", True
+            return f"saved: {merged.describe()}", True
 
         # One shutter release per press: the button is disabled for the duration rather than
         # letting a second click queue a second exposure behind the first.
@@ -568,6 +630,33 @@ def render_setup(ctx: Context) -> None:
 
     with ui.row().classes("items-center").style("gap: 10px"):
         rig_button = ui.button("read from a test frame", on_click=read_rig).classes("mn-action")
+
+    ui.label("Session files").classes("mn-heading")
+    ui.label(
+        "Captures go under this folder, in a folder named for the session. Leave the name "
+        "blank and it becomes <date>-<time>-<target> when RUN starts."
+    ).classes("mn-dim")
+
+    def set_output_root(event) -> None:
+        text = str(event.value or "").strip()
+        ctx.state.output_root = text or None
+
+    def set_session_name(event) -> None:
+        text = str(event.value or "").strip()
+        ctx.state.session_name = text or None
+        ctx.state.session_name_auto = not text
+
+    ui.input(
+        "output folder",
+        value=str(ctx.state.output_root or ctx.settings.paths.output),
+        on_change=set_output_root,
+    ).classes("mn-body").style("width: 540px")
+    ui.input(
+        "session folder (blank = automatic)",
+        value=ctx.state.session_name or "",
+        placeholder="auto: 2026_11_07-22-15-M31",
+        on_change=set_session_name,
+    ).classes("mn-body").style("width: 540px")
 
     ui.label("Tripod head").classes("mn-heading")
     _not_implemented("Head calibration profiles", "13-head-calibration.md")
@@ -963,7 +1052,13 @@ def render_focus(ctx: Context) -> None:
             )
         ctx.refresh()
 
-    focus_screen.render_focus(ctx.station, on_accept=accept)
+    focus_screen.render_focus(
+        ctx.station,
+        on_accept=accept,
+        # Every sweep sample, written as it is measured: a field run's log is the only
+        # record of what the fit actually saw.
+        log_path=ctx.settings.paths.logs / "focus.jsonl",
+    )
     if ctx.state.focus_hfd is not None:
         arcsec = ctx.state.focus_hfd_arcsec
         ui.label(
@@ -983,6 +1078,52 @@ def render_calibrate(ctx: Context) -> None:
 #: come off a knob, short enough that a bump does not look like a hang.
 SETTLE_TIMEOUT_S = 4.0
 
+#: How long the field must hold still before a re-solve is worth spending.
+#:
+#: One second was too short: a hand leaves a 3-way head with a little residual motion, and
+#: the published frame is an average of several camera frames, so a one-second window can
+#: judge the *end* of a nudge as still. Two seconds is four published frames at the default
+#: averaging, which is enough to see that the hand is really off.
+AUTO_SOLVE_SETTLE_S = 2.0
+
+#: Default grace after new arrows before the next automatic solve may fire.
+#:
+#: The operator can change this on the page: pointing is a human skill, and someone who can
+#: put a target in the frame in two seconds should not be made to wait ten. This is the
+#: minimum time from *showing the instruction* to spending another capture.
+AUTO_RECHECK_S = 5.0
+
+#: A real nudge needs this many consecutive published frames above the noise limit.
+#:
+#: One frame can be a JPEG artefact or a noise peak; two is a second of deliberate motion
+#: at the default averaging, and a hand on a knob easily produces that.
+AUTO_ARM_FRAMES = 2
+
+#: Frame-to-frame change that is a hand on the head, not noise.
+#:
+#: A real nudge moves whole cells; the measured static floor is around 1 level per frame.
+#: This is a floor, not a replacement for the field's own limit: whichever is larger wins.
+#: It must stay above the noise a reset tracker sees after a solve, or turning the feature
+#: on becomes a solve loop.
+NUDGE_ARM_LEVELS = 2.5
+
+
+def _aimed_now(ctx: Context, station) -> tuple[float, float] | None:
+    """Where the camera is actually pointed, from the camera or from the last solve.
+
+    A real body cannot report its own pointing; it reports it only through a plate solve.
+    Before the solve exists there is nothing to draw, which is honest. After it exists the
+    solution *is* the measurement, and refusing to use it because the camera has no
+    ``pointing`` attribute is why the arrows and marks stayed missing on real hardware.
+    """
+    camera = getattr(station, "camera", None) if station is not None else None
+    aimed = getattr(camera, "pointing", None)
+    if aimed is not None:
+        return aimed
+    if ctx.state.solved and ctx.state.pointing_ra_deg is not None:
+        return (ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg)
+    return None
+
 
 def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
     """The parallactic angle and the camera roll, or ``None`` when they are unknown.
@@ -998,12 +1139,16 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
         return None
     camera = getattr(station, "camera", None) if station is not None else None
     roll = getattr(camera, "roll_deg", None)
-    if roll is None:
+    # A solve measures the frame's position angle directly, which is the same quantity the
+    # fake camera calls its roll. Requiring a camera that *reports* a roll excluded every
+    # real body and left the page blank after a perfectly good solve.
+    solved_pa = ctx.state.pointing_pa_deg if ctx.state.solved else None
+    if roll is None and solved_pa is None:
         return None
-    # Use where the camera *is* when the camera can say, not where we meant to point: the
+    # Use where the camera *is* when it can say, not where we meant to point: the
     # parallactic angle depends on hour angle, so a mount that has been nudged has a
     # different roll advice than the target implies.
-    aimed = getattr(camera, "pointing", None)
+    aimed = _aimed_now(ctx, station)
     ra_deg, dec_deg = (
         aimed if aimed is not None else (ctx.state.target_ra_deg, ctx.state.target_dec_deg)
     )
@@ -1011,12 +1156,48 @@ def roll_page_state(ctx: Context, station) -> tuple[float, float] | None:
     hour_angle = (lst - ra_deg + 180.0) % 360.0 - 180.0
     q = parallactic_angle(site.latitude_deg, dec_deg, hour_angle)
     inputs = roll_inputs(
-        solved_pa_deg=ctx.state.pointing_pa_deg if ctx.state.solved else None,
-        camera_roll_deg=float(roll),
+        solved_pa_deg=solved_pa,
+        camera_roll_deg=None if roll is None else float(roll),
         camera_reports_pa=bool(getattr(camera, "reports_position_angle", False)),
         parallactic_deg=float(q),
     )
     return None if inputs is None else (float(inputs[0]), float(inputs[1]))
+
+
+def auto_solve_ready_at(
+    *, instruction_at: float, last_motion_at: float, recheck_s: float, settle_s: float
+) -> float:
+    """When the next automatic solve is allowed, given the two independent waits.
+
+    The instruction grace and the settle overlap rather than queue: if the operator stops
+    moving before the grace ends, the solve happens at the grace; if they are still working,
+    it happens ``settle_s`` after they stop. The earlier of the two would capture a
+    half-finished aim; the sum would punish someone who is already done.
+    """
+    return max(instruction_at + recheck_s, last_motion_at + settle_s)
+
+
+def altaz_line(ctx: Context, ra_deg: float, dec_deg: float) -> str | None:
+    """The correction in altitude/azimuth, for the hand on a pan/tilt head.
+
+    The picture arrow is in image space, which answers "where does the target go on the
+    screen" but not "which knob". This adds the same offset as ground-frame angles.
+    """
+    if ctx.state.target_ra_deg is None or ctx.state.target_dec_deg is None:
+        return None
+    site = load_site(site_path(ctx.settings.paths.data))
+    if not site.complete:
+        return None
+    lst = sky_module.lst_deg(datetime.now().astimezone(), site.longitude_deg)
+    advice = altaz_advice(
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        target_ra_deg=ctx.state.target_ra_deg,
+        target_dec_deg=ctx.state.target_dec_deg,
+        lst_deg=lst,
+        latitude_deg=site.latitude_deg,
+    )
+    return advice.describe()
 
 
 def render_point(ctx: Context) -> None:
@@ -1046,7 +1227,8 @@ def render_point(ctx: Context) -> None:
     # the default DOMPurify pass is free to strip SVG it does not recognise.
     overlay_html = ui.html("", sanitize=False).classes("mn-overlay")
     ui.label(
-        "circle = the target · reticle = where its run should start · dashed line = its path"
+        "circle = the target · reticle = where its run should start · dashed line = its path\n"
+        "arrow = where the target must move; move the mount the opposite way"
     ).classes("mn-dim")
     # One stillness tracker for the page: the tick feeds it, the readout shows it, the settle
     # pause waits on it, and _solve refuses to spend a capture while it says "moving".
@@ -1062,6 +1244,9 @@ def render_point(ctx: Context) -> None:
         with ui.row().classes("items-center justify-center").style("gap: 24px"):
             ccw_label = ui.label("<< CCW").classes("mn-metrics")
             cw_label = ui.label("CW >>").classes("mn-metrics")
+        # Live aiming advice, on every camera. A real body cannot report its pointing until a
+        # solve, so this stays empty before the first one; afterwards the tick keeps it current.
+        aim_advice = ui.label("").classes("mn-body")
 
         camera = getattr(station, "camera", None) if station is not None else None
         site = load_site(site_path(ctx.settings.paths.data))
@@ -1133,10 +1318,8 @@ def render_point(ctx: Context) -> None:
                 value=bool(getattr(camera, "drift", True)),
                 on_change=toggle_drift,
             ).classes("mn-body")
-            aim_advice = ui.label("").classes("mn-body")
         else:
             pointing_label = None
-            aim_advice = None
 
         if getattr(camera, "set_roll", None) is not None:
             # Fake camera only: a real user turns the clamp, so there is no control to offer.
@@ -1173,15 +1356,43 @@ def render_point(ctx: Context) -> None:
                 else ""
             )
 
-        async def run_solve() -> None:
-            # A hand on the mount produces smeared frames that solve badly or not at all, so
-            # wait for it to be still before spending one. Bounded: if it never settles, say so
-            # rather than hang.
-            deadline = time.monotonic() + SETTLE_TIMEOUT_S
-            while not ignore_motion.value and stillness.moving and time.monotonic() < deadline:
-                settle_label.text = f"{stillness.describe()} -- waiting for it to settle"
-                await asyncio.sleep(0.2)
-            settle_label.text = ""
+        solve_busy = {"value": False}
+        # Arriving on POINT arms nothing: the operator has not nudged yet, and solving an
+        # unaimed frame is a wasted capture. A nudge after the arrows is what arms it.
+        auto_armed = {"value": False}
+        auto_hits = {"value": 0}
+        last_motion_at = {"value": time.monotonic()}
+        instruction_at = {"value": time.monotonic()}
+
+        async def run_solve(*, skip_settle: bool = False) -> None:
+            if solve_busy["value"]:
+                return
+            solve_busy["value"] = True
+            try:
+                # A hand on the mount produces smeared frames that solve badly or not at all,
+                # so wait for the settle window before spending one. Bounded: if it never
+                # settles, say so rather than hang.
+                if not skip_settle and not ignore_motion.value:
+                    deadline = time.monotonic() + SETTLE_TIMEOUT_S
+                    while (
+                        not stillness.steady_for(AUTO_SOLVE_SETTLE_S)
+                        and time.monotonic() < deadline
+                    ):
+                        settle_label.text = (
+                            f"{stillness.describe()} -- waiting for the mount to settle"
+                        )
+                        await asyncio.sleep(0.2)
+                settle_label.text = ""
+                await _run_and_show()
+            finally:
+                solve_busy["value"] = False
+                # The result is on screen now: this starts the operator's action window.
+                instruction_at["value"] = time.monotonic()
+                # Whatever happened, a new nudge must be seen before the next automatic run.
+                auto_armed["value"] = False
+                auto_hits["value"] = 0
+
+        async def _run_and_show() -> None:
             # Off the event loop: a capture plus a blind solve is up to nine seconds, and the
             # page would be frozen for all of it -- including the live view it is showing.
             solved = await io_bound(
@@ -1190,13 +1401,16 @@ def render_point(ctx: Context) -> None:
             report, note = solved if solved is not None else (None, "solve was cancelled")
             solve_note.text = note
             show_buttons()
+            # On the event loop, unlike the old refresh inside _solve: this only re-evaluates
+            # the Next button (RUN needs a solve), and leaves the result labels in place.
+            ctx.nav()
             if report is not None:
                 solve_facts.text = "\n".join(report.facts)
                 solve_notes.text = "\n".join(report.notes)
                 solve_warnings.text = "\n".join(report.warnings)
                 rig = rig_for(ctx)
                 if rig is not None and ctx.state.pointing_ra_deg is not None:
-                    solve_advice.text = "\n".join(
+                    lines = list(
                         frame_advice(
                             ra_deg=ctx.state.pointing_ra_deg,
                             dec_deg=ctx.state.pointing_dec_deg,
@@ -1208,16 +1422,104 @@ def render_point(ctx: Context) -> None:
                             interval_s=ctx.state.reframe_interval_s,
                         ).describe()
                     )
+                    hint = altaz_line(ctx, ctx.state.pointing_ra_deg, ctx.state.pointing_dec_deg)
+                    if hint is not None:
+                        lines.append(hint)
+                    solve_advice.text = "\n".join(lines)
 
         async def retry_solve() -> None:
             ctx.state.solve_failures = 0
             await run_solve()
+
+        def arm_auto(on: bool) -> None:
+            """Turning the switch on starts a fresh instruction window; it does not solve."""
+            if on:
+                instruction_at["value"] = time.monotonic()
+                auto_armed["value"] = False
+                auto_hits["value"] = 0
+
+        async def auto_solve_tick() -> None:
+            """Solve after the operator has had time to act, and the hand is off the head.
+
+            The order matters: new arrows, a grace period the operator controls, a real
+            nudge, then a settle. The old loop captured on the first quiet second, which
+            raced a hand that was still adjusting. No nudge means no solve -- re-solving an
+            unchanged aim only costs a capture and interrupts the preview.
+            """
+            if not auto_solve.value or solve_busy["value"] or station is None:
+                return
+            snapshot = station.snapshot()
+            now = time.monotonic()
+            rate = float(snapshot.motion)
+            limit = max(stillness.threshold, NUDGE_ARM_LEVELS)
+
+            # Two consecutive frames above the field's own noise: one can be an artefact,
+            # and a hand on a knob easily produces several.
+            if rate >= limit:
+                auto_hits["value"] += 1
+                last_motion_at["value"] = now
+                if auto_hits["value"] >= AUTO_ARM_FRAMES and not auto_armed["value"]:
+                    auto_armed["value"] = True
+                    print(
+                        f"auto-solve: armed (motion {rate:.1f} >= {limit:.1f})",
+                        flush=True,
+                    )
+            else:
+                auto_hits["value"] = 0
+
+            if not auto_armed["value"]:
+                if rate >= 0:
+                    # Visible proof that the scan is alive, and the number it is judging.
+                    settle_label.text = (
+                        f"auto: nudge the mount to re-solve (motion {rate:.1f}, "
+                        f"arms above {limit:.1f})"
+                    )
+                return
+
+            grace = max(1.0, float(recheck_slider.value or AUTO_RECHECK_S))
+            ready_at = auto_solve_ready_at(
+                instruction_at=instruction_at["value"],
+                last_motion_at=last_motion_at["value"],
+                recheck_s=grace,
+                settle_s=AUTO_SOLVE_SETTLE_S,
+            )
+            if now < ready_at:
+                remaining = ready_at - now
+                if now - last_motion_at["value"] < AUTO_SOLVE_SETTLE_S:
+                    settle_label.text = f"auto: waiting for the mount to settle ({remaining:.0f}s)"
+                else:
+                    settle_label.text = f"auto: re-checking in {remaining:.0f}s"
+                return
+            if not stillness.steady_for(AUTO_SOLVE_SETTLE_S, now):
+                settle_label.text = "auto: settling..."
+                return
+            auto_armed["value"] = False
+            auto_hits["value"] = 0
+            print("auto-solve: settled, solving", flush=True)
+            settle_label.text = "settled: re-solving..."
+            await run_solve(skip_settle=True)
+            settle_label.text = ""
 
         with ui.row().classes("items-center justify-center").style("gap: 8px"):
             solve_button = ui.button("capture and solve", on_click=run_solve).classes("mn-action")
             retry_button = ui.button("retry", on_click=retry_solve).classes("mn-retry")
             retry_button.set_visibility(False)
             ignore_motion = ui.switch("ignore the movement check").classes("mn-body")
+        with ui.row().classes("items-center justify-center").style("gap: 8px"):
+            auto_solve = ui.switch(
+                "re-solve when the mount settles",
+                value=True,
+                on_change=lambda event: arm_auto(bool(event.value)),
+            ).classes("mn-body")
+            ui.label("recheck after").classes("mn-dim")
+            recheck_slider = (
+                ui.slider(min=2, max=20, step=1, value=AUTO_RECHECK_S)
+                .props("label-always")
+                .classes("mn-slider")
+                .style("width: 220px")
+            )
+            ui.label("s").classes("mn-dim")
+        ui.timer(0.5, auto_solve_tick)
         ui.label(
             "the movement check compares the picture with itself frame to frame. It is a "
             "guess: a starfield on a monitor, a dimming screen or a cloud edge can look like "
@@ -1276,6 +1578,7 @@ def render_point(ctx: Context) -> None:
             target_radius_arcmin=target_radius_arcmin(ctx),
             roll_direction=direction,
             interval_s=ctx.state.reframe_interval_s,
+            hint=altaz_line(ctx, aimed[0], aimed[1]),
         )
         overlay_html.set_content(painting.svg(snapshot.data_uri))
 
@@ -1286,11 +1589,12 @@ def render_point(ctx: Context) -> None:
             stillness.observe(snapshot, time.monotonic())
             mount_label.text = stillness.describe()
         state = roll_page_state(ctx, station)
-        aimed_now = getattr(getattr(station, "camera", None), "pointing", None)
+        aimed_now = _aimed_now(ctx, station)
         if state is None:
             # The picture is still worth showing without the marks.
             draw_overlay(snapshot, None, None, None)
             advice_line.text = ""
+            aim_advice.text = ""
             detail.text = ""
             ccw_label.classes(replace="mn-dim")
             cw_label.classes(replace="mn-dim")
@@ -1331,7 +1635,7 @@ def render_point(ctx: Context) -> None:
         draw_overlay(snapshot, aimed_now, roll, advice.direction)
 
         if aim_advice is not None:
-            aimed = getattr(getattr(station, "camera", None), "pointing", None)
+            aimed = _aimed_now(ctx, station)
             rig = rig_for(ctx)
             if (
                 aimed is not None
@@ -1339,7 +1643,7 @@ def render_point(ctx: Context) -> None:
                 and ctx.state.target_ra_deg is not None
                 and ctx.state.target_dec_deg is not None
             ):
-                aim_advice.text = "\n".join(
+                lines = list(
                     frame_advice(
                         ra_deg=aimed[0],
                         dec_deg=aimed[1],
@@ -1351,6 +1655,10 @@ def render_point(ctx: Context) -> None:
                         interval_s=ctx.state.reframe_interval_s,
                     ).describe()
                 )
+                hint = altaz_line(ctx, aimed[0], aimed[1])
+                if hint is not None:
+                    lines.append(hint)
+                aim_advice.text = "\n".join(lines)
 
         # A completed solve fills the facts in; the tick does not re-run the solver.
         if ctx.state.solved and not solve_facts.text:
@@ -1381,8 +1689,12 @@ def _solve(
     camera = getattr(station, "camera", None) if station is not None else None
     if station is None or camera is None or getattr(camera, "capture_to", None) is None:
         return None, "this camera cannot capture in this session (the fake one cannot)"
-    if stillness is not None and not ignore_motion and stillness.moving:
-        return None, f"{stillness.describe()} -- wait for it to settle, then solve again"
+    if (
+        stillness is not None
+        and not ignore_motion
+        and not stillness.steady_for(AUTO_SOLVE_SETTLE_S)
+    ):
+        return None, "live view has not held still long enough -- wait, then solve again"
     if ctx.settings.astap is None:
         return None, "astap_cli.exe not found -- run preflight"
 
@@ -1390,12 +1702,67 @@ def _solve(
     # here. Re-aiming on every solve would silently undo the nudge the user just made -- and
     # the nudge is the measurement.
 
+    # Set the solve exposure explicitly. The dials at POINT are whatever the body was last
+    # left at, which may be a live-view-friendly fraction of a second -- and ASTAP needs
+    # stars, not a preview. Restored immediately after the shutter so the operator's own
+    # setting (and the run's, applied later) is not silently rewritten by a solve.
+    solve_iso = int(ctx.state.iso or SOLVE_ISO_DEFAULT)
+    restore = None
+    changed = False
+    if getattr(camera, "apply", None) is not None:
+        # Read before writing, and refuse to write if the old values cannot be restored:
+        # the failure that matters is leaving the body at the solve exposure, where live
+        # view is grainy and a longer simulated exposure makes every frame look different.
+        try:
+            restore = station.get_settings()
+        except Exception as exc:
+            return None, (
+                "cannot read the camera's current ISO and shutter, so a solve cannot put "
+                f"them back: {type(exc).__name__}: {exc}"
+            )
+        if restore.iso <= 0 or restore.shutter_seconds <= 0:
+            return None, (
+                "cannot restore the camera after a solve: ISO or shutter speed is not "
+                "readable (set ISO manually and leave the mode dial on M)"
+            )
+        try:
+            station.apply(CameraSettings(iso=solve_iso, shutter_seconds=SOLVE_EXPOSURE_S))
+            changed = True
+        except Exception as exc:
+            return None, f"could not set the solve exposure: {type(exc).__name__}: {exc}"
+        print(
+            f"solve: ISO {restore.iso} {restore.shutter_seconds:g}s -> "
+            f"ISO {solve_iso} {SOLVE_EXPOSURE_S:g}s",
+            flush=True,
+        )
+
     opened_at = time.monotonic()
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
     suffix = ".fit" if getattr(camera, "disposable_frames", False) else ".cr2"
     raw = ctx.settings.paths.frames / f"point_{stamp}{suffix}"
     try:
-        station.capture_to(raw)
+        try:
+            station.capture_to(raw)
+        finally:
+            if changed and restore is not None:
+                try:
+                    station.apply(restore)
+                except Exception as exc:
+                    print(
+                        f"solve: could not restore the camera: {type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                else:
+                    print("solve: camera settings restored", flush=True)
+                # The exposure change -- and the restore -- is a scene change, not mount
+                # motion. Without this the operator sees "mount moving" for the whole
+                # stillness window after a solve, and the preview's frozen stretch is
+                # still calibrated for the solve frame.
+                if stillness is not None:
+                    stillness.reset()
+                restretch = getattr(station, "restretch", None)
+                if restretch is not None:
+                    restretch()
         if raw.suffix.lower() in {".fit", ".fits"}:
             converted = raw  # the fake writes what ASTAP reads directly
         elif ctx.settings.dcraw is not None:
@@ -1505,7 +1872,11 @@ def _solve(
         width_px=int(getattr(camera, "last_width", 0) or 0) or (profile.width_px if profile else 0),
         expected_width_deg=expected,
     )
-    ctx.refresh()
+    # Do NOT refresh the page here. This runs on the io_bound worker, and a refresh
+    # deletes the labels the caller is about to write `note` into -- NiceGUI then drops
+    # those writes with "element deleted", which is why a *successful* solve looked like
+    # nothing happened. The overlay and advice are updated by the caller and the tick;
+    # the nav guard is refreshed there too, on the event loop.
     note = f"solved from {converted.name}"
     if used_blind:
         note += "  (blind: the hint missed, so the mount may have moved)"
@@ -1603,6 +1974,8 @@ def render_run(ctx: Context) -> None:
     metrics = ui.label("").classes("mn-metrics")
     warning = ui.label("").classes("mn-warn")
     hint = ui.label("").classes("mn-dim")
+    # Materialise the automatic name now, so the path shown is the one the run will use.
+    ui.label(f"captures: {session_directory(ctx)}").classes("mn-dim")
 
     progress = (
         ui.linear_progress(value=0.0, show_value=False).props("rounded").classes("mn-progress")
@@ -1811,7 +2184,7 @@ def render_run(ctx: Context) -> None:
                 target_ra_deg=ctx.state.target_ra_deg,
                 target_dec_deg=ctx.state.target_dec_deg,
             ),
-            frames_dir=ctx.settings.paths.frames,
+            frames_dir=session_directory(ctx),
             scratch_dir=ctx.settings.paths.scratch,
             dcraw=ctx.settings.dcraw,
             resolve=resolve_again,

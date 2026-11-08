@@ -172,12 +172,17 @@ def test_cold_start_reaches_a_far_offset() -> None:
 
 
 def test_at_current_skips_homing_and_search() -> None:
-    """The per-reframe check must be cheap: no home, no long walk."""
+    """The per-reframe check must be cheap: no home, no long walk.
+
+    The budget is not 40 pulses any more because the refine pass now spot-checks the window
+    around its landing rather than trusting the fit's own prediction. That costs a handful of
+    pulses and buys the trough between two search strides. Still nowhere near a long walk.
+    """
     driver = FakeFocuser(best=500)
     driver.reset_position(470)
     result = autofocus(driver, RoutineConfig(), start=Start.AT_CURRENT, ratios=REAL_RATIOS)
     assert result.ok
-    assert result.pulses < 40
+    assert result.pulses < 60
     assert abs(driver.position - 500) <= 40
 
 
@@ -217,6 +222,32 @@ def test_the_sweep_says_which_way_it_is_going() -> None:
     assert "sweeping toward near" in notes
 
 
+def test_the_observation_hook_sees_every_measurement() -> None:
+    """The field log is built from this hook, so it must not skip rejected frames.
+
+    A run that looks wrong is diagnosed from the shape of the samples -- which arm
+    improved, where the field died -- and a rejected measurement is exactly the
+    data point that explains a missing shoulder.
+    """
+    driver = FakeFocuser(best=500, detect_limit=5.0)
+    driver.reset_position(900)  # well out of focus: the first measurements are unusable
+    seen: list[FocusSample] = []
+
+    result = autofocus(
+        driver,
+        RoutineConfig(),
+        start=Start.AT_CURRENT,
+        ratios=REAL_RATIOS,
+        on_sample=seen.append,
+    )
+
+    assert seen, "the routine measured nothing"
+    assert any(not sample.accepted for sample in seen), "rejected frames were not reported"
+    # Every sample the routine kept is the same object the hook saw: nothing was
+    # measured behind the log's back, and nothing in `samples` is a reconstruction.
+    assert all(any(kept is sample for sample in seen) for kept in result.samples)
+
+
 # -- generic across lenses ---------------------------------------------------
 def test_a_narrow_window_is_not_stepped_over() -> None:
     """The 400 mm end: an in-focus window ~100 units wide, a stride that may reach 96."""
@@ -227,9 +258,15 @@ def test_a_narrow_window_is_not_stepped_over() -> None:
 
     assert result.ok
     assert abs(driver.position - 1000) <= 40, f"landed at {driver.position}, focus is at 1000"
-    # No step may be wider than the narrowest window we expect to find.
-    positions = [sample.position for sample in result.samples]
-    widest = max(abs(b - a) for a, b in pairwise(positions))
+    # No *search* step may be wider than the narrowest window we expect to find. Two moves in
+    # the sample list are deliberate rather than search strides: the return to the start
+    # between the up and down arms, and the final landing on the fitted trough. Drop both --
+    # slice to the sweep's own samples and split at the peak where the up arm ends -- then
+    # police what is left.
+    sweep = [sample.position for sample in result.samples[: result.sweep_samples]]
+    peak = sweep.index(max(sweep))
+    arms = (sweep[: peak + 1], sweep[peak + 1 :])
+    widest = max(abs(b - a) for arm in arms for a, b in pairwise(arm))
     assert widest <= RoutineConfig().sweep_step_max_units
 
 

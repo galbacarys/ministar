@@ -58,6 +58,15 @@ PULSE_SETTLE_S = 0.06
 #: Hard cap so a stuck key cannot grow the backlog without bound.
 MAX_QUEUED = 300
 
+#: Live-view frames averaged into one published frame by default.
+#:
+#: Live view is a 1056x704 JPEG at whatever ISO the body is set to, and that is what the
+#: focus HFD is measured on. At a well-focused position an in-focus star is only a couple
+#: of pixels across, so a single noisy frame lets the detector latch onto different noise
+#: peaks each time and the reported HFD swings several pixels. Averaging pixels rather than
+#: HFDs is the fix: the detector sees the same stars in every averaged frame.
+DEFAULT_LIVE_AVERAGE = 4
+
 
 def thumbnail(gray: np.ndarray, size: int = 32) -> np.ndarray:
     """Coarse grayscale thumbnail, used only to answer "did the pixels move?"."""
@@ -87,7 +96,12 @@ class Analysis:
 
 
 def analyse(jpeg: bytes) -> Analysis:
-    image = decode_jpeg(jpeg)
+    """Analyse one live-view JPEG (the single-frame path)."""
+    return analyse_image(decode_jpeg(jpeg))
+
+
+def analyse_image(image: np.ndarray) -> Analysis:
+    """Analyse an already-decoded frame, averaged or not."""
     height, width = image.shape[:2]
     gray = to_gray(image)
     # Pass the INTEGER image: saturation_level returns None for float, which would
@@ -540,6 +554,9 @@ class Station:
         #: afterwards whether the mount was moving *while* the shutter was open.
         self._motion: deque[tuple[float, float]] = deque(maxlen=240)
         self._mark: np.ndarray | None = None
+        #: Live-view frames waiting to be averaged into the next published frame.
+        self._accum: list[np.ndarray] = []
+        self._live_average = DEFAULT_LIVE_AVERAGE
         #: The display stretch for the preview. Frozen between frames (livestretch.py).
         self._stretch = LiveStretch()
         self._snap = Snapshot(name=getattr(camera, "name", "camera"), error=initial_error)
@@ -614,6 +631,24 @@ class Station:
     def suspended(self) -> bool:
         return self._suspended.is_set()
 
+    @property
+    def live_average(self) -> int:
+        """How many live-view frames are averaged into one published frame."""
+        return self._live_average
+
+    def set_live_average(self, frames: int) -> None:
+        """Average ``frames`` live-view frames before measuring and showing one.
+
+        The trade is explicit: the published rate falls by this factor and the noise the
+        detector sees falls by roughly its square root. ``1`` disables it. Any frames
+        already buffered are dropped, so the next published frame is a clean average of
+        the new setting rather than a mix of old and new exposure.
+        """
+        count = max(1, min(16, int(frames)))
+        with self._lock:
+            self._live_average = count
+            self._accum.clear()
+
     def _forget_motion(self) -> None:
         """Drop the change/motion history, because a gap is not a measurement.
 
@@ -627,6 +662,9 @@ class Station:
             self._last_thumb_at = None
             self._mark = None
             self._motion.clear()
+            # Frames grabbed before a capture or a settings change are a different scene;
+            # averaging them with the ones after would smear across the gap.
+            self._accum.clear()
 
     # -- work submitted to the pump thread ---------------------------------
     def capture_to(self, path, *, wait_s: float = CAPTURE_WAIT_S, **kwargs):
@@ -746,7 +784,16 @@ class Station:
     # -- pump internals -----------------------------------------------------
     def _publish(self, **changes) -> None:
         with self._lock:
+            before = self._snap.error
             self._snap = replace(self._snap, **changes)
+            after = self._snap.error
+        # Persist transitions as well as the screen: the console runs without a visible
+        # window, so an error the user saw in a browser was previously the *only* copy.
+        # Diagnosing "reconnect does not work" from a phone screenshot is guesswork.
+        if after and after != before:
+            print(f"camera: {after}", flush=True)
+        elif before and not after:
+            print("camera: connected", flush=True)
 
     def _run(self) -> None:
         try:
@@ -867,6 +914,8 @@ class Station:
         if not self._live_started:
             return
         self._live_started = False
+        with self._lock:
+            self._accum.clear()
         stop = getattr(self._camera, "stop_live_view", None)
         if stop is None:
             return
@@ -892,7 +941,22 @@ class Station:
             # start that fails halfway still has to be undone by the stand-down path.
             self._live_started = True
             jpeg = self._camera.grab_live_jpeg()
-            analysis = analyse(jpeg)
+            image = decode_jpeg(jpeg)
+            # Average several frames before anything measures or displays them. Pixel
+            # averaging is not the same as averaging HFDs afterwards: it stops the star
+            # detector from latching onto a different set of noise peaks in every frame.
+            with self._lock:
+                self._accum.append(image)
+                if len(self._accum) < self._live_average:
+                    return
+                frames = self._accum
+                self._accum = []
+            if len(frames) > 1:
+                stacked = np.mean(np.stack(frames, axis=0), axis=0)
+                image = np.clip(stacked, 0, 255).astype(np.uint8)
+            else:
+                image = frames[0]
+            analysis = analyse_image(image)
             # What the screens show is the stretched frame, never the camera's own JPEG: on a
             # dark field the raw one is a black rectangle with a few dots in it, and the
             # screen exists to let a human judge star shape.

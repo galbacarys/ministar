@@ -63,6 +63,22 @@ stop() {
         echo "nothing listening on port $PORT"
         return 0
     fi
+    # Ask before killing. The app's /_shutdown stands live view down and closes the
+    # EDSDK session; `taskkill /F` runs no Python teardown and can leave the body
+    # streaming to a dead process, which is how a restart came back as "camera cannot
+    # connect". The route is local-only; reach it through curl.exe because WSL's own
+    # stack can answer for itself (00 §5). A 404 from an older server falls through.
+    if (cd /mnt/c && cmd.exe /c "curl.exe -sf -o NUL -X POST http://127.0.0.1:$PORT/_shutdown" >/dev/null 2>&1); then
+        for _ in $(seq 1 40); do
+            [[ -z "$(pid_on_port)" ]] && { echo "stopped"; return 0; }
+            sleep 0.25
+        done
+        echo "warning: graceful stop did not exit; killing PID $pid" >&2
+        pid="$(pid_on_port)"
+    else
+        echo "graceful stop unavailable; killing PID $pid"
+    fi
+    [[ -z "$pid" ]] && { echo "stopped"; return 0; }
     echo "stopping PID $pid on port $PORT"
     taskkill.exe /F /PID "$pid" >/dev/null 2>&1 || {
         echo "error: taskkill failed for PID $pid" >&2
@@ -111,7 +127,9 @@ WIN_DEST="$(wslpath -w "$DEST")"
 # Background + redirect: this shell must return while the server keeps running.
 # Without both, WSL interop holds the pipe open and the call looks hung even though
 # the app started fine. The .bat owns the argument quoting, as 00 §5 recommends.
-cmd.exe /c "$WIN_DEST\\tools\\ui.bat $*" >>"$LOG" 2>&1 &
+# ${args[*]}, not $*: the loop above strips --stop/--restart/--help, and the app's
+# argparse must never see them (it rejects unknown flags and exits 2).
+cmd.exe /c "$WIN_DEST\\tools\\ui.bat ${args[*]}" >>"$LOG" 2>&1 &
 
 # Report the truth, from Windows. A refused connection is expected while NiceGUI
 # boots, so retry: `|| true` matters because curl exits 7 on a refusal and

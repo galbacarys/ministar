@@ -125,6 +125,38 @@ def test_a_noisy_field_raises_its_own_threshold() -> None:
     assert "of" in noisy.describe(), "the readout should say what it is comparing against"
 
 
+def test_a_solve_exposure_change_can_be_forgotten() -> None:
+    """A solve changes ISO/Tv and restores them; that transition is not a moving mount."""
+    tracker = quality.Stillness()
+    _feed(tracker, [(0.9, 2.6)] * 6)
+    tracker.observe(_Snap(40.0, 2.6), 3.0)  # the solve exposure's much noisier frames
+    assert tracker.moving
+
+    tracker.reset()
+
+    assert not tracker.moving, "the transition was still being judged after the reset"
+    assert tracker.motion == -1.0
+    assert tracker.describe() == "no live view yet"
+
+
+def test_a_one_second_settle_judges_only_the_last_second() -> None:
+    """The window is 5 s; "the hand has stopped" must not take 5 s to notice."""
+    tracker = quality.Stillness()
+    for index in range(8):
+        tracker.observe(_Snap(0.9, 2.6), index * 0.25)
+
+    tracker.observe(_Snap(40.0, 2.6), 2.0)  # a hand on the head, inside the window
+    assert not tracker.steady_for(1.0, now=2.6)
+    assert not tracker.steady_for(1.0, now=2.9)
+
+    tracker.observe(_Snap(0.9, 2.6), 3.0)
+    tracker.observe(_Snap(0.9, 2.6), 3.3)
+    assert tracker.steady_for(1.0, now=3.3), "a full second of quiet was not enough"
+
+    # One sample is not a settle: it can be the gap between a pulse and the frame that shows it.
+    assert not quality.Stillness().steady_for(1.0, now=10.0)
+
+
 def test_a_real_bump_still_fires_above_a_noisy_floor() -> None:
     """Raising the limit must not make the gate deaf: a hand moves whole cells, not 10%."""
     tracker = quality.Stillness()

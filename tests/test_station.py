@@ -148,7 +148,7 @@ def analysed(monkeypatch) -> None:
     """
     from ministar.focus.synth import StarField  # noqa: F401  (documents where frames come from)
 
-    def fake_analyse(jpeg: bytes) -> Analysis:
+    def fake_analysis() -> Analysis:
         return Analysis(
             hfd=1.8,
             stars=12,
@@ -159,6 +159,19 @@ def analysed(monkeypatch) -> None:
             height=704,
         )
 
+    def fake_analyse(jpeg: bytes) -> Analysis:
+        return fake_analysis()
+
+    def fake_decode(jpeg: bytes) -> np.ndarray:
+        return synthetic_frame()
+
+    def fake_analyse_image(image: np.ndarray) -> Analysis:
+        return fake_analysis()
+
+    # The station decodes first now, because averaging happens on pixels before any
+    # measurement; both seams are stubbed so these tests stay about serialisation.
+    monkeypatch.setattr(station_module, "decode_jpeg", fake_decode)
+    monkeypatch.setattr(station_module, "analyse_image", fake_analyse_image)
     monkeypatch.setattr(station_module, "analyse", fake_analyse)
 
 
@@ -330,8 +343,12 @@ def test_the_frame_after_a_capture_reports_no_motion(analysed) -> None:
         wait_until(lambda: station.snapshot().motion >= 0.0)
 
         station.capture_to(Path("one.cr2"))
-        after = camera.frames
-        wait_until(lambda: camera.frames > after)
+        # Count from *after* capture_to returns: it blocks until the job is done and
+        # `_forget_motion` has run, and any frame published while it was queued is still
+        # a pre-capture frame with a real motion reading. Published frames, not the
+        # camera's counter, are what the snapshot exposes.
+        before = station.snapshot().frames
+        wait_until(lambda: station.snapshot().frames > before)
         # The frame after a capture is not comparable with the one from before it: whatever
         # happened during the shutter and the download is not sky motion divided by elapsed
         # time. Reporting it would tell POINT that the mount is moving (or, after a long

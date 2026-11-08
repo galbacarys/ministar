@@ -247,6 +247,7 @@ def test_selecting_a_target_unblocks_next_immediately(tmp_path) -> None:
     )
     row = {
         "label": "M31",
+        "code": "M31",
         "ra": 10.6847,
         "dec": 41.269,
         "major": 178.0,
@@ -256,11 +257,68 @@ def test_selecting_a_target_unblocks_next_immediately(tmp_path) -> None:
     select_row(ctx, row)
 
     assert state.target_name == "M31"
+    assert state.target_code == "M31"
     assert state.target_major_arcmin == 178.0
     assert nav_calls == [1], "the shell must be told, or NEXT never re-enables"
 
 
 # -- the parameters screen --------------------------------------------------
+def test_a_new_target_clears_an_automatic_session_name(tmp_path) -> None:
+    from ministar.config import Settings
+    from ministar.session import SessionState
+    from ministar.ui.screens import Context, select_row
+
+    state = SessionState(
+        target_code="M31",
+        session_name="2026_11_07-22-15-M31",
+        session_name_auto=True,
+    )
+    ctx = Context(state=state, settings=Settings.load(tmp_path), station=None, refresh=lambda: None)
+
+    select_row(
+        ctx,
+        {"label": "NGC0224", "code": "NGC0224", "ra": 10.7, "dec": 41.3},
+    )
+
+    assert state.session_name is None, "the old target's folder must not be reused"
+    assert state.target_code == "NGC0224"
+
+
+def test_a_typed_session_name_survives_a_target_change(tmp_path) -> None:
+    from ministar.config import Settings
+    from ministar.session import SessionState
+    from ministar.ui.screens import Context, select_row
+
+    state = SessionState(target_code="M31", session_name="my run", session_name_auto=False)
+    ctx = Context(state=state, settings=Settings.load(tmp_path), station=None, refresh=lambda: None)
+
+    select_row(ctx, {"label": "NGC0224", "code": "NGC0224", "ra": 10.7, "dec": 41.3})
+
+    assert state.session_name == "my run"
+
+
+def test_the_session_folder_is_fixed_once_and_reused(tmp_path) -> None:
+    """Stopping and restarting a run must not create a second folder."""
+    import types
+
+    from ministar.session import SessionState
+    from ministar.ui.screens import session_directory
+
+    state = SessionState(target_code="M31", output_root=str(tmp_path))
+    ctx = types.SimpleNamespace(
+        state=state,
+        settings=types.SimpleNamespace(paths=types.SimpleNamespace(output=tmp_path / "default")),
+    )
+
+    first = session_directory(ctx)
+    second = session_directory(ctx)
+
+    assert first == second
+    assert first.parent == tmp_path
+    assert first.name.endswith("-M31")
+    assert state.session_name == first.name
+
+
 def test_the_retained_frame_diagram_is_two_nested_rectangles() -> None:
     """The only "preview" this screen needs: how much frame the interval costs."""
     svg = screens.geometry_svg(5202, 3464, 3000, 3464)

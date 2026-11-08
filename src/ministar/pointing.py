@@ -474,6 +474,102 @@ class SolveReport:
         return self.solved_fraction is None or self.solved_fraction >= MIN_USEFUL_FRACTION
 
 
+@dataclass(frozen=True)
+class AltAzAdvice:
+    """The same correction in the frame the *head* turns in, not the sky's.
+
+    The picture arrow lives in image pixels, which is right for reading the screen but not
+    for turning a pan/tilt head: a user cannot look at an east/north offset and know which
+    knob that is. This is the ground-frame version -- altitude and azimuth -- derived from
+    the same two positions, so the words and the arrow cannot disagree about the amount.
+    """
+
+    altitude_deg: float
+    azimuth_deg: float
+    move_alt_deg: float
+    move_az_deg: float
+    usable: bool = True
+    note: str = ""
+
+    def describe(self) -> str:
+        if not self.usable:
+            return self.note
+        parts: list[str] = []
+        if abs(self.move_alt_deg) >= 0.05:
+            direction = "up" if self.move_alt_deg > 0 else "down"
+            parts.append(f"tilt {direction} {abs(self.move_alt_deg):.1f} deg")
+        if abs(self.move_az_deg) >= 0.05:
+            # Azimuth increases clockwise seen from above, which is to the operator's right
+            # when standing behind the camera -- whatever compass bearing it is facing.
+            direction = "right" if self.move_az_deg > 0 else "left"
+            parts.append(f"pan {direction} {abs(self.move_az_deg):.1f} deg")
+        if not parts:
+            return f"alt/az: within 0.05 deg (alt {self.altitude_deg:.1f})"
+        # Above ~70 deg a pan of one degree moves the field by cos(alt) of that, so warn
+        # before the operator concludes the pan knob is broken (04 section 1.5).
+        weak = "  (pan is weak this high)" if self.altitude_deg > 70.0 else ""
+        return (
+            f"alt/az: move {' and '.join(parts)} "
+            f"(now alt {self.altitude_deg:.1f}, az {self.azimuth_deg:.1f}){weak}"
+        )
+
+
+def altaz_advice(
+    *,
+    ra_deg: float,
+    dec_deg: float,
+    target_ra_deg: float,
+    target_dec_deg: float,
+    lst_deg: float,
+    latitude_deg: float,
+) -> AltAzAdvice:
+    """Altitude/azimuth correction from where the camera is to the target.
+
+    Azimuth runs north through east, so a positive move is clockwise seen from above --
+    that is "pan right" for the operator standing behind the camera. Near the zenith the
+    required azimuth grows without bound while the pan knob barely moves the field; that
+    case is reported instead of printing an impossible angle.
+    """
+    from ministar.sky import altaz_deg
+
+    alt_now, az_now = altaz_deg(ra_deg, dec_deg, lst_deg, latitude_deg)
+    alt_target, az_target = altaz_deg(target_ra_deg, target_dec_deg, lst_deg, latitude_deg)
+    alt_now = float(alt_now)
+    az_now = float(az_now)
+    alt_target = float(alt_target)
+    az_target = float(az_target)
+    # Shortest way round: 359 deg and 1 deg are two degrees apart, not 358.
+    move_az = (az_target - az_now + 180.0) % 360.0 - 180.0
+    move_alt = alt_target - alt_now
+    if alt_now > 85.0 or alt_target > 85.0:
+        return AltAzAdvice(
+            altitude_deg=alt_now,
+            azimuth_deg=az_now,
+            move_alt_deg=move_alt,
+            move_az_deg=move_az,
+            usable=False,
+            note=(
+                "target is near the zenith: the pan knob barely moves the field -- "
+                "tilt and pan in small steps"
+            ),
+        )
+    if alt_target < 0.0:
+        return AltAzAdvice(
+            altitude_deg=alt_now,
+            azimuth_deg=az_now,
+            move_alt_deg=move_alt,
+            move_az_deg=move_az,
+            usable=False,
+            note="target is below the horizon -- check the time and the target",
+        )
+    return AltAzAdvice(
+        altitude_deg=alt_now,
+        azimuth_deg=az_now,
+        move_alt_deg=move_alt,
+        move_az_deg=move_az,
+    )
+
+
 def describe(
     solution: Solution,
     *,
@@ -616,8 +712,10 @@ __all__ = [
     "HINT_FLOOR_RADIUS_DEG",
     "HINT_MAX_USEFUL_RADIUS_DEG",
     "MIN_USEFUL_FRACTION",
+    "AltAzAdvice",
     "FrameAdvice",
     "SolveReport",
+    "altaz_advice",
     "at_entry",
     "best_start",
     "corner_name",
