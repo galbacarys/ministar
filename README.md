@@ -87,6 +87,10 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 15 | [stacking-pipeline-and-calibration.md](docs/research/15-stacking-pipeline-and-calibration.md) | Per-frame accumulator, why no dark library, flats at the end. |
 | 16 | [verified-hardware-eos-60d.md](docs/research/16-verified-hardware-eos-60d.md) | First hardware run: STM focus-by-wire works, 0xA102 is warm-up, HFD fabricates stars. |
 
+Field notes from real sessions live in [`docs/field-notes/`](docs/field-notes/). The first
+one, [2026-11-07](docs/field-notes/2026-11-07.md), records the first real solve, focus run
+and captures, plus the flat/packaging/Raspberry Pi work that follows.
+
 ## Findings that change the design
 
 These came out of the research and are load-bearing:
@@ -247,13 +251,14 @@ Two things worth knowing before editing:
 
 ## Status
 
-The wizard runs end to end, from PREFLIGHT to DONE, on Windows. 575 tests pass, and the
+The wizard runs end to end, from PREFLIGHT to DONE, on Windows. 680 tests pass, and the
 commit history records the defects found by running against the user's own frames and the real
 body rather than only synthetic data. Two different kinds of confidence apply, and the
 difference matters when reading the table below: the **camera** path has been verified on the
-hardware it will ship against (an EOS 60D), while the **stack** path has so far only seen
-synthetic frames. The fake rig is a real star field -- decoded from ASTAP's own database -- but
-it is still one mono plane, not three CFA planes of independent sensor noise.
+hardware it will ship against (an EOS 60D), and the **stack** path has now run on real captures
+(2026-11-07) although the resulting image has not been reviewed for quality. The fake rig is a
+real star field -- decoded from ASTAP's own database -- but it is still one mono plane, not three
+CFA planes of independent sensor noise.
 
 **Working**
 
@@ -277,11 +282,11 @@ it is still one mono plane, not three CFA planes of independent sensor noise.
 |---|---|---|
 | `CALIBRATE` phase + head profile store | 12, 13 | no `Phase` member; `render_calibrate` is a `_not_implemented` stub |
 | Knob-turn instructions | 07, 13 | roll advice exists; degrees -> turns needs the head profile above |
-| A run on real frames | 15 | the stack path has never seen a CFA frame; dcraw decode cost is the largest unmeasured term in the per-frame budget |
-| Calibration frames | 15 | the flat divide is wired per frame in sensor coordinates; nothing produces a flat yet. No darks, no bias |
+| Real-frame stack quality review | 15 | first real captures and solves on 2026-11-07 (see the field notes); the stacked output has not been judged |
+| Calibration frames | 15 | the flat divide is wired per frame in sensor coordinates; nothing produces a flat yet. No darks, no bias. The 2026-11-07 field note has the flat checklist |
 | End-of-session restack | 06 | Siril as a subprocess; live stacking does not use it |
-| libgphoto2 camera backend | 14 | for the Linux/SBC target |
-| Native window / packaging | 09, 14 | browser UI works; `--native` and an installer do not exist yet |
+| libgphoto2 camera backend | 14 | for the Linux/SBC target; the 2026-11-07 field note records the Pi constraints |
+| Native window / packaging | 09, 14 | browser UI works; `--native` and an installer do not exist yet. Session persistence across a restart is a prerequisite |
 
 **Outstanding research / validation**
 
