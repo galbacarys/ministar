@@ -16,7 +16,7 @@ import pytest
 
 from ministar.io.fits import read_fits
 from ministar.io.tiff import read_frame_exif, read_tiff_array
-from ministar.raw import DCRAW_ARGS, bayer_pattern, convert_to_fits
+from ministar.raw import DCRAW_ARGS, bayer_pattern, convert_to_fits, decode_raw
 
 
 def build_image_tiff(
@@ -104,8 +104,10 @@ class FakeDcraw:
                     "stderr": "",
                 },
             )()
-        # The real dcraw appends ".tiff" to the input file name.
+        # The real dcraw applies cwd to a relative input name and appends ".tiff".
         raw = Path(args[-1])
+        if not raw.is_absolute() and cwd is not None:
+            raw = Path(cwd) / raw
         (raw.parent / f"{raw.name}.tiff").write_bytes(build_image_tiff(self.image))
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
@@ -136,6 +138,57 @@ def test_the_flags_keep_the_frame_undebayered_and_linear(raw_file: Path, tmp_pat
     convert_call = next(call for call in fake.calls if "-i" not in call)
     assert convert_call[1 : 1 + len(DCRAW_ARGS)] == list(DCRAW_ARGS)
     assert "-D" in convert_call and "-4" in convert_call and "-T" in convert_call
+
+
+def test_a_relative_raw_path_is_resolved_before_changing_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """dcraw runs with cwd=raw.parent; passing the relative path made it double the dir."""
+    raw = tmp_path / "IMG_REL.CR2"
+    raw.write_bytes(b"not really a raw")
+    fake = FakeDcraw(np.zeros((2, 2), dtype=np.uint16))
+    monkeypatch.chdir(tmp_path)
+
+    convert_to_fits(Path("IMG_REL.CR2"), dcraw=tmp_path / "dcraw", runner=fake)
+
+    convert_call = next(call for call in fake.calls if "-i" not in call)
+    assert convert_call[-1] == "IMG_REL.CR2", "the argument must be relative to cwd"
+    assert (tmp_path / "IMG_REL.fit").is_file()
+
+
+def test_decode_raw_can_keep_the_tiff_for_a_later_solver(raw_file: Path, tmp_path: Path) -> None:
+    image = np.arange(24, dtype=np.uint16).reshape(4, 6) * 1000
+    decoded = decode_raw(
+        raw_file,
+        dcraw=tmp_path / "dcraw.exe",
+        pattern="RGGB",
+        keep_tiff=True,
+        runner=FakeDcraw(image),
+    )
+    assert np.array_equal(decoded.pixels, image)
+    assert decoded.pattern == "RGGB"
+    assert decoded.tiff is not None and decoded.tiff.is_file()
+    decoded.tiff.unlink()
+
+
+def test_decode_raw_uses_a_cached_pattern_without_probing(
+    raw_file: Path, tmp_path: Path
+) -> None:
+    fake = FakeDcraw(np.zeros((2, 2), dtype=np.uint16), pattern="BGGR")
+    decoded = decode_raw(raw_file, dcraw=tmp_path / "dcraw", pattern="RGGB", runner=fake)
+
+    assert decoded.pattern == "RGGB"
+    assert all("-i" not in call for call in fake.calls), "a cached pattern must skip dcraw -i"
+
+
+def test_decode_raw_removes_the_tiff_by_default(raw_file: Path, tmp_path: Path) -> None:
+    decode_raw(
+        raw_file,
+        dcraw=tmp_path / "dcraw",
+        pattern="RGGB",
+        runner=FakeDcraw(np.zeros((2, 2), dtype=np.uint16)),
+    )
+    assert list(tmp_path.glob("*.tiff")) == []
 
 
 def test_the_intermediate_tiff_is_removed(raw_file: Path, tmp_path: Path) -> None:

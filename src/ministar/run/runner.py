@@ -133,6 +133,9 @@ class Runner:
         self._frames_dir = Path(frames_dir)
         self._scratch_dir = Path(scratch_dir) if scratch_dir is not None else self._frames_dir
         self._dcraw = dcraw
+        #: The CFA pattern is a property of the body, not the frame. Probe it once per run
+        #: instead of running ``dcraw -i -v`` on every capture.
+        self._bayer: str | None = None
         self._model = model
         #: Built from the first *frame*, not from the rig profile: dcraw reports the raw
         #: sensor area (5202x3465 on the 60D) while EXIF and a solved profile can say
@@ -396,18 +399,36 @@ class Runner:
         raw = self._frames_dir / f"run_{self._started_wall:%Y%m%dT%H%M%S}_{index:05d}{suffix}"
         self._capture(raw)
 
-        converted = raw
-        if raw.suffix.lower() not in {".fit", ".fits"}:
+        # Real frames are decoded straight to an array. Writing a FITS per frame cost
+        # ~0.7 s and 35 MB for a container that was read once and deleted; ASTAP reads the
+        # TIFF directly and the CR2 stays as the original. Fake cameras already produce
+        # the decoded file, so that path still reads it.
+        tiff: Path | None = None
+        if raw.suffix.lower() in {".fit", ".fits"}:
+            image, header = read_fits(raw)
+            bayer = normalise_bayer(header.get("BAYERPAT"))
+            solve_path = raw
+        else:
             if self._dcraw is None:
                 raise RuntimeError(
                     "no dcraw: the camera wrote a RAW file and nothing can convert it "
                     "(see PREFLIGHT)"
                 )
-            from ministar.raw import convert_to_fits
+            from ministar.raw import decode_raw
 
-            converted = convert_to_fits(raw, dcraw=self._dcraw)
+            decoded = decode_raw(
+                raw,
+                dcraw=self._dcraw,
+                pattern=self._bayer,
+                keep_tiff=True,
+            )
+            image = decoded.pixels
+            if decoded.pattern:
+                self._bayer = decoded.pattern
+            bayer = normalise_bayer(decoded.pattern or None)
+            tiff = decoded.tiff
+            solve_path = tiff or raw
         try:
-            image, header = read_fits(converted)
             self._shape = (int(image.shape[0]), int(image.shape[1]))
             if self._stack is None:
                 shaped = replace(
@@ -421,21 +442,17 @@ class Runner:
                     target_ra_deg=self._config.target_ra_deg,
                     target_dec_deg=self._config.target_dec_deg,
                 )
-            # The pattern is a property of the sensor, so it is the same every frame; read
-            # it off each header anyway rather than remembering it into a stale state.
-            bayer = normalise_bayer(header.get("BAYERPAT"))
             if bayer is not None and self._stack.bayer is None:
                 self._stack.bayer = bayer
             result = self._stack.add(image, when, exposure_s=self._config.exposure_s)
             if not result.accepted and result.reason.startswith("the mount moved"):
-                recovered = self._try_recover(converted, when, image)
+                recovered = self._try_recover(solve_path, when, image)
                 if recovered is not None:
                     result = recovered
         finally:
-            # The FITS conversion is always scratch (the RAW is the original); a disposable
-            # camera's file is scratch too.
-            if converted != raw:
-                converted.unlink(missing_ok=True)
+            # The TIFF is scratch; the CR2 (when kept) is the original.
+            if tiff is not None:
+                tiff.unlink(missing_ok=True)
         if not self._config.keep_frames:
             raw.unlink(missing_ok=True)
         else:

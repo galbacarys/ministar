@@ -1,0 +1,35 @@
+[Unit]
+Description=ministar console (development unit on astroberry)
+Documentation=https://github.com/galbacarys/ministar
+After=NetworkManager.service avahi-daemon.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=astroberry
+Group=astroberry
+SupplementaryGroups=plugdev
+WorkingDirectory=/home/astroberry/ministar
+Environment=HOME=/home/astroberry
+Environment=MINISTAR_HOME=/home/astroberry/.ministar
+Environment=MINISTAR_CAMERA=gphoto2
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/astroberry/ministar/.venv/bin/python -m ministar.ui.app \
+  --host 0.0.0.0 --port 443 \
+  --ssl-certfile /home/astroberry/.ministar/tls/leaf.crt \
+  --ssl-keyfile /home/astroberry/.ministar/tls/leaf.key \
+  --http-port 80 --ca-cert /home/astroberry/.ministar/tls/ca.crt \
+  --no-show
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGTERM
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/home/astroberry/.ministar /media
+
+[Install]
+WantedBy=multi-user.target

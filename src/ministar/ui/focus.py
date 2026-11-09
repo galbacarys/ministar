@@ -413,10 +413,10 @@ def run(
         connect = None
         initial_error = ""
     else:
-        from ministar.camera import EdsdkCamera
+        from ministar.camera import make_camera
 
-        camera = EdsdkCamera()
-        # The pump thread opens the session, not this one: EDSDK calls belong to the thread
+        camera = make_camera()
+        # The pump thread opens the session, not this one: camera calls belong to the thread
         # that opened it (see Station). Errors arrive on the snapshot, where the screen shows
         # them, rather than as a startup dialog that would have to block to get them.
         connect = camera.connect

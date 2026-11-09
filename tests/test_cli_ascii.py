@@ -36,10 +36,12 @@ def test_camera_checklist_is_ascii() -> None:
         item.encode("ascii")
 
 
-def test_cli_preflight_output_is_ascii(tmp_path: Path, capsys) -> None:
+def test_cli_preflight_output_is_ascii(tmp_path: Path, capsys, monkeypatch) -> None:
+    # Force a missing ASTAP rather than relying on the host not having one: CI and a
+    # developer Pi will differ, and this test is about ASCII output, not the host.
+    monkeypatch.setenv("MINISTAR_ASTAP", str(tmp_path / "no-astap-here"))
     code = main(["--home", str(tmp_path), "preflight"])
     captured = capsys.readouterr()
     captured.out.encode("ascii")
     captured.err.encode("ascii")
-    # No astap in this environment, so preflight must report a blocking failure.
     assert code == 1

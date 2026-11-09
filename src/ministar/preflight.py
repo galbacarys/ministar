@@ -16,6 +16,8 @@ are listed in :data:`CAMERA_CHECKS` so they cannot be silently dropped.
 
 from __future__ import annotations
 
+import grp
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,33 +63,40 @@ def _check_python() -> Check:
 def _check_platform() -> Check:
     if sys.platform == "win32":
         return Check("platform", "ok", "Windows")
+    if sys.platform.startswith("linux"):
+        return Check("platform", "ok", "Linux")
     return Check(
         "platform",
         "warn",
-        f"{sys.platform} -- camera and solver need Windows; pure logic is fine here",
+        f"{sys.platform} -- no camera backend for this platform; pure logic is fine here",
     )
 
 
 def _database_tiles(astap: Path) -> list[str]:
-    """Star database tiles beside the executable (ASTAP looks there first)."""
+    """Star database tiles beside the executable, then the Linux data directory."""
     suffixes = ("*.1476", "*.290", "*.001")
+    roots = (astap.parent, Path("/usr/share/astap/data"))
     found: list[str] = []
-    for suffix in suffixes:
-        found.extend(p.name for p in astap.parent.glob(suffix))
+    seen: set[str] = set()
+    for root in roots:
+        for suffix in suffixes:
+            for path in root.glob(suffix):
+                if path.name not in seen:
+                    seen.add(path.name)
+                    found.append(path.name)
     return found
 
 
 def _check_astap(settings: Settings) -> list[Check]:
     checks: list[Check] = []
     if settings.astap is None:
-        return [
-            Check(
-                "astap",
-                "fail",
-                "astap_cli.exe not found -- set MINISTAR_ASTAP or install to "
-                "C:\\Program Files\\astap",
-            )
-        ]
+        if sys.platform == "win32":
+            hint = "set MINISTAR_ASTAP or install to C:\\Program Files\\astap"
+            name = "astap_cli.exe"
+        else:
+            hint = "set MINISTAR_ASTAP or install to /opt/astap"
+            name = "astap_cli"
+        return [Check("astap", "fail", f"{name} not found -- {hint}")]
 
     checks.append(Check("astap", "ok", str(settings.astap)))
 
@@ -155,6 +164,95 @@ def _check_edsdk(settings: Settings) -> list[Check]:
     return [Check("edsdk", "ok", str(path))]
 
 
+def _check_gphoto2() -> list[Check]:
+    """The Linux camera prerequisites, in the order that actually bites.
+
+    libgphoto2 itself ships inside the Python wheel, so the import is the whole
+    dependency. Permissions, the 32 MB usbfs default and USB autosuspend are the three
+    failures that look like a dead camera rather than a configuration problem.
+    """
+    checks: list[Check] = []
+    try:
+        import gphoto2
+    except ImportError:
+        return [
+            Check(
+                "gphoto2",
+                "fail",
+                "python-gphoto2 is not installed -- `sudo apt install python3-gphoto2` "
+                "or `pip install gphoto2` in the venv",
+            )
+        ]
+    checks.append(Check("gphoto2", "ok", f"python-gphoto2 {gphoto2.__version__}"))
+
+    usbfs = Path("/sys/module/usbcore/parameters/usbfs_memory_mb")
+    if usbfs.is_file():
+        try:
+            value = int(usbfs.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            value = 0
+        if value < 64:
+            checks.append(
+                Check(
+                    "usbfs memory",
+                    "warn",
+                    f"{value} MB -- large CR2 downloads can fail; add "
+                    "usbcore.usbfs_memory_mb=256 to cmdline.txt",
+                )
+            )
+        else:
+            checks.append(Check("usbfs memory", "ok", f"{value} MB"))
+
+    rules = [
+        *Path("/usr/lib/udev/rules.d").glob("*gphoto*"),
+        *Path("/etc/udev/rules.d").glob("*gphoto*"),
+    ]
+    if rules:
+        checks.append(Check("udev", "ok", rules[0].name))
+    else:
+        checks.append(
+            Check(
+                "udev",
+                "warn",
+                "no libgphoto2 udev rule; the camera may need root or a manual ACL",
+            )
+        )
+
+    try:
+        plugdev = grp.getgrnam("plugdev").gr_gid
+    except KeyError:
+        checks.append(Check("camera group", "info", "no plugdev group on this system"))
+    else:
+        if plugdev in os.getgroups():
+            checks.append(Check("camera group", "ok", "plugdev"))
+        else:
+            checks.append(
+                Check(
+                    "camera group",
+                    "warn",
+                    "this user is not in plugdev; the service must be, or USB access "
+                    "will be denied",
+                )
+            )
+
+    canon = []
+    for device in Path("/sys/bus/usb/devices").glob("*"):
+        try:
+            vendor = (device / "idVendor").read_text(encoding="utf-8").strip()
+            product = (device / "idProduct").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if vendor == "04a9":  # Canon
+            canon.append(f"{vendor}:{product}")
+    if canon:
+        checks.append(Check("camera usb", "ok", ", ".join(sorted(canon))))
+    else:
+        checks.append(
+            Check("camera usb", "warn", "no Canon device on the USB bus (plug it in and power on)")
+        )
+    return checks
+
+
 def _check_dirs(settings: Settings) -> Check:
     try:
         settings.paths.ensure()
@@ -171,7 +269,10 @@ def run(settings: Settings) -> list[Check]:
         _check_dirs(settings),
     ]
     checks.extend(_check_astap(settings))
-    checks.extend(_check_edsdk(settings))
+    if sys.platform == "win32":
+        checks.extend(_check_edsdk(settings))
+    else:
+        checks.extend(_check_gphoto2())
     return checks
 
 

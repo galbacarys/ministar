@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -22,7 +23,13 @@ from pathlib import Path
 
 APP_NAME = "ministar"
 
-ASTAP_EXE = "astap_cli.exe"
+
+def _exe(stem: str) -> str:
+    """The platform's executable suffix. Linux has none; Windows always has .exe."""
+    return f"{stem}.exe" if sys.platform == "win32" else stem
+
+
+ASTAP_EXE = _exe("astap_cli")
 EDSDK_DLL = "EDSDK.dll"
 
 
@@ -100,12 +107,16 @@ class Paths:
             path.mkdir(parents=True, exist_ok=True)
 
 
-#: Standard ASTAP install locations on Windows. ASTAP must find its star
-#: database beside the executable, so we look for the exe, not the folder.
+#: Standard ASTAP install locations. ASTAP finds its star database beside the
+#: executable, so we look for the binary, not the folder. The Windows entries are
+#: inert on Linux and vice versa; keeping one tuple makes the search order obvious.
 _ASTAP_DIRS = (
     Path(r"C:\Program Files\astap"),
     Path(r"C:\Program Files (x86)\astap"),
     Path(r"C:\astap"),
+    Path("/opt/astap"),
+    Path("/usr/local/bin"),
+    Path("/usr/bin"),
 )
 
 
@@ -119,6 +130,8 @@ def find_astap(paths: Paths) -> Path | None:
         candidate = directory / ASTAP_EXE
         if candidate.is_file():
             return candidate
+    if found := shutil.which(ASTAP_EXE):
+        return Path(found)
     return None
 
 
@@ -129,6 +142,11 @@ def find_edsdk(paths: Paths) -> Path | None:
     08 §4: ship it inside the installer, keep it out of version control. We
     only ever look in places the user controls.
     """
+    if sys.platform != "win32" and not (
+        os.environ.get("EDSDK_PATH") or os.environ.get("MINISTAR_EDSDK")
+    ):
+        return None
+
     env = os.environ.get("EDSDK_PATH") or os.environ.get("MINISTAR_EDSDK")
     if env:
         candidate = Path(env)
@@ -155,30 +173,42 @@ def find_borrowed_edsdk() -> list[Path]:
     return [path for path in BORROWED_DLLS if Path(path).is_file()]
 
 
-DCRAW_EXE = "dcraw.exe"
+DCRAW_EXE = _exe("dcraw")
+
+#: On Linux either the original dcraw or LibRaw's emulation may be installed. Both
+#: accept the flags in ``ministar.raw``; the original is preferred because that is what
+#: the Windows build ships and what the FITS conversion was verified against.
+_DCRAW_NAMES = ("dcraw", "dcraw_emu") if sys.platform != "win32" else (DCRAW_EXE,)
 
 
 def find_dcraw(astap: Path | None, paths: Paths) -> Path | None:
-    """Locate ``dcraw.exe``, which ships inside the ASTAP installation (01 §9).
+    """Locate the RAW decoder, which ships inside the ASTAP installation on Windows.
 
     Override with ``MINISTAR_DCRAW`` (file or directory). This is the RAW decoder, so
     "not found" is a hard error for conversion and a warning for everything else --
-    ``astap_cli.exe`` cannot read RAW, so nothing else can fill the gap.
+    ``astap_cli`` cannot read RAW, so nothing else can fill the gap.
     """
     env = os.environ.get("MINISTAR_DCRAW")
     if env:
         candidate = Path(env)
         if candidate.is_dir():
-            candidate = candidate / DCRAW_EXE
+            for name in _DCRAW_NAMES:
+                if (candidate / name).is_file():
+                    return candidate / name
+            return None
         return candidate if candidate.is_file() else None
 
-    directories = [paths.tools / "astap"]
+    directories = [paths.tools / "astap", Path("/opt/astap")]
     if astap is not None:
         directories.insert(0, astap.parent)
     for directory in directories:
-        candidate = directory / DCRAW_EXE
-        if candidate.is_file():
-            return candidate
+        for name in _DCRAW_NAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    for name in _DCRAW_NAMES:
+        if found := shutil.which(name):
+            return Path(found)
     return None
 
 

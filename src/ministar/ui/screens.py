@@ -27,7 +27,7 @@ from nicegui import ui
 from nicegui.run import io_bound
 
 from ministar import preflight as preflight_checks
-from ministar import quality
+from ministar import quality, storage
 from ministar import sky as sky_module
 from ministar.camera.base import CameraSettings
 from ministar.catalog import COMMON_TYPES, DEFAULT_TARGET_TYPES, TYPE_LABELS, catalog
@@ -638,19 +638,70 @@ def render_setup(ctx: Context) -> None:
     ).classes("mn-dim")
 
     def set_output_root(event) -> None:
-        text = str(event.value or "").strip()
+        # Store the internal path explicitly too. ``None`` means "no preference yet"
+        # and the render below would immediately default back to the USB stick --
+        # which made tapping "internal storage" appear to do nothing.
+        value = str(event.value or "").strip()
+        ctx.state.output_root = value or None
+        ctx.refresh()
+
+    options = storage.output_options(ctx.settings.paths.output, ctx.state.output_root)
+    drive = next((option for option in options if option.removable and option.writable), None)
+    selected = Path(ctx.state.output_root).expanduser() if ctx.state.output_root else None
+    if selected is None and drive is not None:
+        # A USB stick is the preferred default; internal storage is the fallback.
+        ctx.state.output_root = str(drive.path)
+        selected = drive.path
+    elif (
+        selected is not None
+        and storage.is_removable_path(selected)
+        and not any(option.path == selected for option in options)
+    ):
+        # The saved stick is gone. Prefer another mounted stick over silently
+        # writing into a shadow directory under /media on the SD card.
+        ctx.state.output_root = str(drive.path) if drive is not None else None
+        selected = Path(ctx.state.output_root) if ctx.state.output_root else None
+
+    options = storage.output_options(ctx.settings.paths.output, ctx.state.output_root)
+    current = str(Path(ctx.state.output_root or ctx.settings.paths.output).expanduser())
+    option_map = {str(option.path): option.display for option in options}
+    if current not in option_map:
+        option_map[current] = f"custom: {current}"
+    ui.select(
+        option_map,
+        value=current,
+        label="output folder (USB preferred)",
+        on_change=set_output_root,
+    ).classes("mn-body").style("width: 540px")
+    ui.button("refresh drives", on_click=ctx.refresh).classes("mn-action")
+    if storage.is_removable_path(Path(current)) and not any(
+        option.mounted and option.path == Path(current) for option in options
+    ):
+        ui.label(
+            "that USB drive is not mounted; plug it in, refresh, or choose another folder"
+        ).classes("mn-warn")
+
+    custom = (
+        ui.input(
+            "or type a custom output folder",
+            value=str(ctx.state.output_root or ctx.settings.paths.output),
+        )
+        .classes("mn-body")
+        .style("width: 540px")
+    )
+
+    def use_custom() -> None:
+        text = str(custom.value or "").strip()
         ctx.state.output_root = text or None
+        ctx.refresh()
+
+    ui.button("use typed path", on_click=use_custom).classes("mn-action")
 
     def set_session_name(event) -> None:
         text = str(event.value or "").strip()
         ctx.state.session_name = text or None
         ctx.state.session_name_auto = not text
 
-    ui.input(
-        "output folder",
-        value=str(ctx.state.output_root or ctx.settings.paths.output),
-        on_change=set_output_root,
-    ).classes("mn-body").style("width: 540px")
     ui.input(
         "session folder (blank = automatic)",
         value=ctx.state.session_name or "",
@@ -2154,6 +2205,16 @@ def render_run(ctx: Context) -> None:
             return
         if not ctx.state.exposure_s:
             hint.text = "choose an exposure on PARAMETERS first"
+            return
+        from ministar.storage import StorageError, ensure_output_root
+
+        output_root = Path(
+            os.path.expandvars(str(ctx.state.output_root or ctx.settings.paths.output))
+        ).expanduser()
+        try:
+            ensure_output_root(output_root)
+        except StorageError as exc:
+            hint.text = str(exc)
             return
         model = FieldModel(
             ra_deg=float(ctx.state.pointing_ra_deg),

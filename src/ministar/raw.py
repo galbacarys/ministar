@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from ministar.io.fits import write_fits
@@ -115,33 +116,82 @@ def cards_from_exif(exif: FrameExif, *, pattern: str, source: str) -> dict[str, 
     return cards
 
 
-def convert_to_fits(
+@dataclass(frozen=True)
+class DecodedRaw:
+    """One RAW frame as pixels, plus the CFA pattern and the scratch TIFF if kept."""
+
+    pixels: object
+    pattern: str
+    tiff: Path | None = None
+
+
+def decode_raw(
     raw: Path | str,
-    out: Path | str | None = None,
     *,
     dcraw: Path | str,
+    pattern: str | None = None,
+    keep_tiff: bool = False,
     runner=subprocess.run,
-) -> Path:
-    """Convert one RAW file to FITS beside it (or at ``out``). Returns the FITS path.
+) -> DecodedRaw:
+    """Decode a RAW to an undebayered array, without writing a FITS.
 
-    The intermediate TIFF is removed: it is a means, not an artifact, and leaving it
-    would double the disk cost of a night's frames for no benefit.
+    The live loop does not need a FITS: ASTAP reads the TIFF directly and the stacker
+    wants the array. Writing one per frame cost ~0.7 s and 35 MB for a container that was
+    deleted in the same frame. ``pattern`` is a property of the sensor, so the caller can
+    cache the first answer and avoid the extra ``dcraw -i -v`` pass on every frame.
+
+    ``keep_tiff`` leaves the TIFF in place for a solver that runs after the read; the
+    caller owns deleting it.
     """
-    source = Path(raw)
+    # Resolve first: dcraw runs with cwd=source.parent, so a relative input path
+    # would be looked up *inside* that directory (probe-01/probe-01/frame.cr2).
+    source = Path(raw).resolve()
     if not source.is_file():
         raise FileNotFoundError(source)
     dcraw = Path(dcraw)
-    target = Path(out) if out is not None else source.with_suffix(".fit")
 
-    _run(runner, [str(dcraw), *DCRAW_ARGS, str(source)], source.parent)
+    _run(runner, [str(dcraw), *DCRAW_ARGS, source.name], source.parent)
     produced = _converted_tiff(source)
     if produced is None:
         raise RuntimeError(f"dcraw produced no TIFF beside {source.name}")
 
     try:
-        array = read_tiff_array(produced)
-    finally:
+        pixels = read_tiff_array(produced)
+        resolved_pattern = pattern
+        if resolved_pattern is None:
+            resolved_pattern = bayer_pattern(dcraw=dcraw, raw=source, runner=runner)
+    except Exception:
         produced.unlink(missing_ok=True)
+        raise
+
+    if keep_tiff:
+        return DecodedRaw(pixels=pixels, pattern=resolved_pattern, tiff=produced)
+    produced.unlink(missing_ok=True)
+    return DecodedRaw(pixels=pixels, pattern=resolved_pattern)
+
+
+def convert_to_fits(
+    raw: Path | str,
+    out: Path | str | None = None,
+    *,
+    dcraw: Path | str,
+    pattern: str | None = None,
+    runner=subprocess.run,
+) -> Path:
+    """Convert one RAW file to FITS beside it (or at ``out``). Returns the FITS path.
+
+    The intermediate TIFF is removed: it is a means, not an artifact, and leaving it
+    would double the disk cost of a night's frames for no benefit. This is the offline
+    conversion path; the live loop uses :func:`decode_raw` and keeps the CR2s.
+    """
+    source = Path(raw).resolve()
+    if not source.is_file():
+        raise FileNotFoundError(source)
+    target = Path(out) if out is not None else source.with_suffix(".fit")
+
+    decoded = decode_raw(
+        source, dcraw=dcraw, pattern=pattern, keep_tiff=False, runner=runner
+    )
 
     try:
         exif = read_frame_exif(source)
@@ -150,13 +200,20 @@ def convert_to_fits(
 
     write_fits(
         target,
-        array,
+        decoded.pixels,
         cards_from_exif(
-            exif, pattern=bayer_pattern(dcraw=dcraw, raw=source, runner=runner), source=source.name
+            exif, pattern=decoded.pattern, source=source.name
         ),
         comments=_CARD_COMMENTS,
     )
     return target
 
 
-__all__ = ["DCRAW_ARGS", "bayer_pattern", "cards_from_exif", "convert_to_fits"]
+__all__ = [
+    "DCRAW_ARGS",
+    "DecodedRaw",
+    "bayer_pattern",
+    "cards_from_exif",
+    "convert_to_fits",
+    "decode_raw",
+]

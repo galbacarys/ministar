@@ -18,10 +18,13 @@ Run it::
 from __future__ import annotations
 
 import argparse
+import contextlib
+import math
 import os
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import HTTPException, Request
 from nicegui import app as nicegui_app
@@ -29,7 +32,7 @@ from nicegui import ui
 
 from ministar.config import Settings
 from ministar.rig import RigProfile
-from ministar.session import ORDER, Phase, SessionState
+from ministar.session import ORDER, STATE_FILENAME, Phase, SessionState
 from ministar.ui import screens, statusbar
 from ministar.ui.station import FakeCamera, Station
 from ministar.ui.theme import install
@@ -48,10 +51,63 @@ class App:
 _APP: App | None = None
 
 
+def _session_path(settings: Settings) -> Path:
+    return settings.paths.data / STATE_FILENAME
+
+
+def _save_session(app: App | None) -> None:
+    """Persist the wizard, swallowing disk errors: a full card must not kill teardown."""
+    if app is None:
+        return
+    with contextlib.suppress(OSError):
+        app.session.save(_session_path(app.settings))
+
+
 def _exit_soon() -> None:
     """Let the HTTP response leave before the process does."""
     time.sleep(0.1)
     os._exit(0)
+
+
+def _stop_station() -> None:
+    """Stop the run loop, save the wizard, and release the camera. Idempotent."""
+    from ministar import run as run_loop
+
+    _save_session(_APP)
+    run_loop.stop()
+    if _APP is not None and _APP.station is not None:
+        _APP.station.stop()
+
+
+@nicegui_app.get("/api/status")
+def _status() -> dict[str, object]:
+    """Read-only health for the phone, systemd and a remote developer.
+
+    Deliberately tiny and unauthenticated: it exposes no controls and no user data,
+    only enough to answer "is the process up and does it own the camera?".
+    """
+    app = _APP
+    if app is None:
+        return {"running": False}
+    snap = app.station.snapshot() if app.station is not None else None
+    camera = None
+    if snap is not None:
+        camera = {
+            "name": snap.name,
+            "error": snap.error,
+            "frames": snap.frames,
+            "stars": snap.stars,
+            "hfd": round(snap.hfd, 3) if math.isfinite(snap.hfd) else None,
+            "width": snap.width,
+            "height": snap.height,
+        }
+    return {"running": True, "phase": app.session.phase.name, "camera": camera}
+
+
+# uvicorn turns SIGTERM/Ctrl-C into an ASGI shutdown. Without this hook the process
+# exits with the camera still owned, which is exactly the wedged session the next
+# launch has to recover from.
+nicegui_app.on_shutdown(_stop_station)
 
 
 @nicegui_app.post("/_shutdown")
@@ -68,11 +124,7 @@ def _shutdown(request: Request) -> dict[str, str]:
     client = request.client.host if request.client else ""
     if client not in {"127.0.0.1", "::1", "::ffff:127.0.0.1"}:
         raise HTTPException(status_code=403, detail="local only")
-    from ministar import run as run_loop
-
-    run_loop.stop()
-    if _APP is not None and _APP.station is not None:
-        _APP.station.stop()
+    _stop_station()
     threading.Thread(target=_exit_soon, name="shutdown", daemon=True).start()
     return {"status": "stopping"}
 
@@ -87,12 +139,29 @@ def wizard_page() -> None:
         ui.label("app is not running").classes("mn-warn")
         return
 
+    last_saved = {"payload": app.session.to_dict()}
+
+    def persist() -> None:
+        _save_session(app)
+        last_saved["payload"] = app.session.to_dict()
+
+    def autosave() -> None:
+        payload = app.session.to_dict()
+        if payload != last_saved["payload"]:
+            _save_session(app)
+            last_saved["payload"] = payload
+
+    # Screens mutate the state directly, so a timer is the one place that catches
+    # every change without threading a save call through every callback.
+    ui.timer(2.0, autosave)
+
     def go_back() -> None:
         index = ORDER.index(app.session.phase)
         if index > 0:
             end_run_if_leaving(app)
             app.session.phase = ORDER[index - 1]
             apply_live_view(app)
+            persist()
             content.refresh()
 
     def go_next() -> None:
@@ -102,6 +171,7 @@ def wizard_page() -> None:
         end_run_if_leaving(app)
         app.session.advance()
         apply_live_view(app)
+        persist()
         content.refresh()
 
     @ui.refreshable
@@ -210,10 +280,34 @@ def run(
     port: int = 8080,
     native: bool = False,
     show: bool = True,
+    #: Both or neither. NiceGUI passes these through to uvicorn and switches its own
+    #: websocket protocol to wss, which is what makes geolocation and Wake Lock work.
+    ssl_certfile: str | None = None,
+    ssl_keyfile: str | None = None,
+    #: The plain-HTTP side: CA download, captive probes and an HTTPS redirect.
+    http_port: int | None = None,
+    ca_cert: str | None = None,
 ) -> None:
     global _APP
 
+    if bool(ssl_certfile) != bool(ssl_keyfile):
+        raise ValueError("--ssl-certfile and --ssl-keyfile must be given together")
+    scheme = "https" if ssl_certfile else "http"
+
     settings = Settings.load()
+    settings.paths.ensure()
+    session = SessionState.load(_session_path(settings))
+    if resumed := session.prepare_resume():
+        print(f"session: {resumed}", flush=True)
+
+    if session.output_root is None:
+        # The appliance prefers the stick over the card. If it is not mounted yet at
+        # boot, the SETUP screen rescans when the user opens it.
+        from ministar.storage import default_output_root
+
+        if (usb := default_output_root()) is not None:
+            session.output_root = str(usb)
+            print(f"output: default USB {usb}", flush=True)
 
     fake_rig = RigProfile.fake() if fake else None
     if fake:
@@ -228,10 +322,11 @@ def run(
             "" if catalog is not None else "no ASTAP star database: fake frames cannot be solved"
         )
     else:
-        from ministar.camera import EdsdkCamera
+        from ministar.camera import make_camera
 
-        camera = EdsdkCamera()
-        # Open the session on the pump thread, never here: EDSDK calls only complete on the
+        # Platform choice: EDSDK on Windows, gphoto2 on Linux (MINISTAR_CAMERA overrides).
+        camera = make_camera()
+        # Open the session on the pump thread, never here: camera calls only complete on the
         # thread that opened the session (station.py), and blocking the event loop to connect
         # is how a sleepy body used to freeze the console. A failure shows up on the snapshot.
         connect = camera.connect
@@ -239,14 +334,32 @@ def run(
 
     station = Station(camera, connect=connect, initial_error=initial_error)
     station.start()
-    _APP = App(session=SessionState(), settings=settings, station=station, rig=fake_rig)
+    _APP = App(session=session, settings=settings, station=station, rig=fake_rig)
+
+    landing = None
+    if ssl_certfile and http_port:
+        from ministar.ui.landing import LandingServer
+
+        ca_path = Path(ca_cert) if ca_cert else Path(ssl_certfile).with_name("ca.crt")
+        try:
+            landing = LandingServer(
+                host, http_port, ca_cert=ca_path if ca_path.is_file() else None
+            )
+            landing.start()
+            print(f"landing page on http://<this-machine-ip>:{http_port}/")
+        except OSError as exc:
+            print(f"could not start the HTTP landing page on {http_port}: {exc}")
 
     if host in {"0.0.0.0", "::"}:
         # Say it out loud: binding all interfaces is a deliberate exposure, not a default
         # that quietly happens. There is no login, so the network is the boundary.
-        print(f"serving on all interfaces, port {port} -- no authentication; reach it at")
-        print(f"  http://<this-machine-ip>:{port}/   (Tailscale name or LAN address)")
+        print(
+            f"serving on all interfaces, port {port} ({scheme}) -- no authentication; "
+            "reach it at"
+        )
+        print(f"  {scheme}://<this-machine-ip>:{port}/   (Tailscale name or LAN address)")
 
+    tls = {"ssl_certfile": ssl_certfile, "ssl_keyfile": ssl_keyfile} if ssl_certfile else {}
     try:
         ui.run(
             host=host,
@@ -256,12 +369,15 @@ def run(
             reload=False,
             show=show,
             native=native,
+            **tls,
         )
     finally:
         from ministar import run as run_loop
 
         run_loop.stop()
         station.stop()
+        if landing is not None:
+            landing.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -275,6 +391,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--native", action="store_true", help="pywebview window")
     parser.add_argument("--no-show", action="store_true", help="do not open a browser")
+    parser.add_argument("--ssl-certfile", help="TLS leaf certificate (PEM)")
+    parser.add_argument("--ssl-keyfile", help="TLS leaf key (PEM)")
+    parser.add_argument(
+        "--http-port", type=int, help="plain HTTP landing/CA port (only with TLS)"
+    )
+    parser.add_argument("--ca-cert", help="CA certificate served by the landing page")
     args = parser.parse_args(argv)
     run(
         fake=args.fake,
@@ -282,6 +404,10 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port,
         native=args.native,
         show=not args.no_show,
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
+        http_port=args.http_port,
+        ca_cert=args.ca_cert,
     )
     return 0
 

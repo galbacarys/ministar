@@ -1,0 +1,13 @@
+[Unit]
+Description=Check for an uplink shortly after boot
+Documentation=https://github.com/galbacarys/ministar
+
+[Timer]
+# NetworkManager gets 30 s to associate with a known network before we decide the
+# field case applies. At home the client connects in a few seconds; at a dark site
+# there is nothing to find and the AP comes up.
+OnBootSec=30s
+Unit=ministar-wifi-fallback.service
+
+[Install]
+WantedBy=timers.target

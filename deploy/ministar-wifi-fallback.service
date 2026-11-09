@@ -1,0 +1,10 @@
+[Unit]
+Description=ministar WiFi fallback (AP when no known network)
+Documentation=https://github.com/galbacarys/ministar
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+Environment=MINISTAR_AP_PROFILE=ministar-test-ap
+ExecStart=/usr/local/bin/ministar-wifi-fallback

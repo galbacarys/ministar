@@ -180,6 +180,11 @@ class SessionState:
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
         data["phase"] = self.phase.value
+        # asdict leaves the datetime as an object; JSON cannot encode it, so the
+        # first real save of a solved session would have raised. ISO is the one
+        # representation that survives a round trip and stays readable on disk.
+        solved_at = self.pointing_solved_at
+        data["pointing_solved_at"] = solved_at.isoformat() if solved_at else None
         return data
 
     @classmethod
@@ -190,9 +195,35 @@ class SessionState:
             restored = Phase(str(phase))
         except ValueError:
             restored = Phase.PREFLIGHT
+
+        solved_at = payload.get("pointing_solved_at")
+        if isinstance(solved_at, str):
+            try:
+                payload["pointing_solved_at"] = datetime.fromisoformat(solved_at)
+            except ValueError:
+                payload["pointing_solved_at"] = None
+        elif solved_at is not None:
+            payload["pointing_solved_at"] = None
+
         state = cls(**{k: v for k, v in payload.items() if k in cls.__dataclass_fields__})
         state.phase = restored
         return state
+
+    def prepare_resume(self) -> str:
+        """Adjust a loaded state for a process that no longer owns a RUN loop.
+
+        A RUN restored in a new process would draw a page whose runner does not
+        exist. The honest resume point is POINT: the camera and the site are still
+        configured, the operator can check the aim, and RUN starts a fresh stack.
+        Returns the note to show, or the empty string when nothing was changed.
+        """
+        if self.phase is not Phase.RUN:
+            return ""
+        self.phase = Phase.POINT
+        note = "session restored after a restart; re-point before RUN"
+        if note not in self.advice:
+            self.advice.append(note)
+        return note
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,8 +236,11 @@ class SessionState:
         if not path.is_file():
             return cls()
         try:
-            return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError, TypeError):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return cls()
+            return cls.from_dict(data)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return cls()
 
     # -- display ------------------------------------------------------------
