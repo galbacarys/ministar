@@ -33,15 +33,21 @@ curl -fsSL https://raw.githubusercontent.com/galbacarys/ministar/main/deploy/ins
   | sudo bash -s -- --country US --reboot
 ```
 
-`--country` is required; the WiFi radio and AP need a regulatory domain. Add
-`--reboot` to apply the `cmdline.txt` changes (usbfs memory and the country) in one
-step, or reboot yourself afterwards.
+`--country` is required, and `US` above is only an example. The code is the WiFi
+regulatory domain, not a locale: it decides which channels and transmit power the
+radio may use and whether it may host an access point. A missing or wrong domain can
+stop the AP from starting, or put the device outside local radio rules. There is no
+worldwide default; `00` (the world domain) is rejected. Use the country where the Pi
+will operate.
+
+Add `--reboot` to apply the `cmdline.txt` changes (usbfs memory and the country) in
+one step, or reboot yourself afterwards.
 
 Useful options:
 
 | Option | Meaning |
 |---|---|
-| `--country CC` | WiFi regulatory country, e.g. `US` (required) |
+| `--country CC` | WiFi regulatory country where the Pi will operate, e.g. `US` (required; see above) |
 | `--ap-psk PSK` | AP passphrase, default `ministar`, minimum 8 characters |
 | `--astap-db both\|g05\|d20\|none` | Star databases; default `both` (G05 101 MB + D20 393 MB) |
 | `--ref REF` | Git branch/tag/commit of the app, default `main` |
@@ -58,7 +64,7 @@ The log is `/var/log/ministar-install.log`.
 - ASTAP `astap_cli` + G05/D20 in `/opt/astap`
 - a `ministar` system user, `/var/lib/ministar`, `/etc/ministar/tls`
 - the app at `/opt/ministar/app` and its venv at `/opt/ministar/venv`
-- hostname `ministar`, avahi, WiFi country
+- hostname `ministar`, avahi, WiFi regulatory country
 - `usbcore.usbfs_memory_mb=256` in `cmdline.txt`
 - a `ministar.service` on **443** with a port-80 landing/CA/captive page
 - a `ministar-<last4 of wlan0 MAC>` AP with PSK `ministar`, not autoconnecting

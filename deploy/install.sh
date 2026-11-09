@@ -51,7 +51,9 @@ usage() {
 Install ministar on a fresh Raspberry Pi OS Lite or Debian 13 arm64 system.
 
 Options:
-  --country CC       WiFi regulatory country (required, e.g. US)
+  --country CC       WiFi regulatory country (required; the country where the Pi
+                     will operate, not a locale). It decides the legal channels,
+                     transmit power and whether the radio may host an AP.
   --ap-psk PSK       AP passphrase (default: ministar; minimum 8 characters)
   --astap-db WHICH   both (default), g05, d20, or none
   --ref REF          git branch/tag/commit of the app (default: main)
@@ -64,6 +66,11 @@ Options:
 
 Environment equivalents: MINISTAR_WIFI_COUNTRY, MINISTAR_AP_PSK,
 MINISTAR_ASTAP_DB, MINISTAR_REF, MINISTAR_REPO.
+
+The country code is required because the WiFi radio's legal channels, power limits
+and AP support come from the regulatory domain. A missing or wrong domain can stop
+the access point from starting, or put the device outside local radio rules. There
+is no worldwide default; `00` (the world domain) is rejected.
 EOF
 }
 
@@ -88,9 +95,10 @@ mkdir -p "$(dirname "$LOG")"
 exec > >(tee -a "$LOG") 2>&1
 trap 'printf "error: failed at line %s. Log: %s\\n" "$LINENO" "$LOG" >&2' ERR
 
-[ -n "$COUNTRY" ] || die "--country is required, for example --country US"
+[ -n "$COUNTRY" ] || die "--country is required: the WiFi regulatory domain decides which channels the radio may use and whether it may host an access point. Use the two-letter code where the Pi will operate, for example US."
 COUNTRY=$(printf '%s' "$COUNTRY" | tr '[:lower:]' '[:upper:]')
 [ "${#COUNTRY}" -eq 2 ] || die "--country must be a two-letter code, for example US"
+[ "$COUNTRY" != "00" ] || die "--country 00 is the world domain, not a country; it can disable the access point. Use the country where the Pi will operate."
 [ "${#AP_PSK}" -ge 8 ] || die "the AP passphrase must be at least 8 characters"
 case "$ASTAP_DB" in both|g05|d20|none) ;; *) die "--astap-db must be both, g05, d20, or none" ;; esac
 
