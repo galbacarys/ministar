@@ -86,6 +86,7 @@ behaviour disagreed, observed behaviour wins and the discrepancy is recorded.
 | 14 | [portability-browser-ui-and-linux-sbc.md](docs/research/14-portability-browser-ui-and-linux-sbc.md) | Browser UI (NiceGUI), libgphoto2 port, SBC deployment. |
 | 15 | [stacking-pipeline-and-calibration.md](docs/research/15-stacking-pipeline-and-calibration.md) | Per-frame accumulator, why no dark library, flats at the end. |
 | 16 | [verified-hardware-eos-60d.md](docs/research/16-verified-hardware-eos-60d.md) | First hardware run: STM focus-by-wire works, 0xA102 is warm-up, HFD fabricates stars. |
+| 17 | [raspberry-pi-port-and-provisioning.md](docs/research/17-raspberry-pi-port-and-provisioning.md) | RPi port scope: gphoto2 backend, systemd/runtime, AP+mDNS fallback, HTTPS/geolocation, prebuilt image vs installer, effort and risks. |
 
 Field notes from real sessions live in [`docs/field-notes/`](docs/field-notes/). The first
 one, [2026-11-07](docs/field-notes/2026-11-07.md), records the first real solve, focus run
