@@ -195,6 +195,10 @@ One-time on the Windows side: `C:\ministar\build\tools\setup.bat`, then
 
 ### Running the app
 
+On a Raspberry Pi, [`deploy/README.md`](deploy/README.md) has the one-command
+installer for Raspberry Pi OS Lite and Debian 13 arm64.
+
+
 ```bash
 ./tools/ui.sh            # sync, then launch the console against the real camera
 ./tools/ui.sh --fake     # synthetic stars, no camera attached

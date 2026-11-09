@@ -12,7 +12,7 @@
 # known network.
 set -eu
 
-PROFILE="${MINISTAR_AP_PROFILE:-ministar-test-ap}"
+PROFILE="${MINISTAR_AP_PROFILE:-ministar-ap}"
 FORCE="${MINISTAR_FORCE_AP:-0}"
 
 log() {

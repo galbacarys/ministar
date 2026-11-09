@@ -1,0 +1,6 @@
+# Mount labelled FAT/exFAT USB sticks as ministar session storage.
+#
+# systemd-mount runs as root from udev; the helper sets uid/gid to the ministar user
+# so the app can write. ext4 is deliberately not matched: its uid/gid options do not
+# exist, and a root-owned mount would be read-only to the service.
+ACTION=="add", SUBSYSTEM=="block", KERNEL=="sd[a-z][0-9]", ENV{ID_FS_USAGE}=="filesystem", ENV{ID_FS_TYPE}=="exfat|vfat", ENV{ID_FS_LABEL}!="", RUN{program}+="/usr/local/sbin/ministar-usb-mount /dev/%k %E{ID_FS_LABEL}"

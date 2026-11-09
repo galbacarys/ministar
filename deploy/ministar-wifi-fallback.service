@@ -6,5 +6,5 @@ Wants=NetworkManager.service
 
 [Service]
 Type=oneshot
-Environment=MINISTAR_AP_PROFILE=ministar-test-ap
+Environment=MINISTAR_AP_PROFILE=ministar-ap
 ExecStart=/usr/local/bin/ministar-wifi-fallback
