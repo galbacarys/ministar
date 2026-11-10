@@ -2020,7 +2020,14 @@ def run_metrics_text(snapshot) -> str:
     ]
     if snapshot.reframe_due_in_s is not None:
         if snapshot.reframe_due_in_s >= 0:
-            lines.append(f"reframe      in {clock_text(snapshot.reframe_due_in_s)}")
+            line = f"reframe      in {clock_text(snapshot.reframe_due_in_s)}"
+            edge = snapshot.reframe_edge_in_s
+            if edge is not None:
+                if edge <= snapshot.reframe_due_in_s + 1.0:
+                    line += "   (object reaches the frame edge)"
+                else:
+                    line += f"   (chosen interval; object edge in {clock_text(edge)})"
+            lines.append(line)
         else:
             lines.append(
                 "reframe      past due: the target is leaving the frame -- stop, re-solve, "
@@ -2273,6 +2280,7 @@ def render_run(ctx: Context) -> None:
                 target_name=ctx.state.target_name or "",
                 target_ra_deg=ctx.state.target_ra_deg,
                 target_dec_deg=ctx.state.target_dec_deg,
+                target_radius_arcmin=target_radius_arcmin(ctx),
             ),
             frames_dir=session_directory(ctx),
             scratch_dir=ctx.settings.paths.scratch,

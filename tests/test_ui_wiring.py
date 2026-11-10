@@ -458,6 +458,42 @@ def test_the_run_hud_reports_the_numbers_the_brief_asks_for() -> None:
     assert "2 bump(s) by re-solving" in text
 
 
+def test_the_run_hud_says_when_the_object_edge_drives_the_countdown() -> None:
+    from ministar.run import RunSnapshot
+    from ministar.stack.stacker import empty_stats
+
+    stats = empty_stats(2592, 1728, 2)
+    text = screens.run_metrics_text(
+        RunSnapshot(
+            state="running",
+            frame=1,
+            stats=stats,
+            reframe_due_in_s=120.0,
+            reframe_edge_in_s=120.0,
+        )
+    )
+    assert "in 2m 00s" in text
+    assert "object reaches the frame edge" in text
+
+
+def test_the_run_hud_shows_the_edge_when_the_interval_is_shorter() -> None:
+    from ministar.run import RunSnapshot
+    from ministar.stack.stacker import empty_stats
+
+    stats = empty_stats(2592, 1728, 2)
+    text = screens.run_metrics_text(
+        RunSnapshot(
+            state="running",
+            frame=1,
+            stats=stats,
+            reframe_due_in_s=120.0,
+            reframe_edge_in_s=600.0,
+        )
+    )
+    assert "chosen interval" in text
+    assert "object edge in 10m 00s" in text
+
+
 def test_the_run_hud_names_an_overdue_reframe_as_overdue() -> None:
     from ministar.run import RunSnapshot
     from ministar.stack.stacker import empty_stats

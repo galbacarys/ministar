@@ -33,6 +33,8 @@ from pathlib import Path
 
 from ministar.camera.base import CameraSettings
 from ministar.io.fits import read_fits
+from ministar.optics import Optics
+from ministar.pointing import frame_advice
 from ministar.run.reframe import Dwell
 from ministar.stack.frames import normalise_bayer
 from ministar.stack.stacker import FrameResult, LiveStack, StackStats, empty_stats
@@ -74,6 +76,9 @@ class RunConfig:
     #: The object, so the preview can centre on it rather than on the shrinking usable area.
     target_ra_deg: float | None = None
     target_dec_deg: float | None = None
+    #: Half the object's long axis. The edge, not the centre, is what leaves the frame, so
+    #: the physical countdown has to budget for it. Zero for a point source.
+    target_radius_arcmin: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,12 @@ class RunSnapshot:
     error: str = ""
     warning: str = ""
     elapsed_s: float = 0.0
+    #: Time until the next reframe: the chosen interval, or the object reaching the frame
+    #: edge from where it actually is, whichever comes first.
     reframe_due_in_s: float | None = None
+    #: Physical time until the object reaches the frame edge, if the target is known.
+    #: When this is shorter than the chosen interval it is what ``reframe_due_in_s`` counts.
+    reframe_edge_in_s: float | None = None
     frames_dir: str = ""
     kept_frames: int = 0
     #: Bumps detected and recovered by re-solving the offending frame.
@@ -161,6 +171,12 @@ class Runner:
         #: Monotonic start of the current reframe interval. Reset by a pause/resume and by
         #: every reframe, which is what makes the bar start over after a re-point.
         self._interval_started: float | None = None
+        #: The countdown's denominator: the chosen interval clamped by the object's own
+        #: travel across the frame. ``None`` means no reframe is scheduled.
+        self._reframe_window_s: float | None = None
+        #: Physical seconds to the edge at the interval's start; counted down alongside the
+        #: chosen interval so the HUD can say which one is in charge.
+        self._physical_edge_s: float | None = None
         #: The last decoded frame's dimensions, so a re-solve can be turned into a model that
         #: matches the accumulator's grid rather than the rig file's idea of it.
         self._shape: tuple[int, int] | None = None
@@ -186,7 +202,7 @@ class Runner:
             self._frames_dir = self._temp_dir
         self._apply_camera_settings()
         self._started_at = time.monotonic()
-        self._interval_started = self._started_at
+        self._restart_interval()
         with self._lock:
             self._state = "running"
         self._thread = threading.Thread(target=self._loop, name="ministar-run", daemon=True)
@@ -239,6 +255,7 @@ class Runner:
                 height_px=self._shape[0],
                 epoch=self._clock(),
             )
+            self._model = model
             try:
                 self._stack.rebase(model)
                 rebased = True
@@ -258,12 +275,61 @@ class Runner:
         self._interval_started = time.monotonic()
         self.reframe_since = None
         self.reframe_dwell.reset()
+        self._physical_edge_s = self._edge_seconds()
+        interval = self._config.reframe_interval_s
+        if not interval:
+            self._reframe_window_s = None
+        elif self._physical_edge_s is None:
+            self._reframe_window_s = float(interval)
+        else:
+            # The chosen interval is a cadence; the object leaving the frame is a fact.
+            # Follow whichever arrives first instead of pretending the schedule is true.
+            self._reframe_window_s = min(float(interval), self._physical_edge_s)
+
+    def _edge_seconds(self) -> float | None:
+        """Physical seconds until the target reaches the frame edge from where it is now.
+
+        This is the same ``frame_advice`` the POINT page shows as "drift ahead": it starts
+        from the solved pointing (advanced to now) and the target's actual position in the
+        frame, so the countdown does not assume the user is exactly on the entry marker.
+        """
+        ra = self._config.target_ra_deg
+        dec = self._config.target_dec_deg
+        if ra is None or dec is None:
+            return None
+        model = self._model
+        optics = Optics(
+            width_px=model.width_px,
+            height_px=model.height_px,
+            plate_scale_arcsec=model.plate_scale_arcsec,
+            source="run model",
+        )
+        # At the pole translation vanishes; there is no finite edge time to report.
+        if optics.drift_arcsec_per_s(float(dec)) <= 1e-9:
+            return None
+        # The fixed frame's centre RA advances with the sky. FieldModel.rotation_deg is the
+        # opposite sign (it maps an epoch pixel's current sky), hence the minus.
+        centre_ra = model.ra_deg - model.rotation_deg(self._clock())
+        try:
+            advice = frame_advice(
+                ra_deg=centre_ra,
+                dec_deg=model.dec_deg,
+                target_ra_deg=float(ra),
+                target_dec_deg=float(dec),
+                optics=optics,
+                pa_y_deg=model.pa_y_deg,
+                target_radius_arcmin=float(self._config.target_radius_arcmin),
+            )
+        except Exception:
+            # A countdown must never take the run down; without it the interval still does.
+            return None
+        return max(0.0, float(advice.minutes_now) * 60.0)
 
     def _reframe_due(self) -> bool:
-        interval = self._config.reframe_interval_s
-        if not interval or self._interval_started is None:
+        window = self._reframe_window_s
+        if window is None or self._interval_started is None:
             return False
-        return time.monotonic() - self._interval_started >= interval
+        return time.monotonic() - self._interval_started >= window
 
     def _enter_reframe(self) -> None:
         with self._lock:
@@ -318,15 +384,18 @@ class Runner:
             started = self._started_at
             since = self.reframe_since
             interval_started = self._interval_started
+            window = self._reframe_window_s
+            edge = self._physical_edge_s
         elapsed = max(0.0, time.monotonic() - started) if started is not None else 0.0
-        interval = self._config.reframe_interval_s
-        if interval and interval_started is not None:
+        if window is not None and interval_started is not None:
             into_interval = max(0.0, time.monotonic() - interval_started)
-            due = interval - into_interval
-            progress = min(1.0, into_interval / interval)
+            due = window - into_interval
+            progress = min(1.0, into_interval / window) if window > 0 else 1.0
+            edge_in = max(0.0, edge - into_interval) if edge is not None else None
         else:
             due = None
             progress = 0.0
+            edge_in = None
         return RunSnapshot(
             state=state,
             frame=frame,
@@ -336,6 +405,7 @@ class Runner:
             warning=warning,
             elapsed_s=elapsed,
             reframe_due_in_s=due,
+            reframe_edge_in_s=edge_in,
             reframe_progress=progress,
             reframe_since=since,
             target_known=(

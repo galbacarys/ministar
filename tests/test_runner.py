@@ -155,6 +155,67 @@ def test_the_reframe_countdown_is_reported_when_one_was_chosen(sky, tmp_path) ->
         runner.stop()
 
 
+def test_the_countdown_is_the_object_edge_when_it_comes_first(sky, tmp_path) -> None:
+    """The chosen interval is a cadence, not the truth: the target's position decides.
+
+    At 135 mm the fake frame gives the target ~2.6 min from the centre to the edge. Asking
+    for a one-hour interval must still count down that edge time, not 60:00.
+    """
+    ra, dec = sky.camera.pointing
+    runner = Runner(
+        capture=sky.camera.capture_to,
+        camera=sky.camera,
+        model=sky.model,
+        config=RunConfig(
+            exposure_s=0.02,
+            bin_factor=2,
+            keep_frames=False,
+            reframe_interval_s=3600.0,
+            target_ra_deg=ra,
+            target_dec_deg=dec,
+        ),
+        frames_dir=tmp_path / "frames",
+        scratch_dir=tmp_path / "scratch",
+        clock=lambda: sky.when,
+    )
+    try:
+        runner.start()
+        snapshot = runner.snapshot()
+        assert snapshot.reframe_edge_in_s is not None
+        assert 120.0 < snapshot.reframe_edge_in_s < 200.0
+        assert snapshot.reframe_due_in_s is not None
+        assert abs(snapshot.reframe_due_in_s - snapshot.reframe_edge_in_s) < 2.0
+    finally:
+        runner.stop()
+
+
+def test_the_loop_reframes_when_the_object_reaches_the_edge(sky, tmp_path) -> None:
+    """A target already outside the frame makes the physical window zero, so no frame runs."""
+    ra, dec = sky.camera.pointing
+    runner = Runner(
+        capture=sky.camera.capture_to,
+        camera=sky.camera,
+        model=sky.model,
+        config=RunConfig(
+            exposure_s=0.02,
+            bin_factor=2,
+            keep_frames=False,
+            reframe_interval_s=3600.0,
+            target_ra_deg=ra + 1.0,
+            target_dec_deg=dec,
+        ),
+        frames_dir=tmp_path / "frames",
+        scratch_dir=tmp_path / "scratch",
+        clock=lambda: sky.when,
+    )
+    try:
+        runner.start()
+        wait_until(lambda: runner.snapshot().state == "reframe", timeout=5)
+        assert runner.snapshot().frame == 0
+    finally:
+        runner.stop()
+
+
 def test_without_an_interval_there_is_no_countdown(sky, tmp_path) -> None:
     runner = make_runner(sky, tmp_path)
     runner.start()

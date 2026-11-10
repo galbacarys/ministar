@@ -216,6 +216,9 @@ class LiveStack:
             else None
         )
         self._crop: tuple[int, int, int, int] | None = None
+        #: Set with the crop in ``_preview``; initialised so ``stats()`` is safe before the
+        #: first preview has been rendered (a rejected first frame can leave ``_crop`` unset).
+        self._crop_rule = "usable"
         self.stretch_after = int(stretch_after)
 
         self._sigma = float(sigma)
