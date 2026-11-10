@@ -41,7 +41,7 @@ the Raspberry Pi is the field appliance.
 The MVP packaging is a single idempotent script that turns a fresh **Raspberry Pi OS
 Lite 64-bit Trixie** (or Debian 13 arm64) system into the appliance. It installs the
 camera stack, ASTAP + G05/D20, the app, a per-device CA/leaf, the access point and
-fallback, the systemd unit, and USB auto-mount.
+boot-mode (one-shot WLAN), the systemd unit, and USB auto-mount.
 
 ### 1. Flash and boot
 
@@ -49,8 +49,10 @@ Use Raspberry Pi Imager:
 
 - Raspberry Pi OS Lite, **64-bit, Trixie**
 - enable SSH
-- set a user and password
-- set WiFi if you want the Pi on your home network (optional; the AP works without it)
+- set a login user and password (use `astroberry` or `pi`, not `ministar`; the installer
+  creates a system `ministar` account for the service)
+- optionally set WiFi in Imager: it is kept as a client profile for the SETUP
+  "reboot in WLAN mode" one-shot, but every normal boot still starts the AP
 - set the WiFi country in Imager, or pass the same code to the installer
 
 ### 2. Install

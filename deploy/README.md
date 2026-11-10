@@ -2,7 +2,8 @@
 
 This is the MVP appliance path: a fresh Raspberry Pi OS Lite (or Debian 13 arm64)
 system, one script, then the console is served over HTTPS with its own access point
-when the Pi has no known network.
+on every boot. A one-shot request from SETUP can use a known WiFi for the next boot
+only.
 
 The image build will call the same provisioning steps later. The script is
 idempotent: re-running it updates the checkout and the units while preserving
@@ -11,7 +12,8 @@ idempotent: re-running it updates the checkout and the units while preserving
 ## Before you start
 
 - Raspberry Pi OS Lite **64-bit Trixie**, or Debian 13 arm64 on a Pi.
-- SSH enabled and the Pi on a network with internet access (Imager can set this up).
+- SSH enabled and the Pi on a network with internet access. Ethernet is simplest;
+  Imager's WiFi profile is only used by the one-shot WLAN boot after installation.
 - A camera is optional at install time; connect the EOS body when you are ready.
 - Do not run this on the existing astroberry development Pi. It refuses when it
   finds that unit, because the dev service already owns ports 80/443 and the camera.
