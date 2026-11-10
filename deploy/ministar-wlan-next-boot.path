@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch for a one-shot WLAN boot request
+Documentation=https://github.com/galbacarys/ministar
+After=ministar-boot-mode.service
+
+[Path]
+PathExists=/var/lib/ministar/wlan-next-boot
+Unit=ministar-wlan-next-boot.service
+
+[Install]
+WantedBy=paths.target

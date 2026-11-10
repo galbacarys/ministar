@@ -1,0 +1,15 @@
+[Unit]
+Description=ministar boot mode (AP default, one-shot WLAN)
+Documentation=https://github.com/galbacarys/ministar
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=ministar.service
+
+[Service]
+Type=oneshot
+Environment=MINISTAR_HOME=/var/lib/ministar
+Environment=MINISTAR_AP_PROFILE=ministar-ap
+ExecStart=/usr/local/sbin/ministar-boot-mode
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+[Unit]
+Description=Reboot into one-shot WLAN mode
+Documentation=https://github.com/galbacarys/ministar
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl reboot

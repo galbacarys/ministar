@@ -23,7 +23,6 @@ TLS_DIR=$ETC/tls
 AP_PROFILE=ministar-ap
 HOSTNAME=ministar
 SERVICE=ministar.service
-FALLBACK=ministar-wifi-fallback
 LOG=/var/log/ministar-install.log
 
 REPO=${MINISTAR_REPO:-https://github.com/galbacarys/ministar.git}
@@ -263,7 +262,7 @@ if [ -e /sys/class/net/wlan0 ]; then
     SSID="ministar-$SUFFIX"
     nmcli connection delete "$AP_PROFILE" >/dev/null 2>&1 || true
     nmcli connection add type wifi ifname wlan0 con-name "$AP_PROFILE" ssid "$SSID" \
-        autoconnect no \
+        autoconnect yes connection.autoconnect-priority 100 \
         802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 \
         ipv4.method shared ipv4.addresses 10.42.0.1/24 \
         wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$AP_PSK"
@@ -275,17 +274,17 @@ fi
 
 log "installing services and the USB auto-mount rule"
 install -m 0644 "$APP_SRC/deploy/ministar.service" /etc/systemd/system/ministar.service
-install -m 0755 "$APP_SRC/deploy/ministar-wifi-fallback.sh" /usr/local/bin/ministar-wifi-fallback
-install -m 0644 "$APP_SRC/deploy/ministar-wifi-fallback.service" /etc/systemd/system/ministar-wifi-fallback.service
-install -m 0644 "$APP_SRC/deploy/ministar-wifi-fallback.timer" /etc/systemd/system/ministar-wifi-fallback.timer
+install -m 0755 "$APP_SRC/deploy/ministar-boot-mode.sh" /usr/local/sbin/ministar-boot-mode
+install -m 0644 "$APP_SRC/deploy/ministar-boot-mode.service" /etc/systemd/system/ministar-boot-mode.service
+install -m 0644 "$APP_SRC/deploy/ministar-wlan-next-boot.path" /etc/systemd/system/ministar-wlan-next-boot.path
+install -m 0644 "$APP_SRC/deploy/ministar-wlan-next-boot.service" /etc/systemd/system/ministar-wlan-next-boot.service
 install -m 0755 "$APP_SRC/deploy/ministar-usb-mount.sh" /usr/local/sbin/ministar-usb-mount
 install -m 0644 "$APP_SRC/deploy/99-ministar-usb.rules" /etc/udev/rules.d/99-ministar-usb.rules
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=block || true
 systemctl daemon-reload
-systemctl enable "$SERVICE" >/dev/null
+systemctl enable "$SERVICE" ministar-boot-mode.service ministar-wlan-next-boot.path >/dev/null
 systemctl restart "$SERVICE" || true
-systemctl enable --now "$FALLBACK.timer" >/dev/null 2>&1 || true
 sleep 2
 if ! systemctl is-active --quiet "$SERVICE"; then
     journalctl -u "$SERVICE" -n 20 --no-pager || true

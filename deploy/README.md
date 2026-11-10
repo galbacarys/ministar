@@ -67,21 +67,27 @@ The log is `/var/log/ministar-install.log`.
 - hostname `ministar`, avahi, WiFi regulatory country
 - `usbcore.usbfs_memory_mb=256` in `cmdline.txt`
 - a `ministar.service` on **443** with a port-80 landing/CA/captive page
-- a `ministar-<last4 of wlan0 MAC>` AP with PSK `ministar`, not autoconnecting
-- the 30 s AP fallback timer
+- a `ministar-<last4 of wlan0 MAC>` AP as the **on-boot default**, PSK `ministar`
+- a one-shot `wlan-next-boot` path unit and the SETUP "reboot in WLAN mode" button:
+  the next boot joins the known WiFi client, and the boot after returns to AP
+- a boot-mode service that selects AP or WLAN before the console starts
 - a udev rule that auto-mounts labelled FAT/exFAT USB sticks under `/media/<label>`
   and makes the `ministar` user their owner
 - `/boot/firmware/MINISTAR.txt` with the SSID, PSK, URL and CA fingerprint
 
 ## After the reboot
 
-If the Pi found a known WiFi network it joins it; otherwise the fallback starts the
-access point after 30 seconds.
+The Pi boots into **AP mode by default**. It does not join a known WiFi automatically.
+The SETUP screen has **"reboot in WLAN mode"**: it writes a one-shot flag, reboots,
+and the next boot joins the known WiFi client. The flag is consumed at boot, so the
+boot after returns to AP.
 
 - **AP:** `ministar-xxxx` / `ministar` (the exact SSID is in `MINISTAR.txt`)
 - **Console:** `https://ministar.local` (or `https://10.42.0.1` on the AP)
 - **Plain HTTP:** `http://ministar.local` redirects to HTTPS and serves the CA
 - **CA:** `http://10.42.0.1/ca.crt`
+- **WLAN one-shot:** the next boot joins the known WiFi, the AP is down, and the
+  console is at the Pi's LAN address; the following boot returns to AP
 
 The browser will warn because this is a per-device, self-signed CA. You can continue
 once (geolocation still works after that), or install the CA for a clean experience:
@@ -93,6 +99,10 @@ once (geolocation still works after that), or install the CA for a clean experie
 
 The certificate's SANs include `ministar.local`, `ministar`, `10.42.0.1`,
 `127.0.0.1` and the Pi's current IPv4 addresses.
+
+**Phone VPN note:** Tailscale or another VPN on the phone can intercept `.local` and
+local-network traffic. Turn it off while using the console; the Pi's own Tailscale
+can stay for remote administration.
 
 ## USB storage
 
@@ -126,12 +136,18 @@ journalctl -t ministar-usb
 lsblk -f
 ```
 
-If the AP does not appear, check the country (`iw reg get`), that `wlan0` is not
-blocked (`rfkill list`), and that the profile exists:
+If the AP does not appear, check the boot-mode log and the profile:
 
 ```bash
+journalctl -u ministar-boot-mode -b
+systemctl status ministar-boot-mode
 nmcli connection show ministar-ap
+iw reg get
+rfkill list
 ```
+
+If a one-shot WLAN boot was requested and the known WiFi is not in range, that boot
+has no AP; reboot once more to return to the AP default.
 
 If the camera is missing, check the USB cable and mode, then:
 

@@ -709,6 +709,35 @@ def render_setup(ctx: Context) -> None:
         on_change=set_session_name,
     ).classes("mn-body").style("width: 540px")
 
+    ui.label("Boot mode").classes("mn-heading")
+    ui.label(
+        "AP is the default on boot. This button sets a one-shot flag: the next boot "
+        "joins the known WiFi instead, and the boot after that returns to the AP."
+    ).classes("mn-dim")
+    wlan_flag = ctx.settings.paths.home / "wlan-next-boot"
+    if wlan_flag.is_file():
+        ui.label("next boot: WLAN (one shot)").classes("mn-warn")
+
+    def request_wlan() -> None:
+        wlan_flag.parent.mkdir(parents=True, exist_ok=True)
+        wlan_flag.write_text("wlan\n", encoding="utf-8")
+
+    def confirm_wlan() -> None:
+        with ui.dialog() as dialog, ui.card():
+            ui.label(
+                "Reboot into WLAN mode for the next boot only? The boot after "
+                "returns to the AP."
+            ).classes("mn-body")
+            with ui.row():
+                ui.button("cancel", on_click=dialog.close).classes("mn-action")
+                ui.button(
+                    "reboot",
+                    on_click=lambda: (request_wlan(), dialog.close()),
+                ).classes("mn-action")
+        dialog.open()
+
+    ui.button("reboot in WLAN mode", on_click=confirm_wlan).classes("mn-action")
+
     ui.label("Tripod head").classes("mn-heading")
     _not_implemented("Head calibration profiles", "13-head-calibration.md")
 

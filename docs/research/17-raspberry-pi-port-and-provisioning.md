@@ -189,7 +189,7 @@ These are the M0 questions; none can be answered by reading:
 /opt/ministar/            app + venv (read-only to the service)
 /var/lib/ministar/        config, sessions, logs on SD (small, write-light)
 /media/ministar/          USB SSD, label MINISTAR-DATA (frames)
-/etc/ministar/            field-mode flag, image version
+/etc/ministar/            image version
 /etc/ministar/tls/        per-device CA + leaf key/cert (0700, not in the image)
 ```
 
@@ -269,24 +269,30 @@ One radio, so client and AP are **mutually exclusive**. Do not promise concurren
 
 ```
 boot
- ├─ NetworkManager tries known client profiles (autoconnect-priority 100)
- ├─ 20 s timer: no default route?  → activate ministar-ap
- └─ if a known profile appears later → stay on AP; offer "join home" in the UI
+ ├─ ministar-boot-mode: no wlan-next-boot flag?
+ │   ├─ yes → disable known client WiFi profiles, up ministar-ap   (AP default)
+ │   └─ no  → consume the flag, enable the known client profile, up it (WLAN one-shot)
+ └─ the following boot has no flag → AP default again
 ```
 
-- `ministar-wifi-fallback.service` (oneshot, `After=NetworkManager-wait-online.service`) checks
-  `nmcli -t -f GENERAL.STATE dev show wlan0`; if not connected, `nmcli con up ministar-ap`.
-- **Field mode** (`/etc/ministar/field-mode`) skips the 20 s wait and goes straight to AP. At a dark
-  site there is no home network, and 20 s of scanning at every boot is pure annoyance. Toggle from
-  the device page.
+- **AP is the on-boot default.** The boot-mode service disables the client WiFi profiles and
+  activates `ministar-ap` before the console starts. This is the field-safe default: the phone
+  always knows the network.
+- **`ministar-wlan-next-boot.path`** watches a flag written by the SETUP screen's **"reboot in
+  WLAN mode"** button. The path unit reboots, the boot-mode consumes the flag, enables the known
+  client profile and leaves the AP down for that boot. The following boot returns to AP.
+- The old 20 s field-mode fallback timer is gone; it made the field behaviour depend on whether a
+  home network happened to be in range.
 - Set the WiFi country (`raspi-config nonint do_wifi_country`) at first boot. An unset country can
   leave the radio/AP disabled.
 
 ### 6.2 AP profile
 
 ```bash
+MAC=$(cat /sys/class/net/wlan0/address)
+SUFFIX=$(printf '%s' "$MAC" | tr -d ':' | tail -c 4)
 nmcli con add type wifi ifname wlan0 con-name ministar-ap \
-  ssid "ministar-$(cat /sys/class/net/wlan0/address | tr -d ':' | tail -c 5)" autoconnect no \
+  ssid "ministar-$SUFFIX" autoconnect yes connection.autoconnect-priority 100 \
   802-11-wireless.mode ap 802-11-wireless.band bg \
   ipv4.method shared ipv4.addresses 10.42.0.1/24 \
   wifi-sec.key-mgmt wpa-psk wifi-sec.psk ministar
@@ -424,8 +430,9 @@ the two drift, the installer is the one to trust.
 
 1. Flash `ministar-pi-<ver>.img.xz` with Raspberry Pi Imager (or run `curl … | sudo bash` on a
    fresh Lite install).
-2. Optionally, Imager's own customisation pre-sets WiFi; it writes a NetworkManager client profile
-   itself, and firstboot detects that instead of re-reading it. No profile → AP mode.
+2. Optionally, Imager's customisation writes a NetworkManager client profile. The boot default is
+   still AP; the SETUP "reboot in WLAN mode" uses that client for exactly one boot, then AP
+   returns. No client profile means the WLAN one-shot has no network.
 3. Insert the card, connect the camera, power on.
 4. Boot to serving in **≤ 40 s**; the camera connects when it is ready, not as a boot gate.
 5. Phone: join `ministar-<id>` (PSK `ministar`, shown on the label / `MINISTAR.txt`). The captive sheet opens the plain
@@ -486,7 +493,7 @@ Never install app updates from the open internet while the only network is the A
 
 - **Session persistence** (already pending) becomes a prerequisite: restarts, reflashes and updates
   all assume the wizard can resume.
-- **Device page:** network mode + scanner, field-mode toggle, time sync, storage, power, logs
+- **Device page:** network mode, one-shot WLAN button, time sync, storage, power, logs
   download, version, update.
 - **Red-only theme and large touch targets** (14 §6) are a requirement, not a polish item.
 - **Status bar:** network mode, AP SSID, disk free, undervoltage/throttle, camera temperature, solve
@@ -552,7 +559,7 @@ The app is unprivileged. Put root actions behind a small root-owned helper on
 | J. TLS, certificate generation, landing server, geolocation | 3–5 |
 | **Total** | **39–62** |
 
-- **MVP (12–17 d):** backend + seams + systemd on stock Lite + AP fallback + avahi + `install.sh`
+- **MVP (12–17 d):** backend + seams + systemd on stock Lite + AP default/one-shot WLAN + avahi + `install.sh`
   + self-signed TLS and a working location button. No custom image, no portal, no device page.
   Enough for the user's own Pi this month.
 - **v1 (the rest):** prebuilt image, firstboot, portal, helper, device UI, CI/HIL.
@@ -590,7 +597,8 @@ The app is unprivileged. Put root actions behind a small root-owned helper on
 4. **AP security:** WPA2 + fixed PSK `ministar` (decided for appliance ease of use), with a
    `ministar-<mac4>` SSID; open + captive portal was rejected.
 5. **Port:** 80 with `CAP_NET_BIND_SERVICE` (recommended) or 8080.
-6. **Field mode:** explicit toggle (recommended) or always wait 20 s for a known network.
+6. **Boot network mode:** AP default on boot, with a one-shot WLAN button for the next boot
+   only (decided).
 7. **Frames filesystem:** ext4 (recommended) or exFAT for Windows readability.
 8. **Updates:** reflash (recommended) or USB update package in v1.
 9. **Device UI scope for v1:** network + power + storage only, or the full settings page.
@@ -625,7 +633,8 @@ deploy/
   provision.sh            the shared core (apt, venv, units, profiles, ASTAP, SSD)
   install.sh              curl|bash wrapper for stock RPi OS Lite
   firstboot.sh
-  ministar-wifi-fallback.sh
+  ministar-boot-mode.sh
+  ministar-wlan-next-boot.path
   helper/                 the root socket helper
 image/
   ministar.yaml           rpi-image-gen config
@@ -633,7 +642,8 @@ image/
 systemd/
   ministar.service
   ministar-firstboot.service
-  ministar-wifi-fallback.service
+  ministar-boot-mode.service
+  ministar-wlan-next-boot.service
   ministar-health.timer
 network/
   ministar-ap.nmconnection
@@ -673,7 +683,7 @@ systemctl enable --now avahi-daemon
 # AP:
 nmcli con add type wifi ifname wlan0 con-name ministar-ap \
   ssid "ministar-$(cat /sys/class/net/wlan0/address | tr -d ':' | tail -c 5)" \
-  autoconnect no 802-11-wireless.mode ap 802-11-wireless.band bg \
+  autoconnect yes connection.autoconnect-priority 100 802-11-wireless.mode ap 802-11-wireless.band bg \
   ipv4.method shared ipv4.addresses 10.42.0.1/24 \
   wifi-sec.key-mgmt wpa-psk wifi-sec.psk ministar
 

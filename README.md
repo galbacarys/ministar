@@ -93,14 +93,19 @@ logs to `/var/log/ministar-install.log`. Full options and troubleshooting are in
 
 ### 3. After the reboot
 
-If the Pi finds a known WiFi network it joins it. If not, the fallback starts the
-access point about 30 seconds after boot:
+The Pi boots into **AP mode by default**. It does not join a known WiFi automatically.
+The SETUP screen has **"reboot in WLAN mode"**: that writes a one-shot flag, reboots,
+and the next boot joins the known WiFi client instead. The flag is consumed at boot,
+so the boot after that returns to AP.
 
 - **AP:** `ministar-xxxx`, where `xxxx` is the last four hex digits of `wlan0`
 - **PSK:** `ministar` (fixed by decision; the AP is the security boundary)
 - **Console:** `https://ministar.local` (or `https://10.42.0.1` on the AP)
 - **Card file:** `/boot/firmware/MINISTAR.txt` has the exact SSID, PSK, URL and CA
   fingerprint; readable on a PC
+- **WLAN one-shot:** the next boot joins the known WiFi, the AP is down, and the
+  console is at the Pi's LAN address (or `ministar.local`); the following boot
+  returns to AP
 
 The first HTTPS visit warns because the device has its own CA. You can continue once
 -- geolocation still works -- or install the CA for a clean experience:
@@ -110,11 +115,12 @@ The first HTTPS visit warns because the device has its own CA. You can continue 
 - **Android:** download the same file, then Settings -> Security -> Encryption &
   credentials -> Install a certificate -> CA certificate. Restart Chrome if needed.
 
-If the phone cannot resolve `.local`, use `https://10.42.0.1`.
+If the phone cannot resolve `.local`, use `https://10.42.0.1` on the AP. On a WLAN
+boot use the Pi's LAN address from `hostname -I`.
 
-The AP fallback is **boot-only**. If the Pi is already running at home and you drive
-to a dark site, reboot it there so it looks for a known network and falls back to the
-AP.
+**Phone VPN note:** Tailscale or another VPN on the phone can intercept `.local` and
+local-network traffic. Turn it off while using the console; the Pi's own Tailscale
+can stay for remote administration.
 
 ### USB storage
 
@@ -240,7 +246,7 @@ is the packaging MVP; the first fresh-image run is the current validation step.
 | Exposure limits | Trail, NPF and 500-rule shown side by side |
 | Session state | Wizard guards plus `session.json` persistence; RUN resumes at POINT after a restart |
 | UI | NiceGUI wizard over HTTPS, red-on-black, phone-friendly |
-| Pi appliance | systemd, WPA2 AP + 30 s boot fallback, avahi `ministar.local`, per-device CA/leaf, port-80 landing/CA page |
+| Pi appliance | systemd, AP default on boot, one-shot WLAN button, avahi `ministar.local`, per-device CA/leaf, port-80 landing/CA page |
 | USB output | exFAT/FAT auto-mount, default output selection, mount-safe validation |
 | Tests | 718 locally; 716 pass on the Pi with 2 skips |
 
